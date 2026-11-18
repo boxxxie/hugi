@@ -16,6 +16,7 @@ Pooled_Record :: struct {
 	full_name:          string,
 	run_count:          int,
 	run_ids:            [dynamic]string,
+	timestamp_unix:     i64,
 	ops_per_sample:     u64,
 	samples:            int,
 	min_fs:             i64,
@@ -86,6 +87,182 @@ _samples_fs_as_f64 :: proc(src: []i64, allocator := context.temp_allocator) -> [
 	return out
 }
 
+@(private = "file", require_results)
+_pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Pooled_Record {
+	last := g.records[len(g.records) - 1]
+	first_ops := g.records[0].ops_per_sample
+	same_ops := true
+	pooled_fs := make([dynamic]i64, allocator)
+	pooled_batches := make([dynamic]u64, allocator)
+	footprint := last.footprint_bytes
+	sum_allocs := 0.0
+	sum_resizes := 0.0
+	sum_alloc_bytes := 0.0
+	sum_temp_allocs := 0.0
+	sum_temp_bytes := 0.0
+	max_peak := last.peak_heap_bytes
+
+	for &rec in g.records {
+		if rec.ops_per_sample != first_ops {
+			same_ops = false
+		}
+		if len(rec.samples_batch_ns) > 0 {
+			ops := max(rec.ops_per_sample, 1)
+			for b in rec.samples_batch_ns {
+				append(&pooled_fs, hugi.batch_ns_to_op_fs(b, ops))
+			}
+			if same_ops {
+				append(&pooled_batches, ..rec.samples_batch_ns[:])
+			}
+		} else if rec.p50_fs > 0 {
+			append(&pooled_fs, rec.p50_fs)
+			same_ops = false
+		}
+		if rec.footprint_bytes > footprint {
+			footprint = rec.footprint_bytes
+		}
+		if rec.peak_heap_bytes > max_peak {
+			max_peak = rec.peak_heap_bytes
+		}
+		sum_allocs += rec.allocs_per_op
+		sum_resizes += rec.resizes_per_op
+		sum_alloc_bytes += rec.alloc_bytes_per_op
+		sum_temp_allocs += rec.temp_allocs_per_op
+		sum_temp_bytes += rec.temp_bytes_per_op
+	}
+	if !same_ops {
+		clear(&pooled_batches)
+	}
+
+	n_recs := f64(len(g.records))
+	run_ids := make([dynamic]string, len(g.run_ids), allocator)
+	for rid, i in g.run_ids {
+		run_ids[i] = strings.clone(rid, allocator)
+	}
+
+	metrics := make([dynamic]hugi.Metric, len(last.metrics), allocator)
+	for m, i in last.metrics {
+		metrics[i] = hugi.Metric {
+			unit  = strings.clone(m.unit, allocator),
+			value = m.value,
+		}
+	}
+
+	pr := Pooled_Record {
+		rank               = last.rank,
+		commit             = strings.clone(g.commit, allocator),
+		lang               = strings.clone(g.lang, allocator),
+		suite_name         = strings.clone(g.suite_name, allocator),
+		group_name         = strings.clone(last.group_name, allocator),
+		name               = strings.clone(last.name, allocator),
+		full_name          = strings.clone(g.full_name, allocator),
+		run_count          = len(g.run_ids),
+		run_ids            = run_ids,
+		timestamp_unix     = g.timestamp_unix,
+		ops_per_sample     = last.ops_per_sample,
+		bytes_per_op       = last.bytes_per_op,
+		mb_per_sec         = last.mb_per_sec,
+		median_cycles      = last.median_cycles,
+		footprint_bytes    = footprint,
+		allocs_per_op      = sum_allocs / n_recs,
+		resizes_per_op     = sum_resizes / n_recs,
+		alloc_bytes_per_op = sum_alloc_bytes / n_recs,
+		temp_allocs_per_op = sum_temp_allocs / n_recs,
+		temp_bytes_per_op  = sum_temp_bytes / n_recs,
+		peak_heap_bytes    = max_peak,
+		metrics            = metrics,
+		samples_fs         = pooled_fs,
+		samples_batch_ns   = pooled_batches,
+	}
+
+	if len(pr.samples_fs) > 0 {
+		sorted := slice.clone(pr.samples_fs[:], context.temp_allocator)
+		slice.sort(sorted)
+		n := len(sorted)
+		pr.samples = n
+		pr.min_fs = sorted[0]
+		pr.max_fs = sorted[n - 1]
+		pr.p25_fs = hugi.percentile_sorted_fs(sorted, 25)
+		pr.p50_fs = hugi.percentile_sorted_fs(sorted, 50)
+		pr.p75_fs = hugi.percentile_sorted_fs(sorted, 75)
+		pr.p95_fs = hugi.percentile_sorted_fs(sorted, 95)
+		pr.p99_fs = hugi.percentile_sorted_fs(sorted, 99)
+		pr.iqr_fs = pr.p75_fs - pr.p25_fs
+
+		sum_fs: i128 = 0
+		for v in sorted {
+			sum_fs += i128(v)
+		}
+		pr.mean_fs = i64((sum_fs + i128(n / 2)) / i128(n))
+
+		var_sum := 0.0
+		for v in sorted {
+			d := f64(v - pr.mean_fs)
+			var_sum += d * d
+		}
+		if n > 1 {
+			std_f := math.sqrt(var_sum / f64(n - 1))
+			pr.std_dev_fs = i64(math.round(std_f))
+			pr.ci95_fs = i64(
+				math.round(obench.t_critical_975(f64(n - 1)) * (std_f / math.sqrt(f64(n)))),
+			)
+			if pr.mean_fs > 0 {
+				pr.cv_pct = (std_f / f64(pr.mean_fs)) * 100.0
+			}
+		}
+
+		abs_devs := make([]i64, n, context.temp_allocator)
+		for v, i in sorted {
+			abs_devs[i] = abs(v - pr.p50_fs)
+		}
+		slice.sort(abs_devs)
+		pr.mad_fs = hugi.percentile_sorted_fs(abs_devs, 50)
+
+		delete(abs_devs, context.temp_allocator)
+		delete(sorted, context.temp_allocator)
+
+		if pr.p50_fs > 0 {
+			pr.ops_per_sec = hugi.FS_PER_SEC_F64 / f64(pr.p50_fs)
+			if pr.bytes_per_op > 0 {
+				pr.mb_per_sec = (f64(pr.bytes_per_op) * pr.ops_per_sec) / (1024.0 * 1024.0)
+			}
+		}
+	} else {
+		pr.samples = last.samples
+		pr.min_fs = last.min_fs
+		pr.p25_fs = last.p25_fs
+		pr.p50_fs = last.p50_fs
+		pr.p75_fs = last.p75_fs
+		pr.p95_fs = last.p95_fs
+		pr.p99_fs = last.p99_fs
+		pr.max_fs = last.max_fs
+		pr.mean_fs = last.mean_fs
+		pr.std_dev_fs = last.std_dev_fs
+		pr.ci95_fs = last.ci95_fs
+		pr.cv_pct = last.cv_pct
+		pr.iqr_fs = last.iqr_fs
+		pr.mad_fs = last.mad_fs
+		pr.ops_per_sec = last.items_per_sec
+	}
+
+	return pr
+}
+
+@(private = "file", require_results)
+_pool_raw_groups :: proc(
+	raw_groups: []_Raw_Group,
+	allocator := context.allocator,
+) -> []Pooled_Record {
+	out := make([dynamic]Pooled_Record, 0, len(raw_groups), allocator)
+	for &g in raw_groups {
+		if len(g.records) == 0 {
+			continue
+		}
+		append(&out, _pool_raw_group(&g, allocator))
+	}
+	return out[:]
+}
+
 /*
 Pools all per-op durations (`samples_fs`, plus `samples_batch_ns` when `ops_per_sample` matches
 across runs) across matching runs in `st` and computes unified quantile, dispersion, throughput,
@@ -102,170 +279,37 @@ store_load_pooled_records :: proc(
 ) -> []Pooled_Record {
 	raw_groups := store_load_raw_groups(st, lang, commit, run_id, filter, context.temp_allocator)
 	defer _raw_groups_destroy(raw_groups, context.temp_allocator)
+	return _pool_raw_groups(raw_groups, allocator)
+}
 
-	out := make([dynamic]Pooled_Record, 0, len(raw_groups), allocator)
-	for &g in raw_groups {
-		if len(g.records) == 0 {
-			continue
-		}
-		last := g.records[len(g.records) - 1]
-		first_ops := g.records[0].ops_per_sample
-		same_ops := true
-		pooled_fs := make([dynamic]i64, allocator)
-		pooled_batches := make([dynamic]u64, allocator)
-		footprint := last.footprint_bytes
-		sum_allocs := 0.0
-		sum_resizes := 0.0
-		sum_alloc_bytes := 0.0
-		sum_temp_allocs := 0.0
-		sum_temp_bytes := 0.0
-		max_peak := last.peak_heap_bytes
+/*
+Loads longitudinal commit-by-commit pooled records in chronological commit order for `lang`.
+*/
+@(require_results)
+store_load_commit_series_records :: proc(
+	st: ^Store,
+	lang := "odin",
+	filter := "",
+	allocator := context.allocator,
+) -> []Pooled_Record {
+	raw_groups := _store_load_commit_series_raw_groups(st, lang, filter, context.temp_allocator)
+	defer _raw_groups_destroy(raw_groups, context.temp_allocator)
+	return _pool_raw_groups(raw_groups, allocator)
+}
 
-		for &rec in g.records {
-			if rec.ops_per_sample != first_ops {
-				same_ops = false
-			}
-			if len(rec.samples_batch_ns) > 0 {
-				ops := max(rec.ops_per_sample, 1)
-				for b in rec.samples_batch_ns {
-					append(&pooled_fs, hugi.batch_ns_to_op_fs(b, ops))
-				}
-				if same_ops {
-					append(&pooled_batches, ..rec.samples_batch_ns[:])
-				}
-			} else if rec.p50_fs > 0 {
-				append(&pooled_fs, rec.p50_fs)
-				same_ops = false
-			}
-			if rec.footprint_bytes > footprint {
-				footprint = rec.footprint_bytes
-			}
-			if rec.peak_heap_bytes > max_peak {
-				max_peak = rec.peak_heap_bytes
-			}
-			sum_allocs += rec.allocs_per_op
-			sum_resizes += rec.resizes_per_op
-			sum_alloc_bytes += rec.alloc_bytes_per_op
-			sum_temp_allocs += rec.temp_allocs_per_op
-			sum_temp_bytes += rec.temp_bytes_per_op
-		}
-		if !same_ops {
-			clear(&pooled_batches)
-		}
-
-		n_recs := f64(len(g.records))
-		run_ids := make([dynamic]string, len(g.run_ids), allocator)
-		for rid, i in g.run_ids {
-			run_ids[i] = strings.clone(rid, allocator)
-		}
-
-		metrics := make([dynamic]hugi.Metric, len(last.metrics), allocator)
-		for m, i in last.metrics {
-			metrics[i] = hugi.Metric {
-				unit  = strings.clone(m.unit, allocator),
-				value = m.value,
-			}
-		}
-
-		pr := Pooled_Record {
-			rank               = last.rank,
-			commit             = strings.clone(g.commit, allocator),
-			lang               = strings.clone(g.lang, allocator),
-			suite_name         = strings.clone(g.suite_name, allocator),
-			group_name         = strings.clone(last.group_name, allocator),
-			name               = strings.clone(last.name, allocator),
-			full_name          = strings.clone(g.full_name, allocator),
-			run_count          = len(g.run_ids),
-			run_ids            = run_ids,
-			ops_per_sample     = last.ops_per_sample,
-			bytes_per_op       = last.bytes_per_op,
-			mb_per_sec         = last.mb_per_sec,
-			median_cycles      = last.median_cycles,
-			footprint_bytes    = footprint,
-			allocs_per_op      = sum_allocs / n_recs,
-			resizes_per_op     = sum_resizes / n_recs,
-			alloc_bytes_per_op = sum_alloc_bytes / n_recs,
-			temp_allocs_per_op = sum_temp_allocs / n_recs,
-			temp_bytes_per_op  = sum_temp_bytes / n_recs,
-			peak_heap_bytes    = max_peak,
-			metrics            = metrics,
-			samples_fs         = pooled_fs,
-			samples_batch_ns   = pooled_batches,
-		}
-
-		if len(pr.samples_fs) > 0 {
-			sorted := slice.clone(pr.samples_fs[:], context.temp_allocator)
-			slice.sort(sorted)
-			n := len(sorted)
-			pr.samples = n
-			pr.min_fs = sorted[0]
-			pr.max_fs = sorted[n - 1]
-			pr.p25_fs = hugi.percentile_sorted_fs(sorted, 25)
-			pr.p50_fs = hugi.percentile_sorted_fs(sorted, 50)
-			pr.p75_fs = hugi.percentile_sorted_fs(sorted, 75)
-			pr.p95_fs = hugi.percentile_sorted_fs(sorted, 95)
-			pr.p99_fs = hugi.percentile_sorted_fs(sorted, 99)
-			pr.iqr_fs = pr.p75_fs - pr.p25_fs
-
-			sum_fs: i128 = 0
-			for v in sorted {
-				sum_fs += i128(v)
-			}
-			pr.mean_fs = i64((sum_fs + i128(n / 2)) / i128(n))
-
-			var_sum := 0.0
-			for v in sorted {
-				d := f64(v - pr.mean_fs)
-				var_sum += d * d
-			}
-			if n > 1 {
-				std_f := math.sqrt(var_sum / f64(n - 1))
-				pr.std_dev_fs = i64(math.round(std_f))
-				pr.ci95_fs = i64(
-					math.round(obench.t_critical_975(f64(n - 1)) * (std_f / math.sqrt(f64(n)))),
-				)
-				if pr.mean_fs > 0 {
-					pr.cv_pct = (std_f / f64(pr.mean_fs)) * 100.0
-				}
-			}
-
-			abs_devs := make([]i64, n, context.temp_allocator)
-			for v, i in sorted {
-				abs_devs[i] = abs(v - pr.p50_fs)
-			}
-			slice.sort(abs_devs)
-			pr.mad_fs = hugi.percentile_sorted_fs(abs_devs, 50)
-
-			delete(abs_devs, context.temp_allocator)
-			delete(sorted, context.temp_allocator)
-
-			if pr.p50_fs > 0 {
-				pr.ops_per_sec = hugi.FS_PER_SEC_F64 / f64(pr.p50_fs)
-				if pr.bytes_per_op > 0 {
-					pr.mb_per_sec = (f64(pr.bytes_per_op) * pr.ops_per_sec) / (1024.0 * 1024.0)
-				}
-			}
-		} else {
-			pr.samples = last.samples
-			pr.min_fs = last.min_fs
-			pr.p25_fs = last.p25_fs
-			pr.p50_fs = last.p50_fs
-			pr.p75_fs = last.p75_fs
-			pr.p95_fs = last.p95_fs
-			pr.p99_fs = last.p99_fs
-			pr.max_fs = last.max_fs
-			pr.mean_fs = last.mean_fs
-			pr.std_dev_fs = last.std_dev_fs
-			pr.ci95_fs = last.ci95_fs
-			pr.cv_pct = last.cv_pct
-			pr.iqr_fs = last.iqr_fs
-			pr.mad_fs = last.mad_fs
-			pr.ops_per_sec = last.items_per_sec
-		}
-
-		append(&out, pr)
-	}
-	return out[:]
+/*
+Loads every individual benchmark run chronologically as its own unpooled `Pooled_Record` (`run_count == 1`).
+*/
+@(require_results)
+store_load_all_run_records :: proc(
+	st: ^Store,
+	lang := "odin",
+	filter := "",
+	allocator := context.allocator,
+) -> []Pooled_Record {
+	raw_groups := _store_load_all_run_raw_groups(st, lang, filter, context.temp_allocator)
+	defer _raw_groups_destroy(raw_groups, context.temp_allocator)
+	return _pool_raw_groups(raw_groups, allocator)
 }
 
 Verdict :: enum u8 {

@@ -686,6 +686,21 @@ U64_Codec :: enum u8 {
 	Raw               = 0,
 	Zlib_Delta_Varint = 1,
 	Zlib_BSS          = 2,
+	Zlib_Delta_BSS    = 3,
+	Zlib_Block_GCD    = 4,
+}
+
+@(private = "file")
+_U64_GCD_BLOCK :: 16
+
+@(private = "file")
+_gcd_u64 :: proc "contextless" (a, b: u64) -> u64 {
+	x := a
+	y := b
+	for y != 0 {
+		x, y = y, x % y
+	}
+	return x
 }
 
 @(private = "file")
@@ -700,7 +715,8 @@ _build_u64_header :: proc(buf: []u8, codec: U64_Codec, flags: u8, count, raw_len
 
 /*
 Losslessly compresses a `[]u64` integer array (typically overhead-adjusted nanosecond batch
-timings) by racing zigzag delta-varint + Zlib-9 against 8-way BSS + Zlib-9 and raw `u64le`.
+timings) by racing zigzag delta-varint, 8-way BSS, delta-zigzag+BSS, and per-block GCD
+factoring (each with Zlib-9) against raw `u64le`.
 */
 @(require_results)
 compress_samples_u64 :: proc(
@@ -794,6 +810,130 @@ compress_samples_u64 :: proc(
 					best_backing = comp
 					best_codec = .Zlib_BSS
 					best_raw_len = raw_len
+				} else {
+					delete(comp, context.temp_allocator)
+				}
+			}
+		}
+	}
+
+	// Candidate 3: Wrapping delta -> zigzag -> 8-way Byte-Stream-Split -> Zlib-9.
+	if n > 2 {
+		transposed, t_err := make([]u8, raw_len, context.temp_allocator)
+		if t_err == nil {
+			defer delete(transposed, context.temp_allocator)
+			le0 := u64le(samples[0])
+			b0 := transmute([8]u8)le0
+			for lane in 0 ..< 8 {
+				transposed[lane * n] = b0[lane]
+			}
+			for i in 1 ..< n {
+				diff := i64(samples[i] - samples[i - 1])
+				zz := (u64(diff) << 1) ~ u64(diff >> 63)
+				le := u64le(zz)
+				b := transmute([8]u8)le
+				for lane in 0 ..< 8 {
+					transposed[lane * n + i] = b[lane]
+				}
+			}
+			bound := int(zlib.compressBound(zlib.uLong(raw_len)))
+			comp, c_err := make([]u8, bound, context.temp_allocator)
+			if c_err == nil {
+				dest_len := zlib.uLongf(bound)
+				rc := zlib.compress2(
+					raw_data(comp),
+					&dest_len,
+					raw_data(transposed),
+					zlib.uLong(raw_len),
+					9,
+				)
+				clen := int(dest_len)
+				if rc == zlib.OK &&
+				   clen > 0 &&
+				   clen < raw_len &&
+				   (best_codec == .Raw || clen < len(best)) {
+					if best_codec != .Raw {
+						delete(best_backing, context.temp_allocator)
+					}
+					best = comp[:clen]
+					best_backing = comp
+					best_codec = .Zlib_Delta_BSS
+					best_raw_len = raw_len
+				} else {
+					delete(comp, context.temp_allocator)
+				}
+			}
+		}
+	}
+
+	// Candidate 4: Per-block (16-sample) GCD factoring + zigzag varint -> Zlib-9.
+	if n >= 4 {
+		gcd_raw := make([dynamic]u8, 0, max(n * 2, 32), context.temp_allocator)
+		defer delete(gcd_raw)
+		any_gcd_gt_1 := false
+		max_safe_gcd := u64(max(i64)) >> 1
+
+		for b0 := 0; b0 < n; b0 += _U64_GCD_BLOCK {
+			m := min(_U64_GCD_BLOCK, n - b0)
+			base := samples[b0]
+			g := u64(0)
+			for j in 1 ..< m {
+				diff := i64(samples[b0 + j] - samples[b0 + j - 1])
+				mag := diff < 0 ? u64(0) - u64(diff) : u64(diff)
+				g = _gcd_u64(g, mag)
+			}
+			if g == 0 {
+				if m > 1 && base > 1 && base <= max_safe_gcd {
+					g = base
+				} else {
+					g = 1
+				}
+			}
+			if g > max_safe_gcd {
+				g = 1
+			}
+			if g > 1 {
+				any_gcd_gt_1 = true
+			}
+			base_div := g > 1 && (base % g == 0)
+			_append_varint_u64(&gcd_raw, (g << 1) | (u64(1) if base_div else u64(0)))
+			_append_varint_u64(&gcd_raw, base / g if base_div else base)
+			for j in 1 ..< m {
+				diff := i64(samples[b0 + j] - samples[b0 + j - 1])
+				q := diff
+				if g > 1 {
+					mag := diff < 0 ? u64(0) - u64(diff) : u64(diff)
+					uq := mag / g
+					q = diff < 0 ? -i64(uq) : i64(uq)
+				}
+				_append_zigzag_i64(&gcd_raw, q)
+			}
+		}
+
+		if any_gcd_gt_1 && len(gcd_raw) > 0 {
+			bound := int(zlib.compressBound(zlib.uLong(len(gcd_raw))))
+			comp, c_err := make([]u8, bound, context.temp_allocator)
+			if c_err == nil {
+				dest_len := zlib.uLongf(bound)
+				rc := zlib.compress2(
+					raw_data(comp),
+					&dest_len,
+					raw_data(gcd_raw[:]),
+					zlib.uLong(len(gcd_raw)),
+					9,
+				)
+				clen := int(dest_len)
+				if rc == zlib.OK &&
+				   clen > 0 &&
+				   clen < raw_len &&
+				   (best_codec == .Raw || clen < len(best)) {
+					if best_codec != .Raw {
+						delete(best_backing, context.temp_allocator)
+					}
+					best = comp[:clen]
+					best_backing = comp
+					best_codec = .Zlib_Block_GCD
+					best_raw_len = len(gcd_raw)
 				} else {
 					delete(comp, context.temp_allocator)
 				}
@@ -945,6 +1085,109 @@ decompress_samples_u64_with_flags :: proc(
 				b[lane] = transposed[lane * count + i]
 			}
 			out_arr[i] = u64(transmute(u64le)b)
+		}
+		return out_arr, flags, true
+
+	case .Zlib_Delta_BSS:
+		if raw_len != count * 8 {
+			delete(out_arr, allocator)
+			return nil, 0, false
+		}
+		transposed, t_err := make([]u8, raw_len, context.temp_allocator)
+		if t_err != nil {
+			delete(out_arr, allocator)
+			return nil, 0, false
+		}
+		defer delete(transposed, context.temp_allocator)
+
+		dest_len := zlib.uLongf(raw_len)
+		rc := zlib.uncompress(
+			raw_data(transposed),
+			&dest_len,
+			raw_data(payload),
+			zlib.uLong(len(payload)),
+		)
+		if rc != zlib.OK || int(dest_len) != raw_len {
+			delete(out_arr, allocator)
+			return nil, 0, false
+		}
+		for i in 0 ..< count {
+			b: [8]u8
+			for lane in 0 ..< 8 {
+				b[lane] = transposed[lane * count + i]
+			}
+			zz := u64(transmute(u64le)b)
+			if i == 0 {
+				out_arr[0] = zz
+			} else {
+				delta := i64((zz >> 1) ~ u64(-i64(zz & 1)))
+				out_arr[i] = out_arr[i - 1] + u64(delta)
+			}
+		}
+		return out_arr, flags, true
+
+	case .Zlib_Block_GCD:
+		if raw_len <= 0 || raw_len > count * 12 + 128 {
+			delete(out_arr, allocator)
+			return nil, 0, false
+		}
+		gcd_raw, g_err := make([]u8, raw_len, context.temp_allocator)
+		if g_err != nil {
+			delete(out_arr, allocator)
+			return nil, 0, false
+		}
+		defer delete(gcd_raw, context.temp_allocator)
+
+		dest_len := zlib.uLongf(raw_len)
+		rc := zlib.uncompress(
+			raw_data(gcd_raw),
+			&dest_len,
+			raw_data(payload),
+			zlib.uLong(len(payload)),
+		)
+		if rc != zlib.OK || int(dest_len) != raw_len {
+			delete(out_arr, allocator)
+			return nil, 0, false
+		}
+		pos := 0
+		for b0 := 0; b0 < count; b0 += _U64_GCD_BLOCK {
+			m := min(_U64_GCD_BLOCK, count - b0)
+			hdr, h_ok := _read_varint_u64(gcd_raw, &pos)
+			if !h_ok {
+				delete(out_arr, allocator)
+				return nil, 0, false
+			}
+			g := hdr >> 1
+			if g == 0 {
+				delete(out_arr, allocator)
+				return nil, 0, false
+			}
+			base_div := (hdr & 1) != 0
+			bval, b_ok := _read_varint_u64(gcd_raw, &pos)
+			if !b_ok || (base_div && bval > max(u64) / g) {
+				delete(out_arr, allocator)
+				return nil, 0, false
+			}
+			out_arr[b0] = bval * g if base_div else bval
+			for j in 1 ..< m {
+				q, q_ok := _read_zigzag_i64(gcd_raw, &pos)
+				if !q_ok {
+					delete(out_arr, allocator)
+					return nil, 0, false
+				}
+				if g == 1 {
+					out_arr[b0 + j] = out_arr[b0 + j - 1] + u64(q)
+				} else {
+					mag := q < 0 ? u64(0) - u64(q) : u64(q)
+					scaled := mag * g
+					step := q < 0 ? u64(0) - scaled : scaled
+					out_arr[b0 + j] = out_arr[b0 + j - 1] + step
+				}
+			}
+		}
+		if pos != raw_len {
+			delete(out_arr, allocator)
+			return nil, 0, false
 		}
 		return out_arr, flags, true
 	}

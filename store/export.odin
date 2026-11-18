@@ -69,10 +69,15 @@ _write_delimited_str :: proc(sb: ^strings.Builder, s: string, delim: byte) {
 	strings.write_byte(sb, '"')
 }
 
+@(private = "file")
+_primary_run_id :: proc(r: Pooled_Record) -> string {
+	return len(r.run_ids) > 0 ? r.run_ids[len(r.run_ids) - 1] : ""
+}
+
 /*
 Exports pooled benchmark records to an Apache Arrow IPC (Feather v2) file via `skadi`,
-including lossless `Codec.Zlib_BSS` or `Codec.LZ4_BSS` compressed `samples_blob` columns
-and optional Arrow IPC body buffer compression (`LZ4_Frame` by default).
+encoding duration quantiles/statistics as native `Decimal64(18, 6)` nanoseconds and
+embedding lossless compressed `samples_blob` arrays alongside optional `LZ4_Frame` IPC body compression.
 */
 @(require_results)
 export_arrow_ipc :: proc(
@@ -84,30 +89,36 @@ export_arrow_ipc :: proc(
 ) -> bool {
 	_ensure_export_parent_dir(path)
 
-	fields := [33]skadi.Field {
+	dec_ns := skadi.Decimal64_Type {
+		precision = 18,
+		scale     = 6,
+	}
+	fields := [35]skadi.Field {
 		skadi.field_make("commit", skadi.String_Type{}, false),
 		skadi.field_make("lang", skadi.String_Type{}, false),
 		skadi.field_make("suite_name", skadi.String_Type{}, false),
 		skadi.field_make("group_name", skadi.String_Type{}, false),
 		skadi.field_make("name", skadi.String_Type{}, false),
 		skadi.field_make("full_name", skadi.String_Type{}, false),
+		skadi.field_make("run_id", skadi.String_Type{}, false),
+		skadi.field_make("timestamp_unix", skadi.Int64_Type{}, false),
 		skadi.field_make("rank", skadi.Int64_Type{}, false),
 		skadi.field_make("run_count", skadi.Int64_Type{}, false),
 		skadi.field_make("ops_per_sample", skadi.UInt64_Type{}, false),
 		skadi.field_make("samples", skadi.Int64_Type{}, false),
-		skadi.field_make("min_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("p25_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("p50_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("p75_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("p95_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("p99_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("max_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("mean_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("std_dev_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("ci95_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("min_ns", dec_ns, false),
+		skadi.field_make("p25_ns", dec_ns, false),
+		skadi.field_make("p50_ns", dec_ns, false),
+		skadi.field_make("p75_ns", dec_ns, false),
+		skadi.field_make("p95_ns", dec_ns, false),
+		skadi.field_make("p99_ns", dec_ns, false),
+		skadi.field_make("max_ns", dec_ns, false),
+		skadi.field_make("mean_ns", dec_ns, false),
+		skadi.field_make("std_dev_ns", dec_ns, false),
+		skadi.field_make("ci95_ns", dec_ns, false),
 		skadi.field_make("cv_pct", skadi.Float64_Type{}, false),
-		skadi.field_make("iqr_ns", skadi.Int64_Type{}, false),
-		skadi.field_make("mad_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("iqr_ns", dec_ns, false),
+		skadi.field_make("mad_ns", dec_ns, false),
 		skadi.field_make("ops_per_sec", skadi.Float64_Type{}, false),
 		skadi.field_make("mb_per_sec", skadi.Float64_Type{}, false),
 		skadi.field_make("bytes_per_op", skadi.UInt64_Type{}, false),
@@ -140,6 +151,10 @@ export_arrow_ipc :: proc(
 	defer skadi.string_builder_destroy(&b_name)
 	b_full := skadi.string_builder_make(cap_n, allocator)
 	defer skadi.string_builder_destroy(&b_full)
+	b_run_id := skadi.string_builder_make(cap_n, allocator)
+	defer skadi.string_builder_destroy(&b_run_id)
+	b_timestamp := skadi.builder_make(i64, cap_n, allocator)
+	defer skadi.builder_destroy(&b_timestamp)
 
 	b_rank := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_rank)
@@ -208,6 +223,8 @@ export_arrow_ipc :: proc(
 		skadi.string_builder_append(&b_group, r.group_name)
 		skadi.string_builder_append(&b_name, r.name)
 		skadi.string_builder_append(&b_full, r.full_name)
+		skadi.string_builder_append(&b_run_id, _primary_run_id(r))
+		skadi.builder_append(&b_timestamp, r.timestamp_unix)
 
 		skadi.builder_append(&b_rank, i64(r.rank))
 		skadi.builder_append(&b_run_count, i64(r.run_count))
@@ -255,7 +272,7 @@ export_arrow_ipc :: proc(
 		delete(blob, context.temp_allocator)
 	}
 
-	cols: [33]skadi.Array
+	cols: [35]skadi.Array
 	finished := 0
 	free_partial_cols := proc(cols: []skadi.Array, count: int, allocator := context.allocator) {
 		for i := 0; i < count; i += 1 {
@@ -294,142 +311,152 @@ export_arrow_ipc :: proc(
 		return false
 	}
 	finished += 1
-
-	if cols[6], e = skadi.builder_finish(&b_rank, allocator); e != nil {
+	if cols[6], e = skadi.string_builder_finish(&b_run_id, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
-	if cols[7], e = skadi.builder_finish(&b_run_count, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[8], e = skadi.builder_finish(&b_ops_per_sample, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[9], e = skadi.builder_finish(&b_samples, allocator); e != nil {
+	if cols[7], e = skadi.builder_finish(&b_timestamp, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
 
-	if cols[10], e = skadi.builder_finish(&b_min, allocator); e != nil {
+	if cols[8], e = skadi.builder_finish(&b_rank, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
-	if cols[11], e = skadi.builder_finish(&b_p25, allocator); e != nil {
+	if cols[9], e = skadi.builder_finish(&b_run_count, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
-	if cols[12], e = skadi.builder_finish(&b_p50, allocator); e != nil {
+	if cols[10], e = skadi.builder_finish(&b_ops_per_sample, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
-	if cols[13], e = skadi.builder_finish(&b_p75, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[14], e = skadi.builder_finish(&b_p95, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[15], e = skadi.builder_finish(&b_p99, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[16], e = skadi.builder_finish(&b_max, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[17], e = skadi.builder_finish(&b_mean, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[18], e = skadi.builder_finish(&b_std, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[19], e = skadi.builder_finish(&b_ci95, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[20], e = skadi.builder_finish(&b_cv, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[21], e = skadi.builder_finish(&b_iqr, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[22], e = skadi.builder_finish(&b_mad, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[23], e = skadi.builder_finish(&b_ops_sec, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[24], e = skadi.builder_finish(&b_mb_sec, allocator); e != nil {
+	if cols[11], e = skadi.builder_finish(&b_samples, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
 
-	if cols[25], e = skadi.builder_finish(&b_bytes_op, allocator); e != nil {
+	if cols[12], e = skadi.builder_finish_as(&b_min, dec_ns, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
-	if cols[26], e = skadi.builder_finish(&b_footprint, allocator); e != nil {
+	if cols[13], e = skadi.builder_finish_as(&b_p25, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[14], e = skadi.builder_finish_as(&b_p50, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[15], e = skadi.builder_finish_as(&b_p75, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[16], e = skadi.builder_finish_as(&b_p95, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[17], e = skadi.builder_finish_as(&b_p99, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[18], e = skadi.builder_finish_as(&b_max, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[19], e = skadi.builder_finish_as(&b_mean, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[20], e = skadi.builder_finish_as(&b_std, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[21], e = skadi.builder_finish_as(&b_ci95, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[22], e = skadi.builder_finish(&b_cv, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[23], e = skadi.builder_finish_as(&b_iqr, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[24], e = skadi.builder_finish_as(&b_mad, dec_ns, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[25], e = skadi.builder_finish(&b_ops_sec, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[26], e = skadi.builder_finish(&b_mb_sec, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
 
-	if cols[27], e = skadi.builder_finish(&b_allocs, allocator); e != nil {
+	if cols[27], e = skadi.builder_finish(&b_bytes_op, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
-	if cols[28], e = skadi.builder_finish(&b_alloc_bytes, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[29], e = skadi.builder_finish(&b_temp_allocs, allocator); e != nil {
-		free_partial_cols(cols[:], finished, allocator)
-		return false
-	}
-	finished += 1
-	if cols[30], e = skadi.builder_finish(&b_temp_bytes, allocator); e != nil {
+	if cols[28], e = skadi.builder_finish(&b_footprint, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
 
-	if cols[31], e = skadi.builder_finish(&b_peak_heap, allocator); e != nil {
+	if cols[29], e = skadi.builder_finish(&b_allocs, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
 	finished += 1
-	if cols[32], e = skadi.binary_builder_finish(&b_samples_blob, allocator); e != nil {
+	if cols[30], e = skadi.builder_finish(&b_alloc_bytes, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[31], e = skadi.builder_finish(&b_temp_allocs, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[32], e = skadi.builder_finish(&b_temp_bytes, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+
+	if cols[33], e = skadi.builder_finish(&b_peak_heap, allocator); e != nil {
+		free_partial_cols(cols[:], finished, allocator)
+		return false
+	}
+	finished += 1
+	if cols[34], e = skadi.binary_builder_finish(&b_samples_blob, allocator); e != nil {
 		free_partial_cols(cols[:], finished, allocator)
 		return false
 	}
@@ -510,6 +537,8 @@ _write_json_record :: proc(sb: ^strings.Builder, r: Pooled_Record, pretty: bool)
 	write_str_field(sb, "group", r.group_name, kv, sep)
 	write_str_field(sb, "name", r.name, kv, sep)
 	write_str_field(sb, "full_name", r.full_name, kv, sep)
+	write_str_field(sb, "run_id", _primary_run_id(r), kv, sep)
+	write_int_field(sb, "timestamp_unix", r.timestamp_unix, kv, sep)
 
 	write_int_field(sb, "rank", i64(r.rank), kv, sep)
 	write_int_field(sb, "runs", i64(r.run_count), kv, sep)
@@ -612,6 +641,8 @@ _export_delimited :: proc(path: string, records: []Pooled_Record, delim: byte) -
 		"group",
 		"name",
 		"full_name",
+		"run_id",
+		"timestamp_unix",
 		"rank",
 		"runs",
 		"samples",
@@ -657,9 +688,13 @@ _export_delimited :: proc(path: string, records: []Pooled_Record, delim: byte) -
 		_write_delimited_str(&sb, r.name, delim)
 		strings.write_byte(&sb, delim)
 		_write_delimited_str(&sb, r.full_name, delim)
+		strings.write_byte(&sb, delim)
+		_write_delimited_str(&sb, _primary_run_id(r), delim)
 		fmt.sbprintf(
 			&sb,
-			"%c%d%c%d%c%d%c%d",
+			"%c%d%c%d%c%d%c%d%c%d",
+			d,
+			r.timestamp_unix,
 			d,
 			r.rank,
 			d,

@@ -66,7 +66,7 @@ _PQ_Column_Spec :: struct {
 }
 
 @(private = "file")
-_pq_column_specs := [33]_PQ_Column_Spec {
+_pq_column_specs := [35]_PQ_Column_Spec {
 	{
 		name = "commit",
 		ptype = _PQ_TYPE_BYTE_ARRAY,
@@ -108,6 +108,20 @@ _pq_column_specs := [33]_PQ_Column_Spec {
 		ctype = _PQ_CTYPE_UTF8,
 		kind = .String,
 		str_field = 5,
+	},
+	{
+		name = "run_id",
+		ptype = _PQ_TYPE_BYTE_ARRAY,
+		ctype = _PQ_CTYPE_UTF8,
+		kind = .String,
+		str_field = 6,
+	},
+	{
+		name = "timestamp_unix",
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_NONE,
+		kind = .I64,
+		i64_field = 16,
 	},
 	{name = "rank", ptype = _PQ_TYPE_INT64, ctype = _PQ_CTYPE_NONE, kind = .I64, i64_field = 0},
 	{
@@ -394,6 +408,8 @@ _pq_record_str :: proc(r: ^Pooled_Record, idx: int) -> string {
 		return r.name
 	case 5:
 		return r.full_name
+	case 6:
+		return len(r.run_ids) > 0 ? r.run_ids[len(r.run_ids) - 1] : ""
 	}
 	return ""
 }
@@ -433,6 +449,8 @@ _pq_record_i64 :: proc(r: ^Pooled_Record, idx: int) -> i64 {
 		return r.iqr_fs
 	case 15:
 		return r.mad_fs
+	case 16:
+		return r.timestamp_unix
 	}
 	return 0
 }

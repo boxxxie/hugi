@@ -1,6 +1,7 @@
 package hugi_tests
 
 import skadi "../deps/skadi/skadi"
+import xitdb "../deps/xitdb/xitdb"
 import hugi "../hugi"
 import store "../store"
 import "core:encoding/json"
@@ -492,7 +493,30 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 				p50_col := skadi.record_batch_column(&batches[0], "p50_ns")
 				testing.expect(t, p50_col != nil, "p50_ns column should exist")
 				if p50_col != nil && batches[0].length > 0 {
+					testing.expect_value(
+						t,
+						p50_col.type,
+						skadi.DataType(skadi.Decimal64_Type{precision = 18, scale = 6}),
+					)
 					testing.expect_value(t, skadi.array_get(p50_col, 0, i64), records[0].p50_fs)
+				}
+				rid_col := skadi.record_batch_column(&batches[0], "run_id")
+				testing.expect(t, rid_col != nil, "run_id column should exist")
+				if rid_col != nil && batches[0].length > 0 && len(records[0].run_ids) > 0 {
+					testing.expect_value(
+						t,
+						skadi.array_get_string(rid_col, 0),
+						records[0].run_ids[len(records[0].run_ids) - 1],
+					)
+				}
+				ts_col := skadi.record_batch_column(&batches[0], "timestamp_unix")
+				testing.expect(t, ts_col != nil, "timestamp_unix column should exist")
+				if ts_col != nil && batches[0].length > 0 {
+					testing.expect_value(
+						t,
+						skadi.array_get(ts_col, 0, i64),
+						records[0].timestamp_unix,
+					)
 				}
 				blob_col := skadi.record_batch_column(&batches[0], "samples_blob")
 				testing.expect(t, blob_col != nil, "samples_blob column should exist")
@@ -1328,5 +1352,346 @@ test_rational_batch_u64_and_femtosecond_decimal_precision :: proc(t: ^testing.T)
 			strings.contains(string(json_bytes), `"p50_ns": 0.005000`),
 			"json must format DECIMAL(18, 6) p50_ns cleanly",
 		)
+	}
+}
+
+@(test)
+test_v5_gcd_bss_catalog_autoseal_and_longitudinal_series :: proc(t: ^testing.T) {
+	// 1. U64_Codec.Zlib_Block_GCD & Zlib_Delta_BSS lossless round-trips + codec selection.
+	gcd_samples := make([]u64, 128, context.allocator)
+	defer delete(gcd_samples)
+	rng_state := u64(0x9E37_79B9_7F4A_7C15)
+	for i in 0 ..< len(gcd_samples) {
+		rng_state = rng_state * 6364136223846793005 + 1442695040888963407
+		jitter := (rng_state >> 32) % 97
+		gcd_samples[i] = u64(500) * (u64(10_000) + jitter)
+	}
+	gcd_blob, gcd_ok := store.compress_samples_u64(gcd_samples, context.allocator)
+	testing.expect(t, gcd_ok, "GCD-friendly u64 samples compress")
+	if gcd_ok {
+		defer delete(gcd_blob)
+		testing.expect_value(t, store.U64_Codec(gcd_blob[2]), store.U64_Codec.Zlib_Block_GCD)
+		back, dok := store.decompress_samples_u64(gcd_blob, context.allocator)
+		testing.expect(t, dok, "Zlib_Block_GCD decompress")
+		if dok {
+			defer delete(back)
+			testing.expect_value(t, len(back), len(gcd_samples))
+			for v, i in gcd_samples {
+				testing.expect_value(t, back[i], v)
+			}
+		}
+	}
+
+	// Constant block + coprime clustered ticks + extreme 0/max(u64) wrapping deltas.
+	const_blk := [16]u64{}
+	for &v in const_blk {
+		v = 777_000
+	}
+	cb_blob, cb_ok := store.compress_samples_u64(const_blk[:], context.allocator)
+	testing.expect(t, cb_ok, "constant u64 block compress")
+	if cb_ok {
+		defer delete(cb_blob)
+		cb_back, cbd_ok := store.decompress_samples_u64(cb_blob, context.allocator)
+		testing.expect(t, cbd_ok, "constant u64 block decompress")
+		if cbd_ok {
+			defer delete(cb_back)
+			testing.expect_value(t, len(cb_back), len(const_blk))
+			for v, i in const_blk {
+				testing.expect_value(t, cb_back[i], v)
+			}
+		}
+	}
+
+	clustered_32 := make([]u64, 32, context.allocator)
+	defer delete(clustered_32)
+	for i in 0 ..< 32 {
+		clustered_32[i] = u64(10_000_000) + u64((i * 3) % 19)
+	}
+	cl_blob, cl_ok := store.compress_samples_u64(clustered_32, context.allocator)
+	testing.expect(t, cl_ok, "clustered u64 compress")
+	if cl_ok {
+		defer delete(cl_blob)
+		cl_back, cld_ok := store.decompress_samples_u64(cl_blob, context.allocator)
+		testing.expect(t, cld_ok, "clustered u64 decompress")
+		if cld_ok {
+			defer delete(cl_back)
+			testing.expect_value(t, len(cl_back), len(clustered_32))
+			for v, i in clustered_32 {
+				testing.expect_value(t, cl_back[i], v)
+			}
+		}
+	}
+
+	edge_wrap := []u64{0, max(u64), 0, max(u64) - 5, 17, 0, u64(1) << 63, max(u64)}
+	ew_blob, ew_ok := store.compress_samples_u64(edge_wrap, context.allocator)
+	testing.expect(t, ew_ok, "wrapping u64 edge compress")
+	if ew_ok {
+		defer delete(ew_blob)
+		ew_back, ewd_ok := store.decompress_samples_u64(ew_blob, context.allocator)
+		testing.expect(t, ewd_ok, "wrapping u64 edge decompress")
+		if ewd_ok {
+			defer delete(ew_back)
+			testing.expect_value(t, len(ew_back), len(edge_wrap))
+			for v, i in edge_wrap {
+				testing.expect_value(t, ew_back[i], v)
+			}
+		}
+	}
+
+	// 2. Consolidated HCAT\x01 catalog + 32-run auto-sealing + O(hot_runs) compaction + longitudinal exports.
+	if !os.exists(".tmp") {
+		_ = os.make_directory(".tmp")
+	}
+	db_path := ".tmp/hugi_test_v5.hugidb"
+	arrow_path := ".tmp/hugi_test_v5_commits.arrow"
+	parquet_path := ".tmp/hugi_test_v5_commits.parquet"
+	csv_path := ".tmp/hugi_test_v5_runs.csv"
+	tsv_path := ".tmp/hugi_test_v5_runs.tsv"
+	json_path := ".tmp/hugi_test_v5_runs.json"
+	jsonl_path := ".tmp/hugi_test_v5_runs.jsonl"
+	all_paths := [7]string {
+		db_path,
+		arrow_path,
+		parquet_path,
+		csv_path,
+		tsv_path,
+		json_path,
+		jsonl_path,
+	}
+	for p in all_paths {
+		if os.exists(p) {
+			_ = os.remove(p)
+		}
+	}
+	defer for p in all_paths {
+		if os.exists(p) {
+			_ = os.remove(p)
+		}
+	}
+
+	{
+		st, open_ok := store.store_open(db_path, context.allocator)
+		testing.expect(t, open_ok, "open v5 catalog store")
+		if !open_ok {
+			return
+		}
+		defer store.store_close(&st)
+
+		for i in 0 ..< 36 {
+			rid := fmt.tprintf("r_%03d", i)
+			csha := fmt.tprintf("c%02d", i / 2)
+			pkt := _make_v3_test_packet(rid, csha, 40.0 + f64(i))
+			pkt.timestamp_unix = i64(1770000000 + i * 60)
+			testing.expect(t, store.store_ingest_packet(&st, pkt), "ingest v5 packet")
+			hugi.packet_destroy(&pkt)
+		}
+
+		// Inspect raw xitdb root Moment: only catalog + 1 cold_chunks entry + 4 hot runs.
+		rc := xitdb.database_root_cursor(&st.db)
+		hist, h_err := xitdb.read_array_list_init(rc.read_cursor)
+		testing.expect(t, h_err == nil, "read history")
+		m_cur, m_err := xitdb.array_list_get_cursor(hist, -1)
+		testing.expect(t, m_err == nil && m_cur != nil, "latest moment cursor")
+		if m_err == nil && m_cur != nil {
+			mmap, mm_err := xitdb.read_hash_map_init(m_cur.?)
+			testing.expect(t, mm_err == nil, "latest moment map")
+			cat_slot, _ := xitdb.hash_map_get_slot(mmap, "catalog")
+			testing.expect(t, cat_slot != nil, "root Moment must have 'catalog'")
+			for legacy_k in ([6]string{"schema_version", "symbols", "descriptors", "run_order", "commits", "snapshots"}) {
+				ls, _ := xitdb.hash_map_get_slot(mmap, legacy_k)
+				testing.expect(t, ls == nil, "legacy root slot must not exist in v5")
+			}
+
+			cc_cur, cc_err := xitdb.hash_map_get_cursor(mmap, "cold_chunks")
+			testing.expect(t, cc_err == nil && cc_cur != nil, "auto-sealed cold_chunks must exist")
+			if cc_err == nil && cc_cur != nil {
+				cc_list, _ := xitdb.read_array_list_init(cc_cur.?)
+				cc_cnt, _ := xitdb.array_list_count(cc_list)
+				testing.expect_value(t, cc_cnt, i64(1))
+			}
+
+			r_cur, r_err := xitdb.hash_map_get_cursor(mmap, "runs")
+			testing.expect(t, r_err == nil && r_cur != nil, "remaining 4 hot runs must exist")
+			if r_cur != nil {
+				rm, _ := xitdb.read_hash_map_init(r_cur.?)
+				it, _ := xitdb.hash_map_iterator(rm)
+				hot_cnt := 0
+				for {
+					kv_c, n_err := xitdb.cursor_iterator_next(&it)
+					if n_err != nil || kv_c == nil {
+						break
+					}
+					hot_cnt += 1
+				}
+				testing.expect_value(t, hot_cnt, 4)
+			}
+		}
+
+		// Commit-by-commit & all-run longitudinal loads while mixed cold + hot.
+		commit_series := store.store_load_commit_series_records(&st, "odin", "", context.allocator)
+		defer store.pooled_records_destroy(commit_series)
+		testing.expect_value(t, len(commit_series), 18 * 3)
+		if len(commit_series) == 54 {
+			testing.expect_value(t, commit_series[0].commit, "c00")
+			testing.expect_value(t, commit_series[0].run_count, 2)
+			testing.expect_value(t, commit_series[0].timestamp_unix, i64(1770000060))
+			testing.expect_value(t, commit_series[51].commit, "c17")
+		}
+
+		run_series := store.store_load_all_run_records(&st, "odin", "", context.allocator)
+		defer store.pooled_records_destroy(run_series)
+		testing.expect_value(t, len(run_series), 36 * 3)
+		if len(run_series) == 108 {
+			testing.expect_value(t, run_series[0].run_ids[0], "r_000")
+			testing.expect_value(t, run_series[0].run_count, 1)
+			testing.expect_value(t, run_series[0].timestamp_unix, i64(1770000000))
+			testing.expect_value(t, run_series[105].run_ids[0], "r_035")
+			testing.expect_value(t, run_series[105].timestamp_unix, i64(1770000000 + 35 * 60))
+		}
+	}
+
+	// Fast O(hot_runs) compaction with keep_hot_runs = 0 should seal all 36 runs and omit empty "runs".
+	before_b, after_b, comp_ok := store.store_compact(db_path)
+	testing.expect(
+		t,
+		comp_ok && before_b > 0 && after_b > 0 && after_b < before_b,
+		"v5 fast compact shrinks store",
+	)
+
+	{
+		st2, ok2 := store.store_open(db_path, context.allocator)
+		testing.expect(t, ok2, "reopen compacted v5 store")
+		if !ok2 {
+			return
+		}
+		defer store.store_close(&st2)
+
+		rc := xitdb.database_root_cursor(&st2.db)
+		hist, _ := xitdb.read_array_list_init(rc.read_cursor)
+		m_cur, _ := xitdb.array_list_get_cursor(hist, -1)
+		mmap, _ := xitdb.read_hash_map_init(m_cur.?)
+		cc_cur, _ := xitdb.hash_map_get_cursor(mmap, "cold_chunks")
+		testing.expect(t, cc_cur != nil, "cold_chunks present after full seal")
+		if cc_cur != nil {
+			cc_list, _ := xitdb.read_array_list_init(cc_cur.?)
+			cc_cnt, _ := xitdb.array_list_count(cc_list)
+			testing.expect_value(t, cc_cnt, i64(2))
+		}
+		runs_slot, _ := xitdb.hash_map_get_slot(mmap, "runs")
+		testing.expect(t, runs_slot == nil, "empty 'runs' omitted when 0 hot runs remain")
+
+		// Exports on longitudinal commit series + all-run series.
+		commit_series := store.store_load_commit_series_records(
+			&st2,
+			"odin",
+			"",
+			context.allocator,
+		)
+		defer store.pooled_records_destroy(commit_series)
+		testing.expect_value(t, len(commit_series), 54)
+		testing.expect(
+			t,
+			store.export_arrow_ipc(arrow_path, commit_series),
+			"export commit-series arrow",
+		)
+		testing.expect(
+			t,
+			store.export_parquet(parquet_path, commit_series),
+			"export commit-series parquet",
+		)
+
+		sc, bs, r_ok := skadi.ipc_read_file(arrow_path, context.allocator, true, false)
+		testing.expect(t, r_ok, "read longitudinal arrow file")
+		if r_ok {
+			defer {
+				for &b in bs {
+					skadi.record_batch_free(&b)
+				}
+				delete(bs)
+				if sc != nil {
+					skadi.schema_free(sc)
+					free(sc)
+				}
+			}
+			testing.expect_value(t, len(bs), 1)
+			if len(bs) == 1 {
+				testing.expect_value(t, bs[0].length, 54)
+				p50_col := skadi.record_batch_column(&bs[0], "p50_ns")
+				testing.expect(t, p50_col != nil)
+				if p50_col != nil {
+					testing.expect_value(
+						t,
+						p50_col.type,
+						skadi.DataType(skadi.Decimal64_Type{precision = 18, scale = 6}),
+					)
+				}
+				ts_col := skadi.record_batch_column(&bs[0], "timestamp_unix")
+				testing.expect(t, ts_col != nil)
+				if ts_col != nil {
+					testing.expect_value(t, skadi.array_get(ts_col, 0, i64), i64(1770000060))
+				}
+			}
+		}
+
+		all_runs := store.store_load_all_run_records(&st2, "odin", "", context.allocator)
+		defer store.pooled_records_destroy(all_runs)
+		testing.expect_value(t, len(all_runs), 108)
+		testing.expect(t, store.export_csv(csv_path, all_runs), "export all-runs csv")
+		testing.expect(t, store.export_tsv(tsv_path, all_runs), "export all-runs tsv")
+		testing.expect(t, store.export_json(json_path, all_runs), "export all-runs json")
+		testing.expect(t, store.export_jsonl(jsonl_path, all_runs), "export all-runs jsonl")
+		if jb, jerr := os.read_entire_file(jsonl_path, context.allocator); jerr == nil {
+			defer delete(jb)
+			jstr := string(jb)
+			testing.expect(t, strings.contains(jstr, `"run_id":"r_000"`), "jsonl includes r_000")
+			testing.expect(t, strings.contains(jstr, `"run_id":"r_035"`), "jsonl includes r_035")
+			testing.expect(
+				t,
+				strings.contains(jstr, `"timestamp_unix":1770000000`),
+				"jsonl includes timestamp_unix",
+			)
+		}
+
+		// Hot override of an already-sealed cold run must win and survive compaction.
+		ov_pkt := _make_v3_test_packet("r_000", "c00", 99.0)
+		ov_pkt.timestamp_unix = 1770009999
+		testing.expect(
+			t,
+			store.store_ingest_packet(&st2, ov_pkt),
+			"override sealed cold run r_000",
+		)
+		hugi.packet_destroy(&ov_pkt)
+
+		ov_rec := store.store_load_pooled_records(&st2, "odin", run_id = "r_000")
+		defer store.pooled_records_destroy(ov_rec)
+		testing.expect_value(t, len(ov_rec), 3)
+		if len(ov_rec) == 3 {
+			testing.expect(
+				t,
+				math.abs(hugi.fs_to_ns_f64(ov_rec[0].p50_fs) - 99.1) < 0.01,
+				"hot override replaces sealed cold packet",
+			)
+		}
+	}
+
+	_, _, c_ov_ok := store.store_compact(db_path)
+	testing.expect(t, c_ov_ok, "compact after hot override of sealed cold run")
+	st3, ok3 := store.store_open(db_path, context.allocator)
+	testing.expect(t, ok3, "reopen after override compact")
+	if ok3 {
+		defer store.store_close(&st3)
+		runs3 := store.store_list_runs(&st3)
+		defer store.run_summaries_destroy(runs3)
+		testing.expect_value(t, len(runs3), 36)
+		ov_rec3 := store.store_load_pooled_records(&st3, "odin", run_id = "r_000")
+		defer store.pooled_records_destroy(ov_rec3)
+		testing.expect_value(t, len(ov_rec3), 3)
+		if len(ov_rec3) == 3 {
+			testing.expect(
+				t,
+				math.abs(hugi.fs_to_ns_f64(ov_rec3[0].p50_fs) - 99.1) < 0.01,
+				"overridden r_000 preserved after compact",
+			)
+		}
 	}
 }

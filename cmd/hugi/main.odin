@@ -67,6 +67,8 @@ COMPARE / EXPORT / COMPACT OPTIONS:
   --runs <a..b>          Compare run_id <a> against run_id <b>
   --last                 Compare the last two commits (or last two runs)
   --langs <a,b>          Languages for compare-1v1 (default: odin,zig)
+  --all-commits          Export longitudinal commit-by-commit series (instead of latest snapshot)
+  --all-runs             Export every stored run individually (unpooled longitudinal series)
   --format <fmt>         Export format: arrow | parquet | json | jsonl | csv | tsv | md (auto-detected from --out extension if omitted)
   --out <path>           Output path for export
   --update-readme <path> Replace <!-- BEGIN_BENCHMARK_TABLE -->..<!-- END_BENCHMARK_TABLE -->
@@ -1283,6 +1285,8 @@ _cmd_export :: proc(args: []string) -> int {
 	lang := "odin"
 	filter := ""
 	readme_path := ""
+	all_commits := false
+	all_runs := false
 
 	i := 0
 	for i < len(args) {
@@ -1295,6 +1299,10 @@ _cmd_export :: proc(args: []string) -> int {
 		case "h", "help":
 			_print_help()
 			return 0
+		case "all-commits":
+			all_commits = true
+		case "all-runs":
+			all_runs = true
 		case "db":
 			v, ok := _consume_value(args, &i, inline_val, key)
 			if !ok {return 1}
@@ -1327,6 +1335,15 @@ _cmd_export :: proc(args: []string) -> int {
 			fmt.eprintfln("hugi export: unknown flag '--%s'", key)
 			return 1
 		}
+	}
+
+	if all_commits && all_runs {
+		fmt.eprintln("hugi export: --all-commits and --all-runs cannot be combined")
+		return 1
+	}
+	if (all_commits || all_runs) && commit != "" {
+		fmt.eprintln("hugi export: --all-commits / --all-runs cannot be combined with --commit")
+		return 1
 	}
 
 	if format == "" && out_path != "" {
@@ -1368,7 +1385,14 @@ _cmd_export :: proc(args: []string) -> int {
 	}
 	defer store.store_close(&st)
 
-	records := store.store_load_pooled_records(&st, lang, commit, "", filter, context.allocator)
+	records: []store.Pooled_Record
+	if all_commits {
+		records = store.store_load_commit_series_records(&st, lang, filter, context.allocator)
+	} else if all_runs {
+		records = store.store_load_all_run_records(&st, lang, filter, context.allocator)
+	} else {
+		records = store.store_load_pooled_records(&st, lang, commit, "", filter, context.allocator)
+	}
 	defer store.pooled_records_destroy(records)
 	if len(records) == 0 {
 		fmt.eprintfln("hugi export: no matching records (lang=%s, commit=%q)", lang, commit)

@@ -5,6 +5,7 @@ import xitdb "../deps/xitdb/xitdb"
 import hugi "../hugi"
 import "base:runtime"
 import "core:c"
+import "core:fmt"
 import "core:slice"
 import "core:strings"
 
@@ -15,6 +16,9 @@ Store_Write_Options :: struct {
 	use_columnar_rollup: bool,
 	keep_hot_runs:       int,
 	use_rational_time:   bool,
+	use_catalog:         bool,
+	auto_seal_cold:      bool,
+	cold_chunk_runs:     int,
 }
 
 @(require_results)
@@ -26,12 +30,16 @@ default_store_write_options :: proc() -> Store_Write_Options {
 		use_columnar_rollup = true,
 		keep_hot_runs = 0,
 		use_rational_time = true,
+		use_catalog = true,
+		auto_seal_cold = true,
+		cold_chunk_runs = 32,
 	}
 }
 
 HSYM_MAGIC :: "HSYM\x01\x00\x00\x00"
 HDSC_MAGIC :: "HDSC\x01\x00\x00\x00"
 HSNP_MAGIC :: "HSNP\x01\x00\x00\x00"
+HCAT_MAGIC :: "HCAT\x01\x00\x00\x00"
 CZPK_V3_MAGIC :: "CZPK\x03\x00\x00\x00"
 CZPK_V4_MAGIC :: "CZPK\x04\x00\x00\x00"
 CZCH_MAGIC :: "CZCH\x01\x00\x00\x00"
@@ -697,6 +705,589 @@ _encode_hsnp_blob :: proc(
 	copy(out[:len(HSNP_MAGIC)], transmute([]u8)string(HSNP_MAGIC))
 	copy(out[len(HSNP_MAGIC):], comp)
 	return out, true
+}
+
+// ── Consolidated Moment Catalog (HCAT\x01) ──────────────────────────────────
+
+@(private)
+_CAT_FLAG_DESCS :: u8(1 << 0)
+@(private)
+_CAT_FLAG_COLD_OVERRIDE :: u8(1 << 1)
+
+@(private)
+_CAT_RUN_COLD :: u8(1 << 0)
+@(private)
+_CAT_RUN_SAME_LANG :: u8(1 << 1)
+@(private)
+_CAT_RUN_SAME_COMMIT :: u8(1 << 2)
+@(private)
+_CAT_RUN_SAME_SUITE :: u8(1 << 3)
+
+@(private)
+_Catalog_Run_Entry :: struct {
+	run_id:         string,
+	commit:         string,
+	lang:           string,
+	suite_name:     string,
+	timestamp_unix: i64,
+	record_count:   int,
+	total_samples:  int,
+	in_cold_chunk:  bool,
+}
+
+@(private)
+_Moment_Catalog :: struct {
+	syms:              _Symbol_Table,
+	descs:             _Descriptor_Table,
+	runs:              [dynamic]_Catalog_Run_Entry,
+	run_ord_by_key:    map[string]int,
+	snaps:             map[string]map[string]_Snap_Ref,
+	has_cold_override: bool,
+	allocator:         runtime.Allocator,
+}
+
+@(private)
+_catalog_init :: proc(allocator := context.allocator) -> _Moment_Catalog {
+	return _Moment_Catalog {
+		syms = _sym_table_init(allocator),
+		descs = _desc_table_init(allocator),
+		runs = make([dynamic]_Catalog_Run_Entry, allocator),
+		run_ord_by_key = make(map[string]int, allocator),
+		snaps = make(map[string]map[string]_Snap_Ref, allocator),
+		allocator = allocator,
+	}
+}
+
+@(private)
+_catalog_destroy :: proc(cat: ^_Moment_Catalog) {
+	if cat == nil {
+		return
+	}
+	_sym_table_destroy(&cat.syms)
+	_desc_table_destroy(&cat.descs)
+	for &r in cat.runs {
+		delete(r.run_id, cat.allocator)
+		delete(r.commit, cat.allocator)
+		delete(r.lang, cat.allocator)
+		delete(r.suite_name, cat.allocator)
+	}
+	delete(cat.runs)
+	for k in cat.run_ord_by_key {
+		delete(k, cat.allocator)
+	}
+	delete(cat.run_ord_by_key)
+	for lk, &m in cat.snaps {
+		delete(lk, cat.allocator)
+		for bk in m {
+			delete(bk, cat.allocator)
+		}
+		delete(m)
+	}
+	delete(cat.snaps)
+	cat^ = {}
+}
+
+@(private)
+_catalog_upsert_run :: proc(
+	cat: ^_Moment_Catalog,
+	pkt: hugi.Run_Packet,
+	in_cold: bool,
+) -> (
+	run_ord: int,
+	is_new: bool,
+) {
+	eff_lang := pkt.lang != "" ? pkt.lang : "odin"
+	run_key := fmt.tprintf("%s:%s", eff_lang, pkt.run_id)
+	tot_samples := 0
+	for &r in pkt.records {
+		tot_samples += len(r.samples_batch_ns) > 0 ? len(r.samples_batch_ns) : r.samples
+	}
+	if ord, found := cat.run_ord_by_key[run_key]; found {
+		e := &cat.runs[ord]
+		delete(e.run_id, cat.allocator)
+		delete(e.commit, cat.allocator)
+		delete(e.lang, cat.allocator)
+		delete(e.suite_name, cat.allocator)
+		e^ = _Catalog_Run_Entry {
+			run_id         = strings.clone(pkt.run_id, cat.allocator),
+			commit         = strings.clone(pkt.commit, cat.allocator),
+			lang           = strings.clone(pkt.lang, cat.allocator),
+			suite_name     = strings.clone(pkt.suite_name, cat.allocator),
+			timestamp_unix = pkt.timestamp_unix,
+			record_count   = len(pkt.records),
+			total_samples  = tot_samples,
+			in_cold_chunk  = in_cold,
+		}
+		return ord, false
+	}
+
+	ord := len(cat.runs)
+	append(
+		&cat.runs,
+		_Catalog_Run_Entry {
+			run_id = strings.clone(pkt.run_id, cat.allocator),
+			commit = strings.clone(pkt.commit, cat.allocator),
+			lang = strings.clone(pkt.lang, cat.allocator),
+			suite_name = strings.clone(pkt.suite_name, cat.allocator),
+			timestamp_unix = pkt.timestamp_unix,
+			record_count = len(pkt.records),
+			total_samples = tot_samples,
+			in_cold_chunk = in_cold,
+		},
+	)
+	cat.run_ord_by_key[strings.clone(run_key, cat.allocator)] = ord
+	return ord, true
+}
+
+@(private)
+_catalog_update_snaps :: proc(cat: ^_Moment_Catalog, pkt: hugi.Run_Packet, run_ord: int) {
+	eff_lang := pkt.lang != "" ? pkt.lang : "odin"
+	if eff_lang not_in cat.snaps {
+		cat.snaps[strings.clone(eff_lang, cat.allocator)] = make(
+			map[string]_Snap_Ref,
+			cat.allocator,
+		)
+	}
+	m := &cat.snaps[eff_lang]
+	for r, rec_idx in pkt.records {
+		key := r.full_name != "" ? r.full_name : r.name
+		ref := _Snap_Ref {
+			run_ord = u32(run_ord),
+			rec_idx = u32(rec_idx),
+		}
+		if key in m {
+			m[key] = ref
+		} else {
+			m[strings.clone(key, cat.allocator)] = ref
+		}
+	}
+}
+
+@(private, require_results)
+_encode_catalog_blob :: proc(
+	cat: ^_Moment_Catalog,
+	use_descs: bool,
+	zlib_level: c.int,
+	allocator := context.temp_allocator,
+) -> (
+	blob: []u8,
+	ok: bool,
+) {
+	// Map canonical/descriptor full_name -> desc_id so canonical snapshots avoid extra symbols.
+	desc_by_full := make(map[string]u32, context.temp_allocator)
+	defer {
+		for k in desc_by_full {
+			delete(k, context.temp_allocator)
+		}
+		delete(desc_by_full)
+	}
+	if use_descs {
+		for _, did in cat.descs.items {
+			_, _, _, full_name, m_ok := _desc_materialize_strings(
+				cat.descs,
+				cat.syms,
+				u32(did),
+				context.temp_allocator,
+			)
+			if m_ok {
+				if full_name not_in desc_by_full {
+					desc_by_full[full_name] = u32(did)
+				} else {
+					delete(full_name, context.temp_allocator)
+				}
+			}
+		}
+	}
+
+	// Pre-intern all strings referenced by Runs and Snapshots before emitting Symbols table.
+	for r in cat.runs {
+		_ = _sym_intern(&cat.syms, r.lang)
+		_ = _sym_intern(&cat.syms, r.commit)
+		_ = _sym_intern(&cat.syms, r.suite_name)
+	}
+	langs := make([dynamic]string, 0, len(cat.snaps), context.temp_allocator)
+	defer delete(langs)
+	for lk, snap_m in cat.snaps {
+		append(&langs, lk)
+		_ = _sym_intern(&cat.syms, lk)
+		for bk in snap_m {
+			if !use_descs || (bk not_in desc_by_full) {
+				_ = _sym_intern(&cat.syms, bk)
+			}
+		}
+	}
+	slice.sort(langs[:])
+
+	raw := make(
+		[dynamic]u8,
+		0,
+		max(len(cat.syms.items) * 20 + len(cat.runs) * 24, 128),
+		context.temp_allocator,
+	)
+	defer delete(raw)
+
+	flags := _CAT_FLAG_DESCS if use_descs else u8(0)
+	if cat.has_cold_override {
+		flags |= _CAT_FLAG_COLD_OVERRIDE
+	}
+	append(&raw, flags)
+
+	// 1. Symbols section.
+	extra := max(len(cat.syms.items) - 1, 0)
+	_v3_append_varint_u64(&raw, u64(extra))
+	for i in 1 ..< len(cat.syms.items) {
+		_v3_append_str(&raw, cat.syms.items[i])
+	}
+
+	// 2. Descriptors section.
+	if use_descs {
+		_v3_append_varint_u64(&raw, u64(len(cat.descs.items)))
+		for d in cat.descs.items {
+			append(&raw, d.flags)
+			_v3_append_varint_u64(&raw, u64(d.group_sym))
+			_v3_append_varint_u64(&raw, u64(d.name_sym))
+			if (d.flags & _DESC_FLAG_CUSTOM_FULL) != 0 {
+				_v3_append_varint_u64(&raw, u64(d.custom_full_sym))
+			}
+			if (d.flags & _DESC_FLAG_HAS_PARAM) != 0 {
+				_v3_append_zigzag_i64(&raw, d.param)
+			}
+			if (d.flags & _DESC_FLAG_HAS_THREADS) != 0 {
+				_v3_append_zigzag_i64(&raw, d.threads)
+			}
+			_v3_append_varint_u64(&raw, d.bytes_per_op)
+			_v3_append_varint_u64(&raw, d.items_per_op)
+		}
+	}
+
+	// 3. Runs section.
+	_v3_append_varint_u64(&raw, u64(len(cat.runs)))
+	prev_ls: u32 = 0
+	prev_cs: u32 = 0
+	prev_ss: u32 = 0
+	prev_ts: i64 = 0
+	has_prev := false
+	for r in cat.runs {
+		ls := _sym_intern(&cat.syms, r.lang)
+		cs := _sym_intern(&cat.syms, r.commit)
+		ss := _sym_intern(&cat.syms, r.suite_name)
+
+		rflags := u8(0)
+		if r.in_cold_chunk {
+			rflags |= _CAT_RUN_COLD
+		}
+		if has_prev && ls == prev_ls {
+			rflags |= _CAT_RUN_SAME_LANG
+		}
+		if has_prev && cs == prev_cs {
+			rflags |= _CAT_RUN_SAME_COMMIT
+		}
+		if has_prev && ss == prev_ss {
+			rflags |= _CAT_RUN_SAME_SUITE
+		}
+		append(&raw, rflags)
+		if (rflags & _CAT_RUN_SAME_LANG) == 0 {
+			_v3_append_varint_u64(&raw, u64(ls))
+		}
+		_v3_append_str(&raw, r.run_id)
+		if (rflags & _CAT_RUN_SAME_COMMIT) == 0 {
+			_v3_append_varint_u64(&raw, u64(cs))
+		}
+		if (rflags & _CAT_RUN_SAME_SUITE) == 0 {
+			_v3_append_varint_u64(&raw, u64(ss))
+		}
+		_v3_append_zigzag_i64(&raw, r.timestamp_unix - prev_ts)
+		_v3_append_varint_u64(&raw, u64(r.record_count))
+		_v3_append_varint_u64(&raw, u64(r.total_samples))
+
+		prev_ls = ls
+		prev_cs = cs
+		prev_ss = ss
+		prev_ts = r.timestamp_unix
+		has_prev = true
+	}
+
+	// 4. Snapshots section.
+	_v3_append_varint_u64(&raw, u64(len(langs)))
+	for lk in langs {
+		_v3_append_varint_u64(&raw, u64(_sym_intern(&cat.syms, lk)))
+		snap_m := cat.snaps[lk]
+		bkeys := make([dynamic]string, 0, len(snap_m), context.temp_allocator)
+		for bk in snap_m {
+			append(&bkeys, bk)
+		}
+		slice.sort(bkeys[:])
+		_v3_append_varint_u64(&raw, u64(len(bkeys)))
+		if len(bkeys) > 0 {
+			common_ord := snap_m[bkeys[0]].run_ord
+			all_same := true
+			for bk in bkeys {
+				if snap_m[bk].run_ord != common_ord {
+					all_same = false
+					break
+				}
+			}
+			append(&raw, u8(1) if all_same else u8(0))
+			if all_same {
+				_v3_append_varint_u64(&raw, u64(common_ord))
+			}
+			for bk in bkeys {
+				ref := snap_m[bk]
+				if use_descs {
+					if did, in_desc := desc_by_full[bk]; in_desc {
+						_v3_append_varint_u64(&raw, u64(did) << 1)
+					} else {
+						_v3_append_varint_u64(&raw, (u64(_sym_intern(&cat.syms, bk)) << 1) | 1)
+					}
+				} else {
+					_v3_append_varint_u64(&raw, (u64(_sym_intern(&cat.syms, bk)) << 1) | 1)
+				}
+				if !all_same {
+					_v3_append_varint_u64(&raw, u64(ref.run_ord))
+				}
+				_v3_append_varint_u64(&raw, u64(ref.rec_idx))
+			}
+		}
+		delete(bkeys)
+	}
+
+	comp := compress_bytes_zlib(raw[:], context.temp_allocator, zlib_level) or_return
+	defer delete(comp, context.temp_allocator)
+
+	out := make([]u8, len(HCAT_MAGIC) + len(comp), allocator)
+	copy(out[:len(HCAT_MAGIC)], transmute([]u8)string(HCAT_MAGIC))
+	copy(out[len(HCAT_MAGIC):], comp)
+	return out, true
+}
+
+@(private, require_results)
+_decode_catalog_blob :: proc(blob: []u8, cat: ^_Moment_Catalog) -> bool {
+	if len(blob) < len(HCAT_MAGIC) || string(blob[:len(HCAT_MAGIC)]) != HCAT_MAGIC {
+		return false
+	}
+	raw, dec_ok := decompress_bytes_zlib(blob[len(HCAT_MAGIC):], context.temp_allocator)
+	if !dec_ok {
+		return false
+	}
+	defer delete(raw, context.temp_allocator)
+
+	rd := _V3_Reader {
+		data = raw,
+	}
+	flags := _v3_read_u8(&rd) or_return
+	has_descs := (flags & _CAT_FLAG_DESCS) != 0
+	cat.has_cold_override = (flags & _CAT_FLAG_COLD_OVERRIDE) != 0
+
+	// 1. Symbols section.
+	sym_cnt := int(_v3_read_varint_u64(&rd) or_return)
+	if sym_cnt < 0 || sym_cnt > 10_000_000 {
+		return false
+	}
+	for _ in 0 ..< sym_cnt {
+		n_u := _v3_read_varint_u64(&rd) or_return
+		if n_u > u64(len(rd.data) - rd.pos) {
+			return false
+		}
+		n := int(n_u)
+		s := string(rd.data[rd.pos:rd.pos + n])
+		rd.pos += n
+		_ = _sym_intern(&cat.syms, s)
+	}
+	cat.syms.initial_count = len(cat.syms.items)
+
+	// 2. Descriptors section.
+	if has_descs {
+		d_cnt := int(_v3_read_varint_u64(&rd) or_return)
+		if d_cnt < 0 || d_cnt > 10_000_000 {
+			return false
+		}
+		for _ in 0 ..< d_cnt {
+			dflags := _v3_read_u8(&rd) or_return
+			gs := u32(_v3_read_varint_u64(&rd) or_return)
+			ns := u32(_v3_read_varint_u64(&rd) or_return)
+			cs := u32(0)
+			if (dflags & _DESC_FLAG_CUSTOM_FULL) != 0 {
+				cs = u32(_v3_read_varint_u64(&rd) or_return)
+			}
+			param := i64(0)
+			if (dflags & _DESC_FLAG_HAS_PARAM) != 0 {
+				param = _v3_read_zigzag_i64(&rd) or_return
+			}
+			threads := i64(0)
+			if (dflags & _DESC_FLAG_HAS_THREADS) != 0 {
+				threads = _v3_read_zigzag_i64(&rd) or_return
+			}
+			bpo := _v3_read_varint_u64(&rd) or_return
+			ipo := _v3_read_varint_u64(&rd) or_return
+
+			d := _Bench_Desc {
+				group_sym       = gs,
+				name_sym        = ns,
+				custom_full_sym = cs,
+				param           = param,
+				threads         = threads,
+				bytes_per_op    = bpo,
+				items_per_op    = ipo,
+				flags           = dflags,
+			}
+			id := u32(len(cat.descs.items))
+			append(&cat.descs.items, d)
+			cat.descs.by_desc[d] = id
+		}
+		cat.descs.initial_count = len(cat.descs.items)
+	}
+
+	// 3. Runs section.
+	run_cnt := int(_v3_read_varint_u64(&rd) or_return)
+	if run_cnt < 0 || run_cnt > 10_000_000 {
+		return false
+	}
+	reserve(&cat.runs, run_cnt)
+	prev_ls: u32 = 0
+	prev_cs: u32 = 0
+	prev_ss: u32 = 0
+	prev_ts: i64 = 0
+	for i in 0 ..< run_cnt {
+		rflags := _v3_read_u8(&rd) or_return
+		ls := prev_ls
+		if (rflags & _CAT_RUN_SAME_LANG) == 0 {
+			ls = u32(_v3_read_varint_u64(&rd) or_return)
+		}
+		run_id := _v3_read_str(&rd, cat.allocator) or_return
+		cs := prev_cs
+		if (rflags & _CAT_RUN_SAME_COMMIT) == 0 {
+			cs = u32(_v3_read_varint_u64(&rd) or_return)
+		}
+		ss := prev_ss
+		if (rflags & _CAT_RUN_SAME_SUITE) == 0 {
+			ss = u32(_v3_read_varint_u64(&rd) or_return)
+		}
+		ts_delta := _v3_read_zigzag_i64(&rd) or_return
+		ts := prev_ts + ts_delta
+		rec_cnt := int(_v3_read_varint_u64(&rd) or_return)
+		tot_samples := int(_v3_read_varint_u64(&rd) or_return)
+
+		raw_lang, l_ok := _sym_get(cat.syms, ls)
+		if !l_ok {
+			delete(run_id, cat.allocator)
+			return false
+		}
+		raw_commit, c_ok := _sym_get(cat.syms, cs)
+		if !c_ok {
+			delete(run_id, cat.allocator)
+			return false
+		}
+		raw_suite, s_ok := _sym_get(cat.syms, ss)
+		if !s_ok {
+			delete(run_id, cat.allocator)
+			return false
+		}
+
+		eff_lang := raw_lang != "" ? raw_lang : "odin"
+		rk := fmt.aprintf("%s:%s", eff_lang, run_id, allocator = cat.allocator)
+		cat.run_ord_by_key[rk] = i
+		append(
+			&cat.runs,
+			_Catalog_Run_Entry {
+				run_id = run_id,
+				commit = strings.clone(raw_commit, cat.allocator),
+				lang = strings.clone(raw_lang, cat.allocator),
+				suite_name = strings.clone(raw_suite, cat.allocator),
+				timestamp_unix = ts,
+				record_count = rec_cnt,
+				total_samples = tot_samples,
+				in_cold_chunk = (rflags & _CAT_RUN_COLD) != 0,
+			},
+		)
+
+		prev_ls = ls
+		prev_cs = cs
+		prev_ss = ss
+		prev_ts = ts
+	}
+
+	// 4. Snapshots section.
+	desc_full_cache := make([]string, len(cat.descs.items), context.temp_allocator)
+	defer {
+		for s in desc_full_cache {
+			if s != "" {
+				delete(s, context.temp_allocator)
+			}
+		}
+		delete(desc_full_cache, context.temp_allocator)
+	}
+
+	n_langs := int(_v3_read_varint_u64(&rd) or_return)
+	if n_langs < 0 || n_langs > 10_000 {
+		return false
+	}
+	for _ in 0 ..< n_langs {
+		lsid := u32(_v3_read_varint_u64(&rd) or_return)
+		raw_lk := _sym_get(cat.syms, lsid) or_return
+		if raw_lk in cat.snaps {
+			return false
+		}
+		snap_m := make(map[string]_Snap_Ref, cat.allocator)
+		cat.snaps[strings.clone(raw_lk, cat.allocator)] = snap_m
+		m_ptr := &cat.snaps[raw_lk]
+
+		n_bkeys := int(_v3_read_varint_u64(&rd) or_return)
+		if n_bkeys < 0 || n_bkeys > 10_000_000 {
+			return false
+		}
+		if n_bkeys > 0 {
+			sflags := _v3_read_u8(&rd) or_return
+			all_same := (sflags & 1) != 0
+			common_ord := u32(0)
+			if all_same {
+				common_ord = u32(_v3_read_varint_u64(&rd) or_return)
+			}
+			for _ in 0 ..< n_bkeys {
+				tag := _v3_read_varint_u64(&rd) or_return
+				bkey: string
+				if (tag & 1) != 0 {
+					sid := u32(tag >> 1)
+					raw_bk := _sym_get(cat.syms, sid) or_return
+					bkey = strings.clone(raw_bk, cat.allocator)
+				} else {
+					did := int(tag >> 1)
+					if did < 0 || did >= len(cat.descs.items) {
+						return false
+					}
+					if desc_full_cache[did] == "" {
+						_, _, _, df, d_ok := _desc_materialize_strings(
+							cat.descs,
+							cat.syms,
+							u32(did),
+							context.temp_allocator,
+						)
+						if !d_ok {
+							return false
+						}
+						desc_full_cache[did] = df
+					}
+					bkey = strings.clone(desc_full_cache[did], cat.allocator)
+				}
+				ro := common_ord
+				if !all_same {
+					ro = u32(_v3_read_varint_u64(&rd) or_return)
+				}
+				ri := u32(_v3_read_varint_u64(&rd) or_return)
+				ref := _Snap_Ref {
+					run_ord = ro,
+					rec_idx = ri,
+				}
+				if bkey in m_ptr {
+					m_ptr[bkey] = ref
+					delete(bkey, cat.allocator)
+				} else {
+					m_ptr[bkey] = ref
+				}
+			}
+		}
+	}
+
+	return rd.pos == len(rd.data)
 }
 
 // ── Shared Compression Helpers ──────────────────────────────────────────────

@@ -691,10 +691,349 @@ _load_syms_and_descs :: proc(
 }
 
 @(private = "file")
+_remove_hash_key_if_exists :: proc(m: ^xitdb.Write_Hash_Map, key: string) -> xitdb.Error {
+	if slot, s_err := xitdb.hash_map_get_slot(m.read_hash_map, key); s_err == nil && slot != nil {
+		_, rm_err := xitdb.hash_map_remove(m, key)
+		return rm_err
+	}
+	return nil
+}
+
+@(private = "file", require_results)
+_load_moment_catalog :: proc(
+	moment: xitdb.Read_Hash_Map,
+	allocator: runtime.Allocator,
+) -> (
+	cat: _Moment_Catalog,
+	had_catalog: bool,
+	ok: bool,
+) {
+	cat = _catalog_init(allocator)
+	if cat_cur, c_err := xitdb.hash_map_get_cursor(moment, "catalog");
+	   c_err == nil && cat_cur != nil {
+		blob, b_err := xitdb.cursor_read_bytes(cat_cur.?, 0, context.temp_allocator)
+		if b_err != nil {
+			_catalog_destroy(&cat)
+			return {}, false, false
+		}
+		defer delete(blob, context.temp_allocator)
+		if !_decode_catalog_blob(blob, &cat) {
+			_catalog_destroy(&cat)
+			return {}, false, false
+		}
+		return cat, true, true
+	}
+
+	order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order")
+	if o_err != nil || order_cur == nil {
+		return cat, false, true
+	}
+
+	mr, mr_ok := _moment_reader_init(moment, context.temp_allocator)
+	if !mr_ok {
+		_catalog_destroy(&cat)
+		return {}, false, false
+	}
+	defer _moment_reader_destroy(&mr)
+
+	run_keys := _read_string_list(order_cur.?, context.temp_allocator)
+	defer {
+		for rk in run_keys {
+			delete(rk, context.temp_allocator)
+		}
+		delete(run_keys)
+	}
+
+	// Preserve existing legacy symbol/descriptor IDs for any hot packets / cold chunks.
+	_sym_table_destroy(&cat.syms)
+	cat.syms = _sym_table_init(allocator)
+	for i in 1 ..< len(mr.syms.items) {
+		_ = _sym_intern(&cat.syms, mr.syms.items[i])
+	}
+	cat.syms.initial_count = len(cat.syms.items)
+
+	_desc_table_destroy(&cat.descs)
+	cat.descs = _desc_table_init(allocator)
+	for d, di in mr.descs.items {
+		append(&cat.descs.items, d)
+		cat.descs.by_desc[d] = u32(di)
+	}
+	cat.descs.initial_count = len(cat.descs.items)
+
+	for rk in run_keys {
+		pkt, p_ok := _moment_reader_get_packet(&mr, rk)
+		if !p_ok {
+			continue
+		}
+		in_cold := true
+		if mr.has_runs {
+			if slot, _ := xitdb.hash_map_get_slot(mr.runs_map, rk); slot != nil {
+				in_cold = false
+			}
+		}
+		_, _ = _catalog_upsert_run(&cat, pkt, in_cold)
+	}
+
+	if snaps_cur, s_err := xitdb.hash_map_get_cursor(moment, "snapshots");
+	   s_err == nil && snaps_cur != nil {
+		if snaps_map, sm_err := xitdb.read_hash_map_init(snaps_cur.?); sm_err == nil {
+			it, it_err := xitdb.hash_map_iterator(snaps_map)
+			if it_err == nil {
+				for {
+					kv_cur, n_err := xitdb.cursor_iterator_next(&it)
+					if n_err != nil || kv_cur == nil {
+						break
+					}
+					kv, kv_err := xitdb.cursor_read_kv_pair(kv_cur.?, context.temp_allocator)
+					if kv_err != nil {
+						continue
+					}
+					lang_key, k_err := xitdb.cursor_read_string(
+						kv.key_cursor,
+						0,
+						context.temp_allocator,
+					)
+					if k_err != nil {
+						continue
+					}
+					snap_m := make(map[string]_Snap_Ref, allocator)
+					if !_load_existing_snap_map(
+						snaps_map,
+						lang_key,
+						cat.syms,
+						&snap_m,
+						allocator,
+					) {
+						delete(lang_key, context.temp_allocator)
+						for sk in snap_m {
+							delete(sk, allocator)
+						}
+						delete(snap_m)
+						_catalog_destroy(&cat)
+						return {}, false, false
+					}
+					cat.snaps[strings.clone(lang_key, allocator)] = snap_m
+					delete(lang_key, context.temp_allocator)
+				}
+			}
+		}
+	}
+
+	return cat, false, true
+}
+
+@(private = "file")
+_ingest_batch_cb_catalog :: proc(
+	moment: ^xitdb.Write_Hash_Map,
+	ctx: ^_Ingest_Batch_Ctx,
+) -> xitdb.Error {
+	alloc := ctx.allocator
+
+	legacy_keys := [6]string {
+		"schema_version",
+		"symbols",
+		"descriptors",
+		"run_order",
+		"commits",
+		"snapshots",
+	}
+	for lk in legacy_keys {
+		_remove_hash_key_if_exists(moment, lk) or_return
+	}
+
+	cat, _, c_ok := _load_moment_catalog(moment.read_hash_map, alloc)
+	if !c_ok {
+		ctx.failed = true
+		return .Unexpected_Tag
+	}
+	defer _catalog_destroy(&cat)
+
+	cold_count := 0
+	if ctx.allow_rollup && ctx.opts.use_columnar_rollup {
+		keep_hot := max(ctx.opts.keep_hot_runs, 0)
+		if len(ctx.pkts) - keep_hot >= 2 {
+			cold_count = len(ctx.pkts) - keep_hot
+		}
+	}
+
+	if cold_count > 0 {
+		chunks_cur := xitdb.hash_map_put_cursor(moment, "cold_chunks") or_return
+		chunks_list := xitdb.write_array_list_init(chunks_cur) or_return
+		off := 0
+		for off < cold_count {
+			end := min(off + _COLD_CHUNK_MAX_RUNS, cold_count)
+			chk_blob, chk_ok := _encode_cold_chunk(
+				ctx.pkts[off:end],
+				&cat.syms,
+				&cat.descs,
+				ctx.opts,
+				alloc,
+			)
+			if !chk_ok {
+				ctx.failed = true
+				return .Unexpected_Tag
+			}
+			app_err := xitdb.array_list_append(&chunks_list, chk_blob)
+			delete(chk_blob, alloc)
+			if app_err != nil {
+				return app_err
+			}
+			off = end
+		}
+	}
+
+	runs_map: xitdb.Write_Hash_Map
+	runs_map_open := false
+	if existing_runs, er_err := xitdb.hash_map_get_cursor(moment.read_hash_map, "runs");
+	   er_err == nil && existing_runs != nil {
+		runs_cur := xitdb.hash_map_put_cursor(moment, "runs") or_return
+		runs_map = xitdb.write_hash_map_init(runs_cur) or_return
+		runs_map_open = true
+	}
+
+	for pkt, i in ctx.pkts {
+		lang_key := pkt.lang != "" ? pkt.lang : "odin"
+		run_key := fmt.tprintf("%s:%s", lang_key, pkt.run_id)
+		is_cold := i < cold_count
+		if !is_cold {
+			if prev_ord, seen := cat.run_ord_by_key[run_key];
+			   seen && cat.runs[prev_ord].in_cold_chunk {
+				cat.has_cold_override = true
+			}
+		}
+		run_ord, _ := _catalog_upsert_run(&cat, pkt, is_cold)
+		if !is_cold {
+			if !runs_map_open {
+				runs_cur := xitdb.hash_map_put_cursor(moment, "runs") or_return
+				runs_map = xitdb.write_hash_map_init(runs_cur) or_return
+				runs_map_open = true
+			}
+			pk_blob, pk_ok := _encode_compressed_packet(
+				pkt,
+				ctx.opts,
+				&cat.syms,
+				&cat.descs,
+				alloc,
+			)
+			if !pk_ok {
+				ctx.failed = true
+				return .Unexpected_Tag
+			}
+			put_err := xitdb.hash_map_put(&runs_map, run_key, pk_blob)
+			delete(pk_blob, alloc)
+			if put_err != nil {
+				return put_err
+			}
+		} else if runs_map_open {
+			_remove_hash_key_if_exists(&runs_map, run_key) or_return
+		}
+		_catalog_update_snaps(&cat, pkt, run_ord)
+	}
+
+	// Auto-seal fixed-size chronological windows of hot runs into cold columnar chunks.
+	if !ctx.allow_rollup && ctx.opts.auto_seal_cold && ctx.opts.use_columnar_rollup {
+		win := ctx.opts.cold_chunk_runs > 0 ? ctx.opts.cold_chunk_runs : 32
+		keep_hot := max(ctx.opts.keep_hot_runs, 0)
+		if win >= 2 && runs_map_open {
+			unsealed := make([dynamic]int, 0, len(cat.runs), context.temp_allocator)
+			defer delete(unsealed)
+			for e, ord in cat.runs {
+				if !e.in_cold_chunk {
+					append(&unsealed, ord)
+				}
+			}
+			pos := 0
+			for len(unsealed) - pos >= keep_hot + win {
+				seal_ords := unsealed[pos:pos + win]
+				seal_pkts := make([dynamic]hugi.Run_Packet, 0, win, context.temp_allocator)
+				seal_ok := true
+				for sord in seal_ords {
+					se := cat.runs[sord]
+					eff_lang := se.lang != "" ? se.lang : "odin"
+					srk := fmt.tprintf("%s:%s", eff_lang, se.run_id)
+					spkt, sp_ok := _read_run_packet_from_map(
+						runs_map.read_hash_map,
+						cat.syms,
+						cat.descs,
+						srk,
+						alloc,
+					)
+					if !sp_ok {
+						seal_ok = false
+						break
+					}
+					append(&seal_pkts, spkt)
+				}
+				if !seal_ok {
+					for &sp in seal_pkts {
+						hugi.packet_destroy(&sp, alloc)
+					}
+					delete(seal_pkts)
+					break
+				}
+				chk_blob, chk_ok := _encode_cold_chunk(
+					seal_pkts[:],
+					&cat.syms,
+					&cat.descs,
+					ctx.opts,
+					alloc,
+				)
+				for &sp in seal_pkts {
+					hugi.packet_destroy(&sp, alloc)
+				}
+				delete(seal_pkts)
+				if !chk_ok {
+					ctx.failed = true
+					return .Unexpected_Tag
+				}
+				chunks_cur := xitdb.hash_map_put_cursor(moment, "cold_chunks") or_return
+				chunks_list := xitdb.write_array_list_init(chunks_cur) or_return
+				app_err := xitdb.array_list_append(&chunks_list, chk_blob)
+				delete(chk_blob, alloc)
+				if app_err != nil {
+					return app_err
+				}
+				for sord in seal_ords {
+					se := &cat.runs[sord]
+					eff_lang := se.lang != "" ? se.lang : "odin"
+					srk := fmt.tprintf("%s:%s", eff_lang, se.run_id)
+					_remove_hash_key_if_exists(&runs_map, srk) or_return
+					se.in_cold_chunk = true
+				}
+				pos += win
+			}
+		}
+	}
+
+	hot_remaining := false
+	for e in cat.runs {
+		if !e.in_cold_chunk {
+			hot_remaining = true
+			break
+		}
+	}
+	if !hot_remaining {
+		_remove_hash_key_if_exists(moment, "runs") or_return
+	}
+
+	cat_blob, cat_ok := _encode_catalog_blob(&cat, ctx.opts.use_descriptors, 9, alloc)
+	if !cat_ok {
+		ctx.failed = true
+		return .Unexpected_Tag
+	}
+	put_cat_err := xitdb.hash_map_put(moment, "catalog", cat_blob)
+	delete(cat_blob, alloc)
+	return put_cat_err
+}
+
+@(private = "file")
 _ingest_batch_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
 	ctx := (^_Ingest_Batch_Ctx)(user_data)
 	alloc := ctx.allocator
 	moment := xitdb.write_hash_map_init(cursor^) or_return
+	if ctx.opts.use_catalog {
+		return _ingest_batch_cb_catalog(&moment, ctx)
+	}
 
 	need_syms :=
 		ctx.opts.use_symbol_table || ctx.opts.use_descriptors || ctx.opts.use_rational_time
@@ -983,6 +1322,8 @@ _Moment_Reader :: struct {
 	moment:      xitdb.Read_Hash_Map,
 	runs_map:    xitdb.Read_Hash_Map,
 	has_runs:    bool,
+	cat:         _Moment_Catalog,
+	has_catalog: bool,
 	syms:        _Symbol_Table,
 	descs:       _Descriptor_Table,
 	cold_loaded: bool,
@@ -1021,18 +1362,36 @@ _moment_reader_init :: proc(
 	mr: _Moment_Reader,
 	ok: bool,
 ) {
-	syms, descs, _, _, sd_ok := _load_syms_and_descs(
-		moment,
-		need_syms = true,
-		need_descs = true,
-		allocator = allocator,
-	)
-	if !sd_ok {
-		return {}, false
+	if cat_cur, c_err := xitdb.hash_map_get_cursor(moment, "catalog");
+	   c_err == nil && cat_cur != nil {
+		blob, b_err := xitdb.cursor_read_bytes(cat_cur.?, 0, context.temp_allocator)
+		if b_err != nil {
+			return {}, false
+		}
+		defer delete(blob, context.temp_allocator)
+		cat := _catalog_init(allocator)
+		if !_decode_catalog_blob(blob, &cat) {
+			_catalog_destroy(&cat)
+			return {}, false
+		}
+		mr.cat = cat
+		mr.has_catalog = true
+		mr.syms = mr.cat.syms
+		mr.descs = mr.cat.descs
+	} else {
+		syms, descs, _, _, sd_ok := _load_syms_and_descs(
+			moment,
+			need_syms = true,
+			need_descs = true,
+			allocator = allocator,
+		)
+		if !sd_ok {
+			return {}, false
+		}
+		mr.syms = syms
+		mr.descs = descs
 	}
 	mr.moment = moment
-	mr.syms = syms
-	mr.descs = descs
 	mr.allocator = allocator
 	mr.pkt_cache = make(map[string]_Cached_Pkt, allocator)
 	if runs_cur, r_err := xitdb.hash_map_get_cursor(moment, "runs");
@@ -1057,8 +1416,12 @@ _moment_reader_destroy :: proc(mr: ^_Moment_Reader) {
 		}
 	}
 	delete(mr.pkt_cache)
-	_sym_table_destroy(&mr.syms)
-	_desc_table_destroy(&mr.descs)
+	if mr.has_catalog {
+		_catalog_destroy(&mr.cat)
+	} else {
+		_sym_table_destroy(&mr.syms)
+		_desc_table_destroy(&mr.descs)
+	}
 	mr^ = {}
 }
 
@@ -1103,9 +1466,19 @@ _ensure_cold_chunks_loaded :: proc(mr: ^_Moment_Reader) {
 					overridden = true
 				}
 			}
-			if overridden || rk in mr.pkt_cache {
+			if overridden {
 				delete(rk, mr.allocator)
 				hugi.packet_destroy(&pkt, mr.allocator)
+				continue
+			}
+			if prev, exists := &mr.pkt_cache[rk]; exists {
+				delete(rk, mr.allocator)
+				if prev.taken {
+					hugi.packet_destroy(&pkt, mr.allocator)
+				} else {
+					hugi.packet_destroy(&prev.pkt, mr.allocator)
+					prev.pkt = pkt
+				}
 				continue
 			}
 			mr.pkt_cache[rk] = _Cached_Pkt {
@@ -1187,6 +1560,38 @@ store_list_runs :: proc(st: ^Store, allocator := context.allocator) -> []Run_Sum
 	if !ok {
 		return out[:]
 	}
+
+	// Zero-decompression path when the consolidated `"catalog"` root index is present.
+	if cat_cur, c_err := xitdb.hash_map_get_cursor(moment, "catalog");
+	   c_err == nil && cat_cur != nil {
+		blob, b_err := xitdb.cursor_read_bytes(cat_cur.?, 0, context.temp_allocator)
+		if b_err != nil {
+			return out[:]
+		}
+		defer delete(blob, context.temp_allocator)
+		cat := _catalog_init(context.temp_allocator)
+		defer _catalog_destroy(&cat)
+		if !_decode_catalog_blob(blob, &cat) {
+			return out[:]
+		}
+		reserve(&out, len(cat.runs))
+		for e in cat.runs {
+			append(
+				&out,
+				Run_Summary {
+					run_id = strings.clone(e.run_id, allocator),
+					commit = strings.clone(e.commit, allocator),
+					lang = strings.clone(e.lang, allocator),
+					suite_name = strings.clone(e.suite_name, allocator),
+					timestamp_unix = e.timestamp_unix,
+					record_count = e.record_count,
+					total_samples = e.total_samples,
+				},
+			)
+		}
+		return out[:]
+	}
+
 	order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order")
 	if o_err != nil || order_cur == nil {
 		return out[:]
@@ -1355,10 +1760,18 @@ hot `"runs"` packets and cold `"cold_chunks"` columnar rollups).
 store_load_all_packets :: proc(st: ^Store, allocator := context.allocator) -> []hugi.Run_Packet {
 	pkts := make([dynamic]hugi.Run_Packet, allocator)
 	if moment, has_m := _latest_moment_map(st); has_m {
-		order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order")
-		if o_err == nil && order_cur != nil {
-			if mr, mr_ok := _moment_reader_init(moment, allocator); mr_ok {
-				defer _moment_reader_destroy(&mr)
+		if mr, mr_ok := _moment_reader_init(moment, allocator); mr_ok {
+			defer _moment_reader_destroy(&mr)
+			if mr.has_catalog {
+				for e in mr.cat.runs {
+					eff_lang := e.lang != "" ? e.lang : "odin"
+					rk := fmt.tprintf("%s:%s", eff_lang, e.run_id)
+					if pkt, pkt_ok := _moment_reader_take_packet(&mr, rk); pkt_ok {
+						append(&pkts, pkt)
+					}
+				}
+			} else if order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order");
+			   o_err == nil && order_cur != nil {
 				run_keys := _read_string_list(order_cur.?, context.temp_allocator)
 				defer {
 					for rk in run_keys {
@@ -1377,10 +1790,323 @@ store_load_all_packets :: proc(st: ^Store, allocator := context.allocator) -> []
 	return pkts[:]
 }
 
+@(private = "file")
+_Fast_Compact_Ctx :: struct {
+	cat:         ^_Moment_Catalog,
+	chunk_blobs: [][]u8,
+	hot_blobs:   map[int][]u8,
+	keep_ords:   []int,
+	opts:        Store_Write_Options,
+	failed:      bool,
+}
+
+@(private = "file")
+_fast_compact_moment_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+	ctx := (^_Fast_Compact_Ctx)(user_data)
+	moment := xitdb.write_hash_map_init(cursor^) or_return
+
+	if len(ctx.chunk_blobs) > 0 {
+		chunks_cur := xitdb.hash_map_put_cursor(&moment, "cold_chunks") or_return
+		chunks_list := xitdb.write_array_list_init(chunks_cur) or_return
+		for cb in ctx.chunk_blobs {
+			xitdb.array_list_append(&chunks_list, cb) or_return
+		}
+	}
+
+	if len(ctx.keep_ords) > 0 {
+		runs_cur := xitdb.hash_map_put_cursor(&moment, "runs") or_return
+		runs_map := xitdb.write_hash_map_init(runs_cur) or_return
+		for ord in ctx.keep_ords {
+			e := ctx.cat.runs[ord]
+			eff_lang := e.lang != "" ? e.lang : "odin"
+			rk := fmt.tprintf("%s:%s", eff_lang, e.run_id)
+			raw_blob := ctx.hot_blobs[ord]
+			if len(raw_blob) >= len(CZPK_V4_MAGIC) &&
+			   string(raw_blob[:len(CZPK_V4_MAGIC)]) == CZPK_V4_MAGIC {
+				xitdb.hash_map_put(&runs_map, rk, raw_blob) or_return
+			} else {
+				pkt, p_ok := _decode_compressed_packet(
+					raw_blob,
+					ctx.cat.syms,
+					ctx.cat.descs,
+					context.allocator,
+				)
+				if !p_ok {
+					ctx.failed = true
+					return .Unexpected_Tag
+				}
+				pk_blob, pk_ok := _encode_compressed_packet(
+					pkt,
+					ctx.opts,
+					&ctx.cat.syms,
+					&ctx.cat.descs,
+					context.temp_allocator,
+				)
+				hugi.packet_destroy(&pkt)
+				if !pk_ok {
+					ctx.failed = true
+					return .Unexpected_Tag
+				}
+				put_err := xitdb.hash_map_put(&runs_map, rk, pk_blob)
+				delete(pk_blob, context.temp_allocator)
+				put_err or_return
+			}
+		}
+	}
+
+	cat_blob, cat_ok := _encode_catalog_blob(
+		ctx.cat,
+		ctx.opts.use_descriptors,
+		9,
+		context.temp_allocator,
+	)
+	if !cat_ok {
+		ctx.failed = true
+		return .Unexpected_Tag
+	}
+	put_cat_err := xitdb.hash_map_put(&moment, "catalog", cat_blob)
+	delete(cat_blob, context.temp_allocator)
+	return put_cat_err
+}
+
+@(private = "file")
+_try_fast_catalog_compact :: proc(
+	db_path: string,
+	tmp_path: string,
+	opts: Store_Write_Options,
+) -> (
+	attempted: bool,
+	ok: bool,
+) {
+	if !opts.use_catalog ||
+	   !opts.use_columnar_rollup ||
+	   !opts.use_rational_time ||
+	   !opts.use_symbol_table ||
+	   !opts.use_descriptors {
+		return false, false
+	}
+
+	src_st, open_ok := store_open(db_path, context.allocator)
+	if !open_ok {
+		return false, false
+	}
+	defer store_close(&src_st)
+
+	moment, has_m := _latest_moment_map(&src_st)
+	if !has_m {
+		return false, false
+	}
+	cat_cur, c_err := xitdb.hash_map_get_cursor(moment, "catalog")
+	if c_err != nil || cat_cur == nil {
+		return false, false
+	}
+	cat_blob, b_err := xitdb.cursor_read_bytes(cat_cur.?, 0, context.temp_allocator)
+	if b_err != nil {
+		return false, false
+	}
+	cat := _catalog_init(context.allocator)
+	defer _catalog_destroy(&cat)
+	dec_ok := _decode_catalog_blob(cat_blob, &cat)
+	delete(cat_blob, context.temp_allocator)
+	if !dec_ok || len(cat.runs) == 0 || cat.has_cold_override {
+		return false, false
+	}
+
+	hot_blobs := make(map[int][]u8, context.temp_allocator)
+	defer {
+		for _, blob in hot_blobs {
+			delete(blob, context.temp_allocator)
+		}
+		delete(hot_blobs)
+	}
+	if runs_cur, r_err := xitdb.hash_map_get_cursor(moment, "runs");
+	   r_err == nil && runs_cur != nil {
+		runs_map, rm_err := xitdb.read_hash_map_init(runs_cur.?)
+		if rm_err != nil {
+			return false, false
+		}
+		it, it_err := xitdb.hash_map_iterator(runs_map)
+		if it_err != nil {
+			return false, false
+		}
+		for {
+			kv_cur, n_err := xitdb.cursor_iterator_next(&it)
+			if n_err != nil || kv_cur == nil {
+				break
+			}
+			kv, kv_err := xitdb.cursor_read_kv_pair(kv_cur.?, context.temp_allocator)
+			if kv_err != nil {
+				return false, false
+			}
+			rk, k_err := xitdb.cursor_read_string(kv.key_cursor, 0, context.temp_allocator)
+			if k_err != nil {
+				return false, false
+			}
+			ord, known := cat.run_ord_by_key[rk]
+			delete(rk, context.temp_allocator)
+			if !known || cat.runs[ord].in_cold_chunk {
+				return false, false
+			}
+			val_blob, vb_err := xitdb.cursor_read_bytes(kv.value_cursor, 0, context.temp_allocator)
+			if vb_err != nil {
+				return false, false
+			}
+			hot_blobs[ord] = val_blob
+		}
+	}
+
+	unsealed_ords := make([dynamic]int, 0, len(cat.runs), context.temp_allocator)
+	defer delete(unsealed_ords)
+	sealed_count := 0
+	for e, ord in cat.runs {
+		if e.in_cold_chunk {
+			sealed_count += 1
+		} else {
+			if ord not_in hot_blobs {
+				return false, false
+			}
+			append(&unsealed_ords, ord)
+		}
+	}
+
+	chunk_blobs := make([dynamic][]u8, context.temp_allocator)
+	defer {
+		for cb in chunk_blobs {
+			delete(cb, context.temp_allocator)
+		}
+		delete(chunk_blobs)
+	}
+	if chunks_cur, ch_err := xitdb.hash_map_get_cursor(moment, "cold_chunks");
+	   ch_err == nil && chunks_cur != nil {
+		chunks_list, cl_err := xitdb.read_array_list_init(chunks_cur.?)
+		if cl_err != nil {
+			return false, false
+		}
+		it, it_err := xitdb.array_list_iterator(chunks_list)
+		if it_err != nil {
+			return false, false
+		}
+		for {
+			cur_maybe, n_err := xitdb.cursor_iterator_next(&it)
+			if n_err != nil || cur_maybe == nil {
+				break
+			}
+			cb, cb_err := xitdb.cursor_read_bytes(cur_maybe.?, 0, context.temp_allocator)
+			if cb_err != nil ||
+			   len(cb) < len(CZCH_V2_MAGIC) ||
+			   string(cb[:len(CZCH_V2_MAGIC)]) != CZCH_V2_MAGIC {
+				delete(cb, context.temp_allocator)
+				return false, false
+			}
+			append(&chunk_blobs, cb)
+		}
+	}
+	if (sealed_count > 0 && len(chunk_blobs) == 0) || (sealed_count == 0 && len(chunk_blobs) > 0) {
+		return false, false
+	}
+
+	keep_hot := max(opts.keep_hot_runs, 0)
+	if sealed_count > 0 && len(unsealed_ords) < keep_hot {
+		return false, false
+	}
+
+	to_seal_n := 0
+	if len(unsealed_ords) > keep_hot {
+		rem := len(unsealed_ords) - keep_hot
+		if len(chunk_blobs) > 0 || rem >= 2 {
+			to_seal_n = rem
+		}
+	}
+
+	if to_seal_n > 0 {
+		off := 0
+		for off < to_seal_n {
+			end := min(off + _COLD_CHUNK_MAX_RUNS, to_seal_n)
+			batch_n := end - off
+			seal_pkts := make([dynamic]hugi.Run_Packet, 0, batch_n, context.temp_allocator)
+			for ord in unsealed_ords[off:end] {
+				pkt, p_ok := _decode_compressed_packet(
+					hot_blobs[ord],
+					cat.syms,
+					cat.descs,
+					context.allocator,
+				)
+				if !p_ok {
+					for &sp in seal_pkts {
+						hugi.packet_destroy(&sp)
+					}
+					delete(seal_pkts)
+					return true, false
+				}
+				append(&seal_pkts, pkt)
+			}
+			new_chk, chk_ok := _encode_cold_chunk(
+				seal_pkts[:],
+				&cat.syms,
+				&cat.descs,
+				opts,
+				context.temp_allocator,
+			)
+			for &sp in seal_pkts {
+				hugi.packet_destroy(&sp)
+			}
+			delete(seal_pkts)
+			if !chk_ok {
+				return true, false
+			}
+			append(&chunk_blobs, new_chk)
+			for ord in unsealed_ords[off:end] {
+				cat.runs[ord].in_cold_chunk = true
+			}
+			off = end
+		}
+	}
+
+	mem_st, mem_ok := store_open(":memory:", context.allocator)
+	if !mem_ok {
+		return true, false
+	}
+	defer store_close(&mem_st)
+	store_set_write_options(&mem_st, opts)
+
+	rc := xitdb.database_root_cursor(&mem_st.db)
+	history, h_err := xitdb.write_array_list_init(rc)
+	if h_err != nil {
+		return true, false
+	}
+	fctx := _Fast_Compact_Ctx {
+		cat         = &cat,
+		chunk_blobs = chunk_blobs[:],
+		hot_blobs   = hot_blobs,
+		keep_ords   = unsealed_ords[to_seal_n:],
+		opts        = opts,
+	}
+	if app_err := xitdb.array_list_append_context(
+		&history,
+		xitdb.Slot{},
+		_fast_compact_moment_cb,
+		&fctx,
+	); app_err != nil || fctx.failed {
+		return true, false
+	}
+
+	dst_core, dst_err := xitdb.core_file_open(tmp_path, {.Read, .Write, .Create, .Trunc})
+	if dst_err != nil {
+		return true, false
+	}
+	defer _ = xitdb.core_destroy(&dst_core, close_file = true)
+
+	if _, comp_err := xitdb.database_compact(&mem_st.db, &dst_core); comp_err != nil {
+		return true, false
+	}
+	return true, true
+}
+
 /*
-Compacts the `xitdb` store at `db_path` using `opts` (`CZPK\x03`, global symbol/descriptor
-tables, domain float codecs, and cold columnar rollup chunks when enabled) via
+Compacts the `xitdb` store at `db_path` using `opts` (`HCAT\x01`, `CZPK\x04`, global symbol/descriptor
+tables, rational/domain codecs, and cold columnar rollup chunks when enabled) via
 `xitdb.database_compact` and atomically replaces `db_path`.
+Reuses already-sealed `CZCH\x02` chunks verbatim in `O(hot_runs)` when possible.
 */
 @(require_results)
 store_compact_with_options :: proc(
@@ -1401,6 +2127,20 @@ store_compact_with_options :: proc(
 	tmp_path := fmt.tprintf("%s.compact.tmp", db_path)
 	defer if !ok && os.exists(tmp_path) {
 		_ = os.remove(tmp_path)
+	}
+
+	if attempted, fast_ok := _try_fast_catalog_compact(db_path, tmp_path, opts); attempted {
+		if !fast_ok {
+			return before_bytes, 0, false
+		}
+		if fi, err := os.stat(tmp_path, context.temp_allocator); err == nil {
+			after_bytes = fi.size
+		}
+		if os.rename(tmp_path, db_path) != nil {
+			return before_bytes, 0, false
+		}
+		ok = true
+		return before_bytes, after_bytes, true
 	}
 
 	pkts: []hugi.Run_Packet
@@ -1489,12 +2229,51 @@ store_compact :: proc(db_path: string) -> (before_bytes: i64, after_bytes: i64, 
 	return store_compact_with_options(db_path, default_store_write_options())
 }
 
+@(private)
+_raw_groups_add_record :: proc(
+	groups: ^[dynamic]_Raw_Group,
+	by_name: ^map[string]int,
+	pkt_commit, pkt_run_id, pkt_lang, pkt_suite: string,
+	pkt_ts: i64,
+	r: hugi.Record,
+	filter: string,
+	allocator: runtime.Allocator,
+) {
+	key := r.full_name != "" ? r.full_name : r.name
+	if !hugi.matches_name_filter(filter, key) {
+		return
+	}
+	g_idx, seen := by_name[key]
+	if !seen {
+		g_idx = len(groups^)
+		by_name[key] = g_idx
+		append(
+			groups,
+			_Raw_Group {
+				full_name = strings.clone(key, allocator),
+				commit = strings.clone(pkt_commit, allocator),
+				lang = strings.clone(pkt_lang, allocator),
+				suite_name = strings.clone(pkt_suite, allocator),
+				timestamp_unix = pkt_ts,
+				run_ids = make([dynamic]string, allocator),
+				records = make([dynamic]hugi.Record, allocator),
+			},
+		)
+	}
+	g := &groups[g_idx]
+	if pkt_ts > g.timestamp_unix {
+		g.timestamp_unix = pkt_ts
+	}
+	append(&g.run_ids, strings.clone(pkt_run_id, allocator))
+	append(&g.records, hugi.record_clone(r, allocator))
+}
+
 /*
 Loads matching raw `Record`s from `st` grouped for pooling:
 - If `run_id != ""`, loads only that run.
 - If `commit != ""`, loads all runs matching `(commit prefix, lang)`.
-- Otherwise, loads the latest snapshot per benchmark from `"snapshots"[lang]`, pooling
-  multiple runs if the benchmark's latest commit has > 1 run in `"commits"`.
+- Otherwise, loads the latest snapshot per benchmark, pooling multiple runs if the
+  benchmark's latest commit has > 1 run.
 */
 @(require_results)
 store_load_raw_groups :: proc(
@@ -1518,39 +2297,6 @@ store_load_raw_groups :: proc(
 	}
 	defer _moment_reader_destroy(&mr)
 
-	add_record := proc(
-		groups: ^[dynamic]_Raw_Group,
-		by_name: ^map[string]int,
-		pkt_commit, pkt_run_id, pkt_suite: string,
-		r: hugi.Record,
-		filter: string,
-		allocator: runtime.Allocator,
-	) {
-		key := r.full_name != "" ? r.full_name : r.name
-		if !hugi.matches_name_filter(filter, key) {
-			return
-		}
-		g_idx, seen := by_name[key]
-		if !seen {
-			g_idx = len(groups^)
-			by_name[key] = g_idx
-			append(
-				groups,
-				_Raw_Group {
-					full_name = strings.clone(key, allocator),
-					commit = strings.clone(pkt_commit, allocator),
-					lang = "",
-					suite_name = strings.clone(pkt_suite, allocator),
-					run_ids = make([dynamic]string, allocator),
-					records = make([dynamic]hugi.Record, allocator),
-				},
-			)
-		}
-		g := &groups[g_idx]
-		append(&g.run_ids, strings.clone(pkt_run_id, allocator))
-		append(&g.records, hugi.record_clone(r, allocator))
-	}
-
 	if run_id != "" {
 		prefixed_key := fmt.tprintf("%s:%s", lang != "" ? lang : "odin", run_id)
 		pkt, pkt_ok := _moment_reader_get_packet(&mr, prefixed_key)
@@ -1561,20 +2307,109 @@ store_load_raw_groups :: proc(
 			return groups[:]
 		}
 		for r in pkt.records {
-			add_record(
+			_raw_groups_add_record(
 				&groups,
 				&by_name,
 				pkt.commit,
 				pkt.run_id,
+				pkt.lang,
 				pkt.suite_name,
+				pkt.timestamp_unix,
 				r,
 				filter,
 				allocator,
 			)
 		}
-		for &g in groups {
-			g.lang = strings.clone(pkt.lang, allocator)
+		return groups[:]
+	}
+
+	if mr.has_catalog {
+		if commit != "" {
+			eff_out_lang := lang != "" ? lang : "odin"
+			for e in mr.cat.runs {
+				if (lang != "" && e.lang != lang) || !_match_commit_prefix(e.commit, commit) {
+					continue
+				}
+				e_lang := e.lang != "" ? e.lang : "odin"
+				rk := fmt.tprintf("%s:%s", e_lang, e.run_id)
+				pkt, pkt_ok := _moment_reader_get_packet(&mr, rk)
+				if !pkt_ok {
+					continue
+				}
+				for r in pkt.records {
+					_raw_groups_add_record(
+						&groups,
+						&by_name,
+						pkt.commit,
+						pkt.run_id,
+						eff_out_lang,
+						pkt.suite_name,
+						pkt.timestamp_unix,
+						r,
+						filter,
+						allocator,
+					)
+				}
+			}
+			slice.sort_by(groups[:], proc(a, b: _Raw_Group) -> bool {
+				return a.records[0].rank < b.records[0].rank
+			})
+			return groups[:]
 		}
+
+		eff_lang := lang != "" ? lang : "odin"
+		snap_m, has_lang := mr.cat.snaps[eff_lang]
+		if !has_lang {
+			return groups[:]
+		}
+		snap_latest_commit := make(map[string]string, context.temp_allocator)
+		active_commits := make(map[string]bool, context.temp_allocator)
+		for key, ref in snap_m {
+			if !hugi.matches_name_filter(filter, key) {
+				continue
+			}
+			run_ord := int(ref.run_ord)
+			if run_ord >= 0 && run_ord < len(mr.cat.runs) {
+				sc := mr.cat.runs[run_ord].commit
+				if sc != "" {
+					snap_latest_commit[key] = sc
+					active_commits[sc] = true
+				}
+			}
+		}
+
+		for e in mr.cat.runs {
+			if e.lang != eff_lang || (e.commit not_in active_commits) {
+				continue
+			}
+			rk := fmt.tprintf("%s:%s", eff_lang, e.run_id)
+			pkt, pkt_ok := _moment_reader_get_packet(&mr, rk)
+			if !pkt_ok || pkt.lang != eff_lang {
+				continue
+			}
+			for r in pkt.records {
+				key := r.full_name != "" ? r.full_name : r.name
+				if target_commit, found := snap_latest_commit[key];
+				   found && pkt.commit == target_commit {
+					_raw_groups_add_record(
+						&groups,
+						&by_name,
+						pkt.commit,
+						pkt.run_id,
+						eff_lang,
+						pkt.suite_name,
+						pkt.timestamp_unix,
+						r,
+						filter,
+						allocator,
+					)
+				}
+			}
+		}
+
+		slice.sort_by(groups[:], proc(a, b: _Raw_Group) -> bool {
+			return a.records[0].rank < b.records[0].rank
+		})
 		return groups[:]
 	}
 
@@ -1607,6 +2442,7 @@ store_load_raw_groups :: proc(
 			}
 			candidate_rids = run_keys
 		}
+		out_lang := lang != "" ? lang : "odin"
 		for rid in candidate_rids {
 			pkt, pkt_ok := _moment_reader_get_packet(&mr, rid)
 			if !pkt_ok {
@@ -1614,21 +2450,20 @@ store_load_raw_groups :: proc(
 			}
 			if (lang == "" || pkt.lang == lang) && _match_commit_prefix(pkt.commit, commit) {
 				for r in pkt.records {
-					add_record(
+					_raw_groups_add_record(
 						&groups,
 						&by_name,
 						pkt.commit,
 						pkt.run_id,
+						out_lang,
 						pkt.suite_name,
+						pkt.timestamp_unix,
 						r,
 						filter,
 						allocator,
 					)
 				}
 			}
-		}
-		for &g in groups {
-			g.lang = strings.clone(lang != "" ? lang : "odin", allocator)
 		}
 		slice.sort_by(groups[:], proc(a, b: _Raw_Group) -> bool {
 			return a.records[0].rank < b.records[0].rank
@@ -1779,12 +2614,14 @@ store_load_raw_groups :: proc(
 			key := r.full_name != "" ? r.full_name : r.name
 			if target_commit, found := snap_latest_commit[key];
 			   found && pkt.commit == target_commit {
-				add_record(
+				_raw_groups_add_record(
 					&groups,
 					&by_name,
 					pkt.commit,
 					pkt.run_id,
+					eff_lang,
 					pkt.suite_name,
+					pkt.timestamp_unix,
 					r,
 					filter,
 					allocator,
@@ -1793,9 +2630,6 @@ store_load_raw_groups :: proc(
 		}
 	}
 
-	for &g in groups {
-		g.lang = strings.clone(eff_lang, allocator)
-	}
 	slice.sort_by(groups[:], proc(a, b: _Raw_Group) -> bool {
 		return a.records[0].rank < b.records[0].rank
 	})
@@ -1804,12 +2638,13 @@ store_load_raw_groups :: proc(
 
 @(private)
 _Raw_Group :: struct {
-	full_name:  string,
-	commit:     string,
-	lang:       string,
-	suite_name: string,
-	run_ids:    [dynamic]string,
-	records:    [dynamic]hugi.Record,
+	full_name:      string,
+	commit:         string,
+	lang:           string,
+	suite_name:     string,
+	timestamp_unix: i64,
+	run_ids:        [dynamic]string,
+	records:        [dynamic]hugi.Record,
 }
 
 @(private)
@@ -1829,4 +2664,181 @@ _raw_groups_destroy :: proc(groups: []_Raw_Group, allocator := context.allocator
 		delete(g.records)
 	}
 	delete(groups, allocator)
+}
+
+@(private)
+_store_load_commit_series_raw_groups :: proc(
+	st: ^Store,
+	lang: string,
+	filter := "",
+	allocator := context.allocator,
+) -> []_Raw_Group {
+	out := make([dynamic]_Raw_Group, allocator)
+	moment, ok := _latest_moment_map(st)
+	if !ok {
+		return out[:]
+	}
+	mr, mr_ok := _moment_reader_init(moment, context.allocator)
+	if !mr_ok {
+		return out[:]
+	}
+	defer _moment_reader_destroy(&mr)
+
+	eff_lang := lang != "" ? lang : "odin"
+	run_keys := make([dynamic]string, context.temp_allocator)
+	defer {
+		for rk in run_keys {
+			delete(rk, context.temp_allocator)
+		}
+		delete(run_keys)
+	}
+	if mr.has_catalog {
+		for e in mr.cat.runs {
+			if lang != "" && e.lang != lang {
+				continue
+			}
+			e_lang := e.lang != "" ? e.lang : "odin"
+			append(
+				&run_keys,
+				fmt.aprintf("%s:%s", e_lang, e.run_id, allocator = context.temp_allocator),
+			)
+		}
+	} else if order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order");
+	   o_err == nil && order_cur != nil {
+		run_keys = _read_string_list(order_cur.?, context.temp_allocator)
+	}
+
+	_Commit_Bucket :: struct {
+		groups:  [dynamic]_Raw_Group,
+		by_name: map[string]int,
+	}
+	commit_order := make([dynamic]string, context.temp_allocator)
+	buckets := make(map[string]_Commit_Bucket, context.temp_allocator)
+	defer {
+		for _, &b in buckets {
+			delete(b.groups)
+			delete(b.by_name)
+		}
+		for c in commit_order {
+			delete(c, context.temp_allocator)
+		}
+		delete(buckets)
+		delete(commit_order)
+	}
+
+	for rk in run_keys {
+		pkt, p_ok := _moment_reader_get_packet(&mr, rk)
+		if !p_ok || (lang != "" && pkt.lang != lang) {
+			continue
+		}
+		ckey := pkt.commit != "" ? pkt.commit : "unknown"
+		if ckey not_in buckets {
+			c_clone := strings.clone(ckey, context.temp_allocator)
+			append(&commit_order, c_clone)
+			buckets[c_clone] = _Commit_Bucket {
+				groups  = make([dynamic]_Raw_Group, context.temp_allocator),
+				by_name = make(map[string]int, context.temp_allocator),
+			}
+		}
+		bp := &buckets[ckey]
+		for r in pkt.records {
+			_raw_groups_add_record(
+				&bp.groups,
+				&bp.by_name,
+				pkt.commit,
+				pkt.run_id,
+				eff_lang,
+				pkt.suite_name,
+				pkt.timestamp_unix,
+				r,
+				filter,
+				allocator,
+			)
+		}
+	}
+
+	for ckey in commit_order {
+		bp := &buckets[ckey]
+		slice.sort_by(bp.groups[:], proc(a, b: _Raw_Group) -> bool {
+			return a.records[0].rank < b.records[0].rank
+		})
+		for g in bp.groups {
+			append(&out, g)
+		}
+	}
+	return out[:]
+}
+
+@(private)
+_store_load_all_run_raw_groups :: proc(
+	st: ^Store,
+	lang: string,
+	filter := "",
+	allocator := context.allocator,
+) -> []_Raw_Group {
+	out := make([dynamic]_Raw_Group, allocator)
+	moment, ok := _latest_moment_map(st)
+	if !ok {
+		return out[:]
+	}
+	mr, mr_ok := _moment_reader_init(moment, context.allocator)
+	if !mr_ok {
+		return out[:]
+	}
+	defer _moment_reader_destroy(&mr)
+
+	eff_lang := lang != "" ? lang : "odin"
+	run_keys := make([dynamic]string, context.temp_allocator)
+	defer {
+		for rk in run_keys {
+			delete(rk, context.temp_allocator)
+		}
+		delete(run_keys)
+	}
+	if mr.has_catalog {
+		for e in mr.cat.runs {
+			if lang != "" && e.lang != lang {
+				continue
+			}
+			e_lang := e.lang != "" ? e.lang : "odin"
+			append(
+				&run_keys,
+				fmt.aprintf("%s:%s", e_lang, e.run_id, allocator = context.temp_allocator),
+			)
+		}
+	} else if order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order");
+	   o_err == nil && order_cur != nil {
+		run_keys = _read_string_list(order_cur.?, context.temp_allocator)
+	}
+
+	for rk in run_keys {
+		pkt, p_ok := _moment_reader_get_packet(&mr, rk)
+		if !p_ok || (lang != "" && pkt.lang != lang) {
+			continue
+		}
+		out_lang := pkt.lang != "" ? pkt.lang : eff_lang
+		for r in pkt.records {
+			key := r.full_name != "" ? r.full_name : r.name
+			if !hugi.matches_name_filter(filter, key) {
+				continue
+			}
+			rids := make([dynamic]string, allocator)
+			append(&rids, strings.clone(pkt.run_id, allocator))
+			recs := make([dynamic]hugi.Record, allocator)
+			append(&recs, hugi.record_clone(r, allocator))
+			append(
+				&out,
+				_Raw_Group {
+					full_name = strings.clone(key, allocator),
+					commit = strings.clone(pkt.commit, allocator),
+					lang = strings.clone(out_lang, allocator),
+					suite_name = strings.clone(pkt.suite_name, allocator),
+					timestamp_unix = pkt.timestamp_unix,
+					run_ids = rids,
+					records = recs,
+				},
+			)
+		}
+	}
+	return out[:]
 }

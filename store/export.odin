@@ -2,6 +2,7 @@ package hugi_store
 
 import obench "../deps/obench/obench"
 import skadi "../deps/skadi/skadi"
+import hugi "../hugi"
 import "core:fmt"
 import "core:mem"
 import "core:os"
@@ -94,19 +95,19 @@ export_arrow_ipc :: proc(
 		skadi.field_make("run_count", skadi.Int64_Type{}, false),
 		skadi.field_make("ops_per_sample", skadi.UInt64_Type{}, false),
 		skadi.field_make("samples", skadi.Int64_Type{}, false),
-		skadi.field_make("min_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("p25_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("p50_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("p75_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("p95_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("p99_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("max_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("mean_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("std_dev_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("ci95_ns", skadi.Float64_Type{}, false),
+		skadi.field_make("min_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("p25_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("p50_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("p75_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("p95_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("p99_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("max_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("mean_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("std_dev_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("ci95_ns", skadi.Int64_Type{}, false),
 		skadi.field_make("cv_pct", skadi.Float64_Type{}, false),
-		skadi.field_make("iqr_ns", skadi.Float64_Type{}, false),
-		skadi.field_make("mad_ns", skadi.Float64_Type{}, false),
+		skadi.field_make("iqr_ns", skadi.Int64_Type{}, false),
+		skadi.field_make("mad_ns", skadi.Int64_Type{}, false),
 		skadi.field_make("ops_per_sec", skadi.Float64_Type{}, false),
 		skadi.field_make("mb_per_sec", skadi.Float64_Type{}, false),
 		skadi.field_make("bytes_per_op", skadi.UInt64_Type{}, false),
@@ -119,6 +120,7 @@ export_arrow_ipc :: proc(
 		skadi.field_make("samples_blob", skadi.Binary_Type{}, false),
 	}
 
+	_ = codec
 	schema, schema_err := skadi.schema_make(fields[:], allocator)
 	if schema_err != nil {
 		return false
@@ -148,31 +150,31 @@ export_arrow_ipc :: proc(
 	b_samples := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_samples)
 
-	b_min := skadi.builder_make(f64, cap_n, allocator)
+	b_min := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_min)
-	b_p25 := skadi.builder_make(f64, cap_n, allocator)
+	b_p25 := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_p25)
-	b_p50 := skadi.builder_make(f64, cap_n, allocator)
+	b_p50 := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_p50)
-	b_p75 := skadi.builder_make(f64, cap_n, allocator)
+	b_p75 := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_p75)
-	b_p95 := skadi.builder_make(f64, cap_n, allocator)
+	b_p95 := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_p95)
-	b_p99 := skadi.builder_make(f64, cap_n, allocator)
+	b_p99 := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_p99)
-	b_max := skadi.builder_make(f64, cap_n, allocator)
+	b_max := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_max)
-	b_mean := skadi.builder_make(f64, cap_n, allocator)
+	b_mean := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_mean)
-	b_std := skadi.builder_make(f64, cap_n, allocator)
+	b_std := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_std)
-	b_ci95 := skadi.builder_make(f64, cap_n, allocator)
+	b_ci95 := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_ci95)
 	b_cv := skadi.builder_make(f64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_cv)
-	b_iqr := skadi.builder_make(f64, cap_n, allocator)
+	b_iqr := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_iqr)
-	b_mad := skadi.builder_make(f64, cap_n, allocator)
+	b_mad := skadi.builder_make(i64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_mad)
 	b_ops_sec := skadi.builder_make(f64, cap_n, allocator)
 	defer skadi.builder_destroy(&b_ops_sec)
@@ -212,19 +214,19 @@ export_arrow_ipc :: proc(
 		skadi.builder_append(&b_ops_per_sample, r.ops_per_sample)
 		skadi.builder_append(&b_samples, i64(r.samples))
 
-		skadi.builder_append(&b_min, r.min_ns)
-		skadi.builder_append(&b_p25, r.p25_ns)
-		skadi.builder_append(&b_p50, r.p50_ns)
-		skadi.builder_append(&b_p75, r.p75_ns)
-		skadi.builder_append(&b_p95, r.p95_ns)
-		skadi.builder_append(&b_p99, r.p99_ns)
-		skadi.builder_append(&b_max, r.max_ns)
-		skadi.builder_append(&b_mean, r.mean_ns)
-		skadi.builder_append(&b_std, r.std_dev_ns)
-		skadi.builder_append(&b_ci95, r.ci95_ns)
+		skadi.builder_append(&b_min, r.min_fs)
+		skadi.builder_append(&b_p25, r.p25_fs)
+		skadi.builder_append(&b_p50, r.p50_fs)
+		skadi.builder_append(&b_p75, r.p75_fs)
+		skadi.builder_append(&b_p95, r.p95_fs)
+		skadi.builder_append(&b_p99, r.p99_fs)
+		skadi.builder_append(&b_max, r.max_fs)
+		skadi.builder_append(&b_mean, r.mean_fs)
+		skadi.builder_append(&b_std, r.std_dev_fs)
+		skadi.builder_append(&b_ci95, r.ci95_fs)
 		skadi.builder_append(&b_cv, r.cv_pct)
-		skadi.builder_append(&b_iqr, r.iqr_ns)
-		skadi.builder_append(&b_mad, r.mad_ns)
+		skadi.builder_append(&b_iqr, r.iqr_fs)
+		skadi.builder_append(&b_mad, r.mad_fs)
 		skadi.builder_append(&b_ops_sec, r.ops_per_sec)
 		skadi.builder_append(&b_mb_sec, r.mb_per_sec)
 
@@ -238,11 +240,19 @@ export_arrow_ipc :: proc(
 
 		skadi.builder_append(&b_peak_heap, r.peak_heap_bytes)
 
-		blob, comp_ok := compress_samples_f64(r.samples_ns[:], codec, context.temp_allocator)
+		blob: []u8
+		comp_ok: bool
+		if len(r.samples_batch_ns) == len(r.samples_fs) && len(r.samples_batch_ns) > 0 {
+			blob, comp_ok = compress_samples_u64(r.samples_batch_ns[:], context.temp_allocator)
+		} else {
+			blob, comp_ok = compress_samples_fs_i64(r.samples_fs[:], context.temp_allocator)
+		}
 		if !comp_ok {
+			delete(blob, context.temp_allocator)
 			return false
 		}
 		skadi.binary_builder_append(&b_samples_blob, blob)
+		delete(blob, context.temp_allocator)
 	}
 
 	cols: [33]skadi.Array
@@ -480,6 +490,19 @@ _write_json_record :: proc(sb: ^strings.Builder, r: Pooled_Record, pretty: bool)
 		strings.write_string(sb, kv_sep)
 		fmt.sbprintf(sb, prec, v)
 	}
+	write_dec_fs_field :: proc(
+		sb: ^strings.Builder,
+		key: string,
+		fs: i64,
+		kv_sep, rec_sep: string,
+	) {
+		strings.write_string(sb, rec_sep)
+		strings.write_byte(sb, '"')
+		strings.write_string(sb, key)
+		strings.write_byte(sb, '"')
+		strings.write_string(sb, kv_sep)
+		hugi.write_decimal_ns_fs(sb, fs)
+	}
 
 	write_str_field(sb, "commit", r.commit, kv, sep, first = true)
 	write_str_field(sb, "lang", r.lang, kv, sep)
@@ -492,19 +515,19 @@ _write_json_record :: proc(sb: ^strings.Builder, r: Pooled_Record, pretty: bool)
 	write_int_field(sb, "runs", i64(r.run_count), kv, sep)
 	write_int_field(sb, "samples", i64(r.samples), kv, sep)
 	write_u64_field(sb, "ops_per_sample", r.ops_per_sample, kv, sep)
-	write_f64_field(sb, "min_ns", r.min_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "p25_ns", r.p25_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "p50_ns", r.p50_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "p75_ns", r.p75_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "p95_ns", r.p95_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "p99_ns", r.p99_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "max_ns", r.max_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "mean_ns", r.mean_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "std_dev_ns", r.std_dev_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "ci95_ns", r.ci95_ns, "%.6f", kv, sep)
+	write_dec_fs_field(sb, "min_ns", r.min_fs, kv, sep)
+	write_dec_fs_field(sb, "p25_ns", r.p25_fs, kv, sep)
+	write_dec_fs_field(sb, "p50_ns", r.p50_fs, kv, sep)
+	write_dec_fs_field(sb, "p75_ns", r.p75_fs, kv, sep)
+	write_dec_fs_field(sb, "p95_ns", r.p95_fs, kv, sep)
+	write_dec_fs_field(sb, "p99_ns", r.p99_fs, kv, sep)
+	write_dec_fs_field(sb, "max_ns", r.max_fs, kv, sep)
+	write_dec_fs_field(sb, "mean_ns", r.mean_fs, kv, sep)
+	write_dec_fs_field(sb, "std_dev_ns", r.std_dev_fs, kv, sep)
+	write_dec_fs_field(sb, "ci95_ns", r.ci95_fs, kv, sep)
 	write_f64_field(sb, "cv_pct", r.cv_pct, "%.4f", kv, sep)
-	write_f64_field(sb, "iqr_ns", r.iqr_ns, "%.6f", kv, sep)
-	write_f64_field(sb, "mad_ns", r.mad_ns, "%.6f", kv, sep)
+	write_dec_fs_field(sb, "iqr_ns", r.iqr_fs, kv, sep)
+	write_dec_fs_field(sb, "mad_ns", r.mad_fs, kv, sep)
 	write_f64_field(sb, "ops_per_sec", r.ops_per_sec, "%.3f", kv, sep)
 	write_u64_field(sb, "bytes_per_op", r.bytes_per_op, kv, sep)
 	write_f64_field(sb, "mb_per_sec", r.mb_per_sec, "%.4f", kv, sep)
@@ -514,12 +537,22 @@ _write_json_record :: proc(sb: ^strings.Builder, r: Pooled_Record, pretty: bool)
 	write_f64_field(sb, "temp_allocs_per_op", r.temp_allocs_per_op, "%.4f", kv, sep)
 	write_f64_field(sb, "temp_bytes_per_op", r.temp_bytes_per_op, "%.2f", kv, sep)
 	write_int_field(sb, "peak_heap_bytes", r.peak_heap_bytes, kv, sep)
+	if len(r.samples_batch_ns) > 0 {
+		fmt.sbprintf(sb, `%s"samples_batch_ns"%s[`, sep, kv)
+		for b, idx in r.samples_batch_ns {
+			if idx > 0 {
+				strings.write_string(sb, ", " if pretty else ",")
+			}
+			fmt.sbprintf(sb, "%d", b)
+		}
+		strings.write_byte(sb, ']')
+	}
 	fmt.sbprintf(sb, `%s"samples_ns"%s[`, sep, kv)
-	for s, idx in r.samples_ns {
+	for fs, idx in r.samples_fs {
 		if idx > 0 {
 			strings.write_string(sb, ", " if pretty else ",")
 		}
-		fmt.sbprintf(sb, "%.3f", s)
+		hugi.write_decimal_ns_fs(sb, fs)
 	}
 	if pretty {
 		strings.write_string(sb, "]\n  }")
@@ -626,7 +659,7 @@ _export_delimited :: proc(path: string, records: []Pooled_Record, delim: byte) -
 		_write_delimited_str(&sb, r.full_name, delim)
 		fmt.sbprintf(
 			&sb,
-			"%c%d%c%d%c%d%c%d%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.4f%c%.3f%c%d%c%.4f%c%d%c%.4f%c%.2f\n",
+			"%c%d%c%d%c%d%c%d",
 			d,
 			r.rank,
 			d,
@@ -635,26 +668,26 @@ _export_delimited :: proc(path: string, records: []Pooled_Record, delim: byte) -
 			r.samples,
 			d,
 			r.ops_per_sample,
-			d,
-			r.min_ns,
-			d,
-			r.p25_ns,
-			d,
-			r.p50_ns,
-			d,
-			r.p75_ns,
-			d,
-			r.p95_ns,
-			d,
-			r.p99_ns,
-			d,
-			r.max_ns,
-			d,
-			r.mean_ns,
-			d,
-			r.std_dev_ns,
-			d,
-			r.ci95_ns,
+		)
+		fs_vals := [10]i64 {
+			r.min_fs,
+			r.p25_fs,
+			r.p50_fs,
+			r.p75_fs,
+			r.p95_fs,
+			r.p99_fs,
+			r.max_fs,
+			r.mean_fs,
+			r.std_dev_fs,
+			r.ci95_fs,
+		}
+		for fv in fs_vals {
+			strings.write_byte(&sb, delim)
+			hugi.write_decimal_ns_fs(&sb, fv)
+		}
+		fmt.sbprintf(
+			&sb,
+			"%c%.4f%c%.3f%c%d%c%.4f%c%d%c%.4f%c%.2f\n",
 			d,
 			r.cv_pct,
 			d,
@@ -703,8 +736,8 @@ format_markdown_table :: proc(records: []Pooled_Record, allocator := context.all
 	)
 	strings.write_string(&sb, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
 	for r in records {
-		med_str := obench.format_duration_ns(r.p50_ns, context.temp_allocator)
-		p95_str := obench.format_duration_ns(r.p95_ns, context.temp_allocator)
+		med_str := hugi.format_duration_fs(r.p50_fs, context.temp_allocator)
+		p95_str := hugi.format_duration_fs(r.p95_fs, context.temp_allocator)
 		foot_str := "-"
 		if r.footprint_bytes > 0 {
 			foot_str = obench.format_bytes(f64(r.footprint_bytes), context.temp_allocator)
@@ -771,8 +804,8 @@ format_comparison_table :: proc(
 	)
 	strings.write_string(&sb, "| --- | ---: | ---: | ---: | ---: | ---: | --- |\n")
 	for r in rep.rows {
-		base_str := obench.format_duration_ns(r.base_p50_ns, context.temp_allocator)
-		cand_str := obench.format_duration_ns(r.cand_p50_ns, context.temp_allocator)
+		base_str := hugi.format_duration_fs(r.base_p50_fs, context.temp_allocator)
+		cand_str := hugi.format_duration_fs(r.cand_p50_fs, context.temp_allocator)
 		test_str := ""
 		if r.used_rank_test {
 			test_str = fmt.tprintf("MWU p=%.4f", r.p_value)
@@ -832,12 +865,12 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 	for r in rep.rows {
 		a_str := fmt.tprintf(
 			"%s (%.1f%%)",
-			obench.format_duration_ns(r.a_p50_ns, context.temp_allocator),
+			hugi.format_duration_fs(r.a_p50_fs, context.temp_allocator),
 			r.a_cv_pct,
 		)
 		b_str := fmt.tprintf(
 			"%s (%.1f%%)",
-			obench.format_duration_ns(r.b_p50_ns, context.temp_allocator),
+			hugi.format_duration_fs(r.b_p50_fs, context.temp_allocator),
 			r.b_cv_pct,
 		)
 		foot_str := "ok"

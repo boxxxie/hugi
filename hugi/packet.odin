@@ -10,10 +10,95 @@ import "core:slice"
 import "core:strings"
 import "core:time"
 
-PACKET_MAGIC :: "HPKT\x01\x00\x00\x00"
+PACKET_MAGIC :: "HPKT\x02\x00\x00\x00"
+LEGACY_PACKET_V1_MAGIC :: "HPKT\x01\x00\x00\x00"
 LEGACY_PACKET_MAGIC :: "OBPK\x01\x00\x00\x00"
-RECORD_MAGIC :: "OBRC\x01\x00\x00\x00"
+RECORD_MAGIC :: "OBRC\x02\x00\x00\x00"
+LEGACY_RECORD_MAGIC :: "OBRC\x01\x00\x00\x00"
 MAX_METRICS :: 8
+
+FS_PER_NS :: i64(1_000_000)
+FS_PER_SEC_F64 :: 1_000_000_000_000_000.0
+
+batch_ns_to_op_fs :: #force_inline proc "contextless" (batch_ns: u64, ops_per_sample: u64) -> i64 {
+	ops := max(ops_per_sample, 1)
+	v := (u128(batch_ns) * 1_000_000 + u128(ops / 2)) / u128(ops)
+	return v > u128(max(i64)) ? max(i64) : i64(v)
+}
+
+ns_f64_to_fs :: #force_inline proc "contextless" (ns: f64) -> i64 {
+	if !(ns > 0.0) {
+		return 0
+	}
+	scaled := ns * 1_000_000.0
+	if scaled >= f64(max(i64)) {
+		return max(i64)
+	}
+	return i64(math.round(scaled))
+}
+
+fs_to_ns_f64 :: #force_inline proc "contextless" (fs: i64) -> f64 {
+	return f64(fs) * 1e-6
+}
+
+legacy_ns_to_batch_ns :: #force_inline proc "contextless" (ns: f64, ops_per_sample: u64) -> u64 {
+	if !(ns > 0.0) {
+		return 0
+	}
+	prod := ns * f64(max(ops_per_sample, 1))
+	if prod >= f64(max(u64)) {
+		return max(u64)
+	}
+	return u64(math.round(prod))
+}
+
+percentile_sorted_fs :: proc "contextless" (sorted: []i64, pct_num: int) -> i64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0
+	}
+	if n == 1 || pct_num <= 0 {
+		return sorted[0]
+	}
+	if pct_num >= 100 {
+		return sorted[n - 1]
+	}
+	num := i128(pct_num) * i128(n - 1)
+	lo := int(num / 100)
+	rem := num % 100
+	if lo >= n - 1 || rem == 0 {
+		return sorted[min(lo, n - 1)]
+	}
+	lo_val := i128(sorted[lo])
+	hi_val := i128(sorted[lo + 1])
+	interp := lo_val * 100 + (hi_val - lo_val) * rem
+	if interp >= 0 {
+		return i64((interp + 50) / 100)
+	}
+	return i64((interp - 50) / 100)
+}
+
+write_decimal_ns_fs :: proc(sb: ^strings.Builder, fs: i64) {
+	if fs < 0 {
+		strings.write_byte(sb, '-')
+		mag := u64(-fs) if fs != min(i64) else (u64(max(i64)) + 1)
+		fmt.sbprintf(sb, "%d.%06d", mag / 1_000_000, mag % 1_000_000)
+		return
+	}
+	mag := u64(fs)
+	fmt.sbprintf(sb, "%d.%06d", mag / 1_000_000, mag % 1_000_000)
+}
+
+@(require_results)
+format_duration_fs :: proc(fs: i64, allocator := context.allocator) -> string {
+	if fs > 0 && fs < 1_000 {
+		return fmt.aprintf("%d fs", fs, allocator = allocator)
+	}
+	if fs >= 1_000 && fs < 1_000_000 {
+		return fmt.aprintf("%.2f ps", f64(fs) / 1000.0, allocator = allocator)
+	}
+	return obench.format_duration_ns(fs_to_ns_f64(fs), allocator)
+}
 
 Metric :: struct {
 	unit:  string,
@@ -32,19 +117,19 @@ Record :: struct {
 	ops_per_sample:     u64,
 	samples:            int,
 	warmup:             int,
-	min_ns:             f64,
-	p25_ns:             f64,
-	p50_ns:             f64,
-	p75_ns:             f64,
-	p95_ns:             f64,
-	p99_ns:             f64,
-	max_ns:             f64,
-	mean_ns:            f64,
-	std_dev_ns:         f64,
-	ci95_ns:            f64,
+	min_fs:             i64,
+	p25_fs:             i64,
+	p50_fs:             i64,
+	p75_fs:             i64,
+	p95_fs:             i64,
+	p99_fs:             i64,
+	max_fs:             i64,
+	mean_fs:            i64,
+	std_dev_fs:         i64,
+	ci95_fs:            i64,
 	cv_pct:             f64,
-	iqr_ns:             f64,
-	mad_ns:             f64,
+	iqr_fs:             i64,
+	mad_fs:             i64,
 	median_cycles:      f64,
 	bytes_per_op:       u64,
 	items_per_op:       u64,
@@ -60,7 +145,7 @@ Record :: struct {
 	zero_alloc_failed:  bool,
 	error:              string,
 	metrics:            [dynamic]Metric,
-	samples_ns:         [dynamic]f64,
+	samples_batch_ns:   [dynamic]u64,
 }
 
 Run_Packet :: struct {
@@ -91,8 +176,8 @@ record_clone :: proc(r: Record, allocator := context.allocator) -> Record {
 			value = m.value,
 		}
 	}
-	out.samples_ns = make([dynamic]f64, len(r.samples_ns), allocator)
-	copy(out.samples_ns[:], r.samples_ns[:])
+	out.samples_batch_ns = make([dynamic]u64, len(r.samples_batch_ns), allocator)
+	copy(out.samples_batch_ns[:], r.samples_batch_ns[:])
 	return out
 }
 
@@ -108,7 +193,7 @@ record_destroy :: proc(r: ^Record, allocator := context.allocator) {
 		delete(m.unit, allocator)
 	}
 	delete(r.metrics)
-	delete(r.samples_ns)
+	delete(r.samples_batch_ns)
 	r^ = {}
 }
 
@@ -249,19 +334,19 @@ _write_record_body :: proc(buf: ^[dynamic]u8, r: Record, include_samples: bool) 
 	_append_u64(buf, r.ops_per_sample)
 	_append_u32(buf, u32(r.samples))
 	_append_u32(buf, u32(r.warmup))
-	_append_f64(buf, r.min_ns)
-	_append_f64(buf, r.p25_ns)
-	_append_f64(buf, r.p50_ns)
-	_append_f64(buf, r.p75_ns)
-	_append_f64(buf, r.p95_ns)
-	_append_f64(buf, r.p99_ns)
-	_append_f64(buf, r.max_ns)
-	_append_f64(buf, r.mean_ns)
-	_append_f64(buf, r.std_dev_ns)
-	_append_f64(buf, r.ci95_ns)
+	_append_i64(buf, r.min_fs)
+	_append_i64(buf, r.p25_fs)
+	_append_i64(buf, r.p50_fs)
+	_append_i64(buf, r.p75_fs)
+	_append_i64(buf, r.p95_fs)
+	_append_i64(buf, r.p99_fs)
+	_append_i64(buf, r.max_fs)
+	_append_i64(buf, r.mean_fs)
+	_append_i64(buf, r.std_dev_fs)
+	_append_i64(buf, r.ci95_fs)
 	_append_f64(buf, r.cv_pct)
-	_append_f64(buf, r.iqr_ns)
-	_append_f64(buf, r.mad_ns)
+	_append_i64(buf, r.iqr_fs)
+	_append_i64(buf, r.mad_fs)
 	_append_f64(buf, r.median_cycles)
 	_append_u64(buf, r.bytes_per_op)
 	_append_u64(buf, r.items_per_op)
@@ -284,9 +369,9 @@ _write_record_body :: proc(buf: ^[dynamic]u8, r: Record, include_samples: bool) 
 	}
 
 	if include_samples {
-		_append_u32(buf, u32(len(r.samples_ns)))
-		for s in r.samples_ns {
-			_append_f64(buf, s)
+		_append_u32(buf, u32(len(r.samples_batch_ns)))
+		for s in r.samples_batch_ns {
+			_append_u64(buf, s)
 		}
 	} else {
 		_append_u32(buf, 0)
@@ -294,12 +379,19 @@ _write_record_body :: proc(buf: ^[dynamic]u8, r: Record, include_samples: bool) 
 }
 
 @(private = "file", require_results)
-_read_record_body :: proc(rd: ^_Reader, allocator: runtime.Allocator) -> (rec: Record, ok: bool) {
+_read_record_body :: proc(
+	rd: ^_Reader,
+	legacy_f64: bool,
+	allocator: runtime.Allocator,
+) -> (
+	rec: Record,
+	ok: bool,
+) {
 	defer if !ok {
 		record_destroy(&rec, allocator)
 	}
 	rec.metrics = make([dynamic]Metric, allocator)
-	rec.samples_ns = make([dynamic]f64, allocator)
+	rec.samples_batch_ns = make([dynamic]u64, allocator)
 
 	rank_i := _read_i64(rd) or_return
 	rec.rank = int(rank_i)
@@ -315,19 +407,35 @@ _read_record_body :: proc(rd: ^_Reader, allocator: runtime.Allocator) -> (rec: R
 	rec.ops_per_sample = _read_u64(rd) or_return
 	rec.samples = int(_read_u32(rd) or_return)
 	rec.warmup = int(_read_u32(rd) or_return)
-	rec.min_ns = _read_f64(rd) or_return
-	rec.p25_ns = _read_f64(rd) or_return
-	rec.p50_ns = _read_f64(rd) or_return
-	rec.p75_ns = _read_f64(rd) or_return
-	rec.p95_ns = _read_f64(rd) or_return
-	rec.p99_ns = _read_f64(rd) or_return
-	rec.max_ns = _read_f64(rd) or_return
-	rec.mean_ns = _read_f64(rd) or_return
-	rec.std_dev_ns = _read_f64(rd) or_return
-	rec.ci95_ns = _read_f64(rd) or_return
-	rec.cv_pct = _read_f64(rd) or_return
-	rec.iqr_ns = _read_f64(rd) or_return
-	rec.mad_ns = _read_f64(rd) or_return
+	if legacy_f64 {
+		rec.min_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.p25_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.p50_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.p75_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.p95_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.p99_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.max_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.mean_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.std_dev_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.ci95_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.cv_pct = _read_f64(rd) or_return
+		rec.iqr_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+		rec.mad_fs = ns_f64_to_fs(_read_f64(rd) or_return)
+	} else {
+		rec.min_fs = _read_i64(rd) or_return
+		rec.p25_fs = _read_i64(rd) or_return
+		rec.p50_fs = _read_i64(rd) or_return
+		rec.p75_fs = _read_i64(rd) or_return
+		rec.p95_fs = _read_i64(rd) or_return
+		rec.p99_fs = _read_i64(rd) or_return
+		rec.max_fs = _read_i64(rd) or_return
+		rec.mean_fs = _read_i64(rd) or_return
+		rec.std_dev_fs = _read_i64(rd) or_return
+		rec.ci95_fs = _read_i64(rd) or_return
+		rec.cv_pct = _read_f64(rd) or_return
+		rec.iqr_fs = _read_i64(rd) or_return
+		rec.mad_fs = _read_i64(rd) or_return
+	}
 	rec.median_cycles = _read_f64(rd) or_return
 	rec.bytes_per_op = _read_u64(rd) or_return
 	rec.items_per_op = _read_u64(rd) or_return
@@ -358,10 +466,18 @@ _read_record_body :: proc(rd: ^_Reader, allocator: runtime.Allocator) -> (rec: R
 	if s_count < 0 || rd.pos + s_count * 8 > len(rd.data) {
 		return rec, false
 	}
-	reserve(&rec.samples_ns, s_count)
+	reserve(&rec.samples_batch_ns, s_count)
 	for _ in 0 ..< s_count {
-		s := _read_f64(rd) or_return
-		append(&rec.samples_ns, s)
+		if legacy_f64 {
+			s := _read_f64(rd) or_return
+			append(&rec.samples_batch_ns, legacy_ns_to_batch_ns(s, rec.ops_per_sample))
+		} else {
+			s := _read_u64(rd) or_return
+			append(&rec.samples_batch_ns, s)
+		}
+	}
+	if legacy_f64 && len(rec.samples_batch_ns) > 0 {
+		recompute_record_stats_from_samples(&rec)
 	}
 
 	return rec, true
@@ -369,7 +485,7 @@ _read_record_body :: proc(rd: ^_Reader, allocator: runtime.Allocator) -> (rec: R
 
 /*
 Serializes `rec` into a compact binary `OBRC` byte buffer. When `include_samples` is
-`false`, the `samples_ns` array is omitted so callers can store it separately compressed.
+`false`, the `samples_batch_ns` array is omitted so callers can store it separately compressed.
 */
 @(require_results)
 encode_record_bytes :: proc(
@@ -384,7 +500,7 @@ encode_record_bytes :: proc(
 }
 
 /*
-Decodes a single `OBRC` record byte buffer into a newly allocated `Record`.
+Decodes a single `OBRC` record byte buffer (`\x02` integer or legacy `\x01` float) into `Record`.
 */
 @(require_results)
 decode_record_bytes :: proc(
@@ -394,14 +510,19 @@ decode_record_bytes :: proc(
 	rec: Record,
 	ok: bool,
 ) {
-	if len(data) < len(RECORD_MAGIC) || string(data[:len(RECORD_MAGIC)]) != RECORD_MAGIC {
+	if len(data) < len(RECORD_MAGIC) {
 		return {}, false
 	}
+	hdr := string(data[:len(RECORD_MAGIC)])
+	if hdr != RECORD_MAGIC && hdr != LEGACY_RECORD_MAGIC {
+		return {}, false
+	}
+	legacy := hdr == LEGACY_RECORD_MAGIC
 	rd := _Reader {
 		data = data,
 		pos  = len(RECORD_MAGIC),
 	}
-	return _read_record_body(&rd, allocator)
+	return _read_record_body(&rd, legacy, allocator)
 }
 
 /*
@@ -433,7 +554,7 @@ encode_packet_bytes :: proc(
 }
 
 /*
-Decodes an `HPKT` (or legacy `OBPK`) binary buffer into a `Run_Packet`.
+Decodes an `HPKT` (`\x02` integer or legacy `\x01`/`OBPK`) binary buffer into a `Run_Packet`.
 */
 @(require_results)
 decode_packet_bytes :: proc(
@@ -447,9 +568,10 @@ decode_packet_bytes :: proc(
 		return {}, false
 	}
 	hdr := string(data[:len(PACKET_MAGIC)])
-	if hdr != PACKET_MAGIC && hdr != LEGACY_PACKET_MAGIC {
+	if hdr != PACKET_MAGIC && hdr != LEGACY_PACKET_V1_MAGIC && hdr != LEGACY_PACKET_MAGIC {
 		return {}, false
 	}
+	legacy := hdr != PACKET_MAGIC
 	defer if !ok {
 		packet_destroy(&pkt, allocator)
 	}
@@ -476,7 +598,7 @@ decode_packet_bytes :: proc(
 	}
 	reserve(&pkt.records, rec_count)
 	for _ in 0 ..< rec_count {
-		r := _read_record_body(&rd, allocator) or_return
+		r := _read_record_body(&rd, legacy, allocator) or_return
 		append(&pkt.records, r)
 	}
 	return pkt, true
@@ -504,56 +626,63 @@ read_packet_file :: proc(
 }
 
 /*
-Recomputes missing quantile/dispersion fields on `r` from `r.samples_ns` if populated.
+Recomputes exact fixed-point femtosecond quantile/dispersion fields on `r` from
+`r.samples_batch_ns` and `r.ops_per_sample`.
 */
 recompute_record_stats_from_samples :: proc(r: ^Record, allocator := context.temp_allocator) {
-	n := len(r.samples_ns)
+	n := len(r.samples_batch_ns)
 	if n == 0 {
 		return
 	}
-	sorted := slice.clone(r.samples_ns[:], allocator)
+	sorted := make([]i64, n, allocator)
 	defer delete(sorted, allocator)
+	ops := max(r.ops_per_sample, 1)
+	for b, i in r.samples_batch_ns {
+		sorted[i] = batch_ns_to_op_fs(b, ops)
+	}
 	slice.sort(sorted)
 
 	r.samples = n
-	r.min_ns = sorted[0]
-	r.max_ns = sorted[n - 1]
-	r.p25_ns = obench.percentile_sorted(sorted, 0.25)
-	r.p50_ns = obench.percentile_sorted(sorted, 0.50)
-	r.p75_ns = obench.percentile_sorted(sorted, 0.75)
-	r.p95_ns = obench.percentile_sorted(sorted, 0.95)
-	r.p99_ns = obench.percentile_sorted(sorted, 0.99)
-	r.iqr_ns = r.p75_ns - r.p25_ns
+	r.min_fs = sorted[0]
+	r.max_fs = sorted[n - 1]
+	r.p25_fs = percentile_sorted_fs(sorted, 25)
+	r.p50_fs = percentile_sorted_fs(sorted, 50)
+	r.p75_fs = percentile_sorted_fs(sorted, 75)
+	r.p95_fs = percentile_sorted_fs(sorted, 95)
+	r.p99_fs = percentile_sorted_fs(sorted, 99)
+	r.iqr_fs = r.p75_fs - r.p25_fs
 
-	sum := 0.0
+	sum_fs: i128 = 0
 	for v in sorted {
-		sum += v
+		sum_fs += i128(v)
 	}
-	r.mean_ns = sum / f64(n)
+	r.mean_fs = i64((sum_fs + i128(n / 2)) / i128(n))
 
 	var_sum := 0.0
 	for v in sorted {
-		d := v - r.mean_ns
+		d := f64(v - r.mean_fs)
 		var_sum += d * d
 	}
 	if n > 1 {
-		r.std_dev_ns = math.sqrt(var_sum / f64(n - 1))
-		r.ci95_ns = obench.t_critical_975(f64(n - 1)) * (r.std_dev_ns / math.sqrt(f64(n)))
+		std_f := math.sqrt(var_sum / f64(n - 1))
+		r.std_dev_fs = i64(math.round(std_f))
+		r.ci95_fs = i64(
+			math.round(obench.t_critical_975(f64(n - 1)) * (std_f / math.sqrt(f64(n)))),
+		)
+		r.cv_pct = r.mean_fs > 0 ? (std_f / f64(r.mean_fs)) * 100.0 : 0.0
 	} else {
-		r.std_dev_ns = 0
-		r.ci95_ns = 0
-	}
-	if r.mean_ns > 0 {
-		r.cv_pct = (r.std_dev_ns / r.mean_ns) * 100.0
+		r.std_dev_fs = 0
+		r.ci95_fs = 0
+		r.cv_pct = 0.0
 	}
 
-	abs_devs := make([]f64, n, allocator)
+	abs_devs := make([]i64, n, allocator)
 	defer delete(abs_devs, allocator)
 	for v, i in sorted {
-		abs_devs[i] = abs(v - r.p50_ns)
+		abs_devs[i] = abs(v - r.p50_fs)
 	}
 	slice.sort(abs_devs)
-	r.mad_ns = obench.percentile_sorted(abs_devs, 0.50)
+	r.mad_fs = percentile_sorted_fs(abs_devs, 50)
 }
 
 /*
@@ -616,6 +745,8 @@ read_obench_json_packets :: proc(
 			)
 		}
 
+		ops := u64(max(e.batch_size, 1))
+		s_cnt := len(e.samples_batch_ns) > 0 ? len(e.samples_batch_ns) : len(e.samples_ns)
 		r := Record {
 			rank               = len(pkts[pkt_idx].records) + 1,
 			group_name         = strings.clone(e.group_name, allocator),
@@ -625,17 +756,17 @@ read_obench_json_packets :: proc(
 			has_param          = e.has_param,
 			threads            = e.threads,
 			has_threads        = e.has_threads,
-			ops_per_sample     = u64(max(e.batch_size, 1)),
+			ops_per_sample     = ops,
 			samples            = e.samples,
-			min_ns             = e.min_ns,
-			p50_ns             = e.p50_ns,
-			p95_ns             = e.p95_ns,
-			p99_ns             = e.p99_ns,
-			max_ns             = e.max_ns,
-			mean_ns            = e.mean_ns,
-			std_dev_ns         = e.std_dev_ns,
-			ci95_ns            = e.ci95_ns,
-			mad_ns             = e.mad_ns,
+			min_fs             = ns_f64_to_fs(e.min_ns),
+			p50_fs             = ns_f64_to_fs(e.p50_ns),
+			p95_fs             = ns_f64_to_fs(e.p95_ns),
+			p99_fs             = ns_f64_to_fs(e.p99_ns),
+			max_fs             = ns_f64_to_fs(e.max_ns),
+			mean_fs            = ns_f64_to_fs(e.mean_ns),
+			std_dev_fs         = ns_f64_to_fs(e.std_dev_ns),
+			ci95_fs            = ns_f64_to_fs(e.ci95_ns),
+			mad_fs             = ns_f64_to_fs(e.mad_ns),
 			median_cycles      = e.median_cycles,
 			mb_per_sec         = e.mb_per_sec,
 			items_per_sec      = e.items_per_sec,
@@ -646,17 +777,26 @@ read_obench_json_packets :: proc(
 			temp_bytes_per_op  = e.temp_bytes_per_op,
 			error              = strings.clone(e.error, allocator),
 			metrics            = make([dynamic]Metric, allocator),
-			samples_ns         = make([dynamic]f64, len(e.samples_ns), allocator),
+			samples_batch_ns   = make([dynamic]u64, s_cnt, allocator),
 		}
-		copy(r.samples_ns[:], e.samples_ns)
+		if len(e.samples_batch_ns) > 0 {
+			copy(r.samples_batch_ns[:], e.samples_batch_ns)
+		} else {
+			for s, si in e.samples_ns {
+				r.samples_batch_ns[si] = legacy_ns_to_batch_ns(s, ops)
+			}
+		}
 		for m in e.custom_metrics {
 			append(&r.metrics, Metric{unit = strings.clone(m.unit, allocator), value = m.value})
 		}
-		if r.mean_ns > 0 {
-			r.cv_pct = (r.std_dev_ns / r.mean_ns) * 100.0
+		if r.mean_fs > 0 {
+			r.cv_pct = (f64(r.std_dev_fs) / f64(r.mean_fs)) * 100.0
 		}
-		if len(r.samples_ns) > 0 {
+		if len(r.samples_batch_ns) > 0 {
 			recompute_record_stats_from_samples(&r)
+			if r.p50_fs > 0 && r.items_per_sec <= 0 {
+				r.items_per_sec = FS_PER_SEC_F64 / f64(r.p50_fs)
+			}
 		}
 		append(&pkts[pkt_idx].records, r)
 	}
@@ -696,6 +836,7 @@ _Jsonl_Row :: struct {
 	pool_hits:           u64 `json:"pool_hits"`,
 	pool_misses:         u64 `json:"pool_misses"`,
 	samples_ns:          []f64 `json:"samples_ns"`,
+	samples_batch_ns:    []u64 `json:"samples_batch_ns"`,
 }
 
 /*
@@ -767,6 +908,26 @@ read_jsonl_packets :: proc(
 			)
 		}
 
+		eff_ops := max(row.ops, 1)
+		if row.ops == 0 && len(row.samples_ns) > 0 {
+			has_sub_ns := false
+			has_sub_ps := false
+			for s in row.samples_ns {
+				fs := ns_f64_to_fs(s)
+				if fs % FS_PER_NS != 0 {
+					has_sub_ns = true
+				}
+				if fs % 1_000 != 0 {
+					has_sub_ps = true
+				}
+			}
+			if has_sub_ps {
+				eff_ops = 1_000_000
+			} else if has_sub_ns {
+				eff_ops = 1_000
+			}
+		}
+
 		ops_f := f64(max(row.ops, 1))
 		mb_s := row.gb_per_sec * 1024.0
 		med := row.median_ns > 0 ? row.median_ns : row.ns_per_op
@@ -774,24 +935,26 @@ read_jsonl_packets :: proc(
 		if ops_s <= 0 && med > 0 {
 			ops_s = 1_000_000_000.0 / med
 		}
+		med_fs := ns_f64_to_fs(med)
+		s_cnt := len(row.samples_batch_ns) > 0 ? len(row.samples_batch_ns) : len(row.samples_ns)
 
 		r := Record {
 			rank               = row.rank > 0 ? row.rank : len(pkts[pkt_idx].records) + 1,
 			group_name         = strings.clone(row.group, allocator),
 			name               = strings.clone(row.name, allocator),
 			full_name          = strings.clone(row.name, allocator),
-			ops_per_sample     = max(row.ops, 1),
-			samples            = row.runs > 0 ? row.runs : len(row.samples_ns),
+			ops_per_sample     = eff_ops,
+			samples            = row.runs > 0 ? row.runs : s_cnt,
 			warmup             = row.warmup,
-			min_ns             = row.min_ns,
-			p50_ns             = med,
-			p95_ns             = row.p95_ns,
-			p99_ns             = row.p99_ns,
-			max_ns             = row.max_ns,
-			mean_ns            = row.mean_ns > 0 ? row.mean_ns : med,
-			std_dev_ns         = row.stddev_ns,
+			min_fs             = ns_f64_to_fs(row.min_ns),
+			p50_fs             = med_fs,
+			p95_fs             = ns_f64_to_fs(row.p95_ns),
+			p99_fs             = ns_f64_to_fs(row.p99_ns),
+			max_fs             = ns_f64_to_fs(row.max_ns),
+			mean_fs            = row.mean_ns > 0 ? ns_f64_to_fs(row.mean_ns) : med_fs,
+			std_dev_fs         = ns_f64_to_fs(row.stddev_ns),
 			cv_pct             = row.cv_pct,
-			iqr_ns             = row.iqr_ns,
+			iqr_fs             = ns_f64_to_fs(row.iqr_ns),
 			mb_per_sec         = mb_s,
 			items_per_sec      = ops_s,
 			footprint_bytes    = row.bytes_used,
@@ -801,13 +964,19 @@ read_jsonl_packets :: proc(
 			peak_heap_bytes    = row.peak_live_bytes,
 			error              = strings.clone("", allocator),
 			metrics            = make([dynamic]Metric, allocator),
-			samples_ns         = make([dynamic]f64, len(row.samples_ns), allocator),
+			samples_batch_ns   = make([dynamic]u64, s_cnt, allocator),
 		}
-		if len(row.samples_ns) > 0 {
-			copy(r.samples_ns[:], row.samples_ns)
+		if len(row.samples_batch_ns) > 0 {
+			copy(r.samples_batch_ns[:], row.samples_batch_ns)
+			recompute_record_stats_from_samples(&r)
+		} else if len(row.samples_ns) > 0 {
+			for s, si in row.samples_ns {
+				r.samples_batch_ns[si] = legacy_ns_to_batch_ns(s, eff_ops)
+			}
 			recompute_record_stats_from_samples(&r)
 		} else if med > 0 {
-			append(&r.samples_ns, med)
+			append(&r.samples_batch_ns, legacy_ns_to_batch_ns(med, eff_ops))
+			recompute_record_stats_from_samples(&r)
 		}
 		if row.pool_hits > 0 || row.pool_misses > 0 {
 			append(

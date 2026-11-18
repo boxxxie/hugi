@@ -18,7 +18,14 @@ _PQ_CTYPE_NONE :: i32(-1)
 @(private = "file")
 _PQ_CTYPE_UTF8 :: i32(0)
 @(private = "file")
+_PQ_CTYPE_DECIMAL :: i32(5)
+@(private = "file")
 _PQ_CTYPE_UINT64 :: i32(14)
+
+@(private = "file")
+_PQ_DECIMAL_SCALE :: i32(6)
+@(private = "file")
+_PQ_DECIMAL_PRECISION :: i32(18)
 
 @(private = "file")
 _PQ_CODEC_UNCOMPRESSED :: i32(0)
@@ -40,6 +47,7 @@ _PQ_TW_STRUCT :: u8(12)
 _PQ_Column_Kind :: enum u8 {
 	String,
 	I64,
+	Decimal_FS,
 	U64,
 	F64,
 	Samples_Blob,
@@ -117,68 +125,104 @@ _pq_column_specs := [33]_PQ_Column_Spec {
 		u64_field = 0,
 	},
 	{name = "samples", ptype = _PQ_TYPE_INT64, ctype = _PQ_CTYPE_NONE, kind = .I64, i64_field = 2},
-	{name = "min_ns", ptype = _PQ_TYPE_DOUBLE, ctype = _PQ_CTYPE_NONE, kind = .F64, f64_field = 0},
-	{name = "p25_ns", ptype = _PQ_TYPE_DOUBLE, ctype = _PQ_CTYPE_NONE, kind = .F64, f64_field = 1},
-	{name = "p50_ns", ptype = _PQ_TYPE_DOUBLE, ctype = _PQ_CTYPE_NONE, kind = .F64, f64_field = 2},
-	{name = "p75_ns", ptype = _PQ_TYPE_DOUBLE, ctype = _PQ_CTYPE_NONE, kind = .F64, f64_field = 3},
-	{name = "p95_ns", ptype = _PQ_TYPE_DOUBLE, ctype = _PQ_CTYPE_NONE, kind = .F64, f64_field = 4},
-	{name = "p99_ns", ptype = _PQ_TYPE_DOUBLE, ctype = _PQ_CTYPE_NONE, kind = .F64, f64_field = 5},
-	{name = "max_ns", ptype = _PQ_TYPE_DOUBLE, ctype = _PQ_CTYPE_NONE, kind = .F64, f64_field = 6},
+	{
+		name = "min_ns",
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 4,
+	},
+	{
+		name = "p25_ns",
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 5,
+	},
+	{
+		name = "p50_ns",
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 6,
+	},
+	{
+		name = "p75_ns",
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 7,
+	},
+	{
+		name = "p95_ns",
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 8,
+	},
+	{
+		name = "p99_ns",
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 9,
+	},
+	{
+		name = "max_ns",
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 10,
+	},
 	{
 		name = "mean_ns",
-		ptype = _PQ_TYPE_DOUBLE,
-		ctype = _PQ_CTYPE_NONE,
-		kind = .F64,
-		f64_field = 7,
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 11,
 	},
 	{
 		name = "std_dev_ns",
-		ptype = _PQ_TYPE_DOUBLE,
-		ctype = _PQ_CTYPE_NONE,
-		kind = .F64,
-		f64_field = 8,
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 12,
 	},
 	{
 		name = "ci95_ns",
-		ptype = _PQ_TYPE_DOUBLE,
-		ctype = _PQ_CTYPE_NONE,
-		kind = .F64,
-		f64_field = 9,
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 13,
 	},
-	{
-		name = "cv_pct",
-		ptype = _PQ_TYPE_DOUBLE,
-		ctype = _PQ_CTYPE_NONE,
-		kind = .F64,
-		f64_field = 10,
-	},
+	{name = "cv_pct", ptype = _PQ_TYPE_DOUBLE, ctype = _PQ_CTYPE_NONE, kind = .F64, f64_field = 0},
 	{
 		name = "iqr_ns",
-		ptype = _PQ_TYPE_DOUBLE,
-		ctype = _PQ_CTYPE_NONE,
-		kind = .F64,
-		f64_field = 11,
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 14,
 	},
 	{
 		name = "mad_ns",
-		ptype = _PQ_TYPE_DOUBLE,
-		ctype = _PQ_CTYPE_NONE,
-		kind = .F64,
-		f64_field = 12,
+		ptype = _PQ_TYPE_INT64,
+		ctype = _PQ_CTYPE_DECIMAL,
+		kind = .Decimal_FS,
+		i64_field = 15,
 	},
 	{
 		name = "ops_per_sec",
 		ptype = _PQ_TYPE_DOUBLE,
 		ctype = _PQ_CTYPE_NONE,
 		kind = .F64,
-		f64_field = 13,
+		f64_field = 1,
 	},
 	{
 		name = "mb_per_sec",
 		ptype = _PQ_TYPE_DOUBLE,
 		ctype = _PQ_CTYPE_NONE,
 		kind = .F64,
-		f64_field = 14,
+		f64_field = 2,
 	},
 	{
 		name = "bytes_per_op",
@@ -199,28 +243,28 @@ _pq_column_specs := [33]_PQ_Column_Spec {
 		ptype = _PQ_TYPE_DOUBLE,
 		ctype = _PQ_CTYPE_NONE,
 		kind = .F64,
-		f64_field = 15,
+		f64_field = 3,
 	},
 	{
 		name = "alloc_bytes_per_op",
 		ptype = _PQ_TYPE_DOUBLE,
 		ctype = _PQ_CTYPE_NONE,
 		kind = .F64,
-		f64_field = 16,
+		f64_field = 4,
 	},
 	{
 		name = "temp_allocs_per_op",
 		ptype = _PQ_TYPE_DOUBLE,
 		ctype = _PQ_CTYPE_NONE,
 		kind = .F64,
-		f64_field = 17,
+		f64_field = 5,
 	},
 	{
 		name = "temp_bytes_per_op",
 		ptype = _PQ_TYPE_DOUBLE,
 		ctype = _PQ_CTYPE_NONE,
 		kind = .F64,
-		f64_field = 18,
+		f64_field = 6,
 	},
 	{
 		name = "peak_heap_bytes",
@@ -365,6 +409,30 @@ _pq_record_i64 :: proc(r: ^Pooled_Record, idx: int) -> i64 {
 		return i64(r.samples)
 	case 3:
 		return r.peak_heap_bytes
+	case 4:
+		return r.min_fs
+	case 5:
+		return r.p25_fs
+	case 6:
+		return r.p50_fs
+	case 7:
+		return r.p75_fs
+	case 8:
+		return r.p95_fs
+	case 9:
+		return r.p99_fs
+	case 10:
+		return r.max_fs
+	case 11:
+		return r.mean_fs
+	case 12:
+		return r.std_dev_fs
+	case 13:
+		return r.ci95_fs
+	case 14:
+		return r.iqr_fs
+	case 15:
+		return r.mad_fs
 	}
 	return 0
 }
@@ -386,42 +454,18 @@ _pq_record_u64 :: proc(r: ^Pooled_Record, idx: int) -> u64 {
 _pq_record_f64 :: proc(r: ^Pooled_Record, idx: int) -> f64 {
 	switch idx {
 	case 0:
-		return r.min_ns
-	case 1:
-		return r.p25_ns
-	case 2:
-		return r.p50_ns
-	case 3:
-		return r.p75_ns
-	case 4:
-		return r.p95_ns
-	case 5:
-		return r.p99_ns
-	case 6:
-		return r.max_ns
-	case 7:
-		return r.mean_ns
-	case 8:
-		return r.std_dev_ns
-	case 9:
-		return r.ci95_ns
-	case 10:
 		return r.cv_pct
-	case 11:
-		return r.iqr_ns
-	case 12:
-		return r.mad_ns
-	case 13:
+	case 1:
 		return r.ops_per_sec
-	case 14:
+	case 2:
 		return r.mb_per_sec
-	case 15:
+	case 3:
 		return r.allocs_per_op
-	case 16:
+	case 4:
 		return r.alloc_bytes_per_op
-	case 17:
+	case 5:
 		return r.temp_allocs_per_op
-	case 18:
+	case 6:
 		return r.temp_bytes_per_op
 	}
 	return 0
@@ -486,6 +530,7 @@ export_parquet :: proc(
 	compress_pages := true,
 	allocator := context.allocator,
 ) -> bool {
+	_ = codec
 	_ensure_export_parent_dir(path)
 
 	file_buf := make([dynamic]u8, 0, 16384, allocator)
@@ -516,14 +561,21 @@ export_parquet :: proc(
 					s := _pq_record_str(r, spec.str_field)
 					_append_u32_le(&page_raw, u32(len(s)))
 					append(&page_raw, ..transmute([]u8)s)
-				case .I64:
+				case .I64, .Decimal_FS:
 					_append_u64_le(&page_raw, u64(_pq_record_i64(r, spec.i64_field)))
 				case .U64:
 					_append_u64_le(&page_raw, _pq_record_u64(r, spec.u64_field))
 				case .F64:
 					_append_u64_le(&page_raw, transmute(u64)_pq_record_f64(r, spec.f64_field))
 				case .Samples_Blob:
-					blob, comp_ok := compress_samples_f64(r.samples_ns[:], codec, allocator)
+					blob: []u8
+					comp_ok: bool
+					if len(r.samples_batch_ns) == len(r.samples_fs) &&
+					   len(r.samples_batch_ns) > 0 {
+						blob, comp_ok = compress_samples_u64(r.samples_batch_ns[:], allocator)
+					} else {
+						blob, comp_ok = compress_samples_fs_i64(r.samples_fs[:], allocator)
+					}
 					if !comp_ok {
 						delete(blob, allocator)
 						return false
@@ -603,6 +655,10 @@ export_parquet :: proc(
 		_tw_field_string(&footer, 4, spec.name, &sp)
 		if spec.ctype != _PQ_CTYPE_NONE {
 			_tw_field_i32(&footer, 6, spec.ctype, &sp)
+			if spec.ctype == _PQ_CTYPE_DECIMAL {
+				_tw_field_i32(&footer, 7, _PQ_DECIMAL_SCALE, &sp)
+				_tw_field_i32(&footer, 8, _PQ_DECIMAL_PRECISION, &sp)
+			}
 		}
 		_tw_stop(&footer)
 	}

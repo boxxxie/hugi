@@ -60,8 +60,9 @@ RUN OPTIONS:
   --fail-on-regression   Exit non-zero if statistical regressions are detected
   --threshold <pct>      Regression threshold percentage (default: 5.0)
   --extra-build-flags s  Space-separated extra flags passed to 'odin build'
+  --overlay              Ingest into an in-memory CoW Core_Overlay branch (no disk write)
 
-COMPARE / EXPORT OPTIONS:
+COMPARE / EXPORT / COMPACT OPTIONS:
   --commits <a..b>       Compare commit <a> against commit <b>
   --runs <a..b>          Compare run_id <a> against run_id <b>
   --last                 Compare the last two commits (or last two runs)
@@ -70,6 +71,7 @@ COMPARE / EXPORT OPTIONS:
   --out <path>           Output path for export
   --update-readme <path> Replace <!-- BEGIN_BENCHMARK_TABLE -->..<!-- END_BENCHMARK_TABLE -->
   --limit <N>            Maximum history entries to display (0 = all)
+  --keep-hot <N>         Hot recent runs kept unrolled during 'compact' (default: 0)
 `,
 	)
 }
@@ -285,6 +287,7 @@ _cmd_run :: proc(args: []string) -> int {
 	threshold_pct := 5.0
 	extra_build_flags := ""
 	quiet := false
+	overlay := false
 
 	i := 0
 	for i < len(args) {
@@ -305,6 +308,8 @@ _cmd_run :: proc(args: []string) -> int {
 			return 0
 		case "no-db":
 			no_db = true
+		case "overlay":
+			overlay = true
 		case "quiet":
 			quiet = true
 		case "fail-on-regression":
@@ -490,7 +495,18 @@ _cmd_run :: proc(args: []string) -> int {
 
 	if !no_db {
 		db_path := _resolve_db_path(db_flag)
-		st, open_ok := store.store_open(db_path, context.allocator)
+		st: store.Store
+		open_ok: bool
+		using_overlay := false
+		if overlay && os.exists(db_path) {
+			st, open_ok = store.store_open_overlay(db_path, context.allocator)
+			using_overlay = true
+		} else if overlay {
+			st, open_ok = store.store_open(":memory:", context.allocator)
+			using_overlay = true
+		} else {
+			st, open_ok = store.store_open(db_path, context.allocator)
+		}
 		if !open_ok {
 			fmt.eprintfln("hugi run: could not open store '%s'", db_path)
 			return 1
@@ -504,17 +520,30 @@ _cmd_run :: proc(args: []string) -> int {
 
 		total_samples := 0
 		for &r in pkt.records {
-			total_samples += len(r.samples_ns) > 0 ? len(r.samples_ns) : r.samples
+			total_samples += len(r.samples_batch_ns) > 0 ? len(r.samples_batch_ns) : r.samples
 		}
-		fmt.printfln(
-			"Ingested run %s (commit=%s, lang=%s, records=%d, samples=%d) -> %s",
-			pkt.run_id,
-			pkt.commit,
-			pkt.lang,
-			len(pkt.records),
-			total_samples,
-			db_path,
-		)
+		if using_overlay {
+			fmt.printfln(
+				"Ingested run %s (commit=%s, lang=%s, records=%d, samples=%d) -> [overlay over %s; +%d RAM bytes, disk untouched]",
+				pkt.run_id,
+				pkt.commit,
+				pkt.lang,
+				len(pkt.records),
+				total_samples,
+				db_path,
+				store.store_overlay_owned_bytes(&st),
+			)
+		} else {
+			fmt.printfln(
+				"Ingested run %s (commit=%s, lang=%s, records=%d, samples=%d) -> %s",
+				pkt.run_id,
+				pkt.commit,
+				pkt.lang,
+				len(pkt.records),
+				total_samples,
+				db_path,
+			)
+		}
 
 		if baseline_commit != "" {
 			base := store.store_load_pooled_records(
@@ -923,15 +952,15 @@ _cmd_inspect :: proc(args: []string) -> int {
 			fmt.printfln(
 				"  %-36s min=%s p25=%s p50=%s p75=%s p95=%s p99=%s ci95=±%s iqr=%s mad=%s allocs=%.1f footprint=%s",
 				r.full_name,
-				obench.format_duration_ns(r.min_ns, context.temp_allocator),
-				obench.format_duration_ns(r.p25_ns, context.temp_allocator),
-				obench.format_duration_ns(r.p50_ns, context.temp_allocator),
-				obench.format_duration_ns(r.p75_ns, context.temp_allocator),
-				obench.format_duration_ns(r.p95_ns, context.temp_allocator),
-				obench.format_duration_ns(r.p99_ns, context.temp_allocator),
-				obench.format_duration_ns(r.ci95_ns, context.temp_allocator),
-				obench.format_duration_ns(r.iqr_ns, context.temp_allocator),
-				obench.format_duration_ns(r.mad_ns, context.temp_allocator),
+				hugi.format_duration_fs(r.min_fs, context.temp_allocator),
+				hugi.format_duration_fs(r.p25_fs, context.temp_allocator),
+				hugi.format_duration_fs(r.p50_fs, context.temp_allocator),
+				hugi.format_duration_fs(r.p75_fs, context.temp_allocator),
+				hugi.format_duration_fs(r.p95_fs, context.temp_allocator),
+				hugi.format_duration_fs(r.p99_fs, context.temp_allocator),
+				hugi.format_duration_fs(r.ci95_fs, context.temp_allocator),
+				hugi.format_duration_fs(r.iqr_fs, context.temp_allocator),
+				hugi.format_duration_fs(r.mad_fs, context.temp_allocator),
 				r.allocs_per_op,
 				obench.format_bytes(f64(r.footprint_bytes), context.temp_allocator),
 			)
@@ -1408,6 +1437,7 @@ _cmd_export :: proc(args: []string) -> int {
 @(private = "file")
 _cmd_compact :: proc(args: []string) -> int {
 	db_flag := ""
+	opts := store.default_store_write_options()
 	i := 0
 	for i < len(args) {
 		key, inline_val, is_flag := _parse_flag_kv(args, &i)
@@ -1423,6 +1453,15 @@ _cmd_compact :: proc(args: []string) -> int {
 			v, ok := _consume_value(args, &i, inline_val, key)
 			if !ok {return 1}
 			db_flag = v
+		case "keep-hot":
+			v, ok := _consume_value(args, &i, inline_val, key)
+			if !ok {return 1}
+			n, n_ok := strconv.parse_int(v)
+			if !n_ok || n < 0 {
+				fmt.eprintfln("hugi compact: invalid --keep-hot '%s'", v)
+				return 1
+			}
+			opts.keep_hot_runs = n
 		case:
 			fmt.eprintfln("hugi compact: unknown flag '--%s'", key)
 			return 1
@@ -1430,7 +1469,7 @@ _cmd_compact :: proc(args: []string) -> int {
 	}
 
 	db_path := _resolve_db_path(db_flag)
-	before, after, ok := store.store_compact(db_path)
+	before, after, ok := store.store_compact_with_options(db_path, opts)
 	if !ok {
 		fmt.eprintfln("hugi compact: failed to compact '%s'", db_path)
 		return 1

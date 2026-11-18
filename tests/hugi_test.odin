@@ -37,10 +37,11 @@ _make_packet :: proc(
 	for name, i in names {
 		med := medians[i]
 		foot := footprints[i]
-		samples := make([dynamic]f64, samples_per_rec)
+		ops := u64(100)
+		samples := make([dynamic]u64, samples_per_rec)
 		for s in 0 ..< samples_per_rec {
 			offset := (f64(s) - f64(samples_per_rec - 1) * 0.5) * spread_ns
-			samples[s] = max(med + offset, 1.0)
+			samples[s] = hugi.legacy_ns_to_batch_ns(max(med + offset, 1.0), ops)
 		}
 
 		r := hugi.Record {
@@ -48,18 +49,18 @@ _make_packet :: proc(
 			group_name         = strings.clone("core"),
 			name               = strings.clone(name),
 			full_name          = strings.clone(fmt.tprintf("core::%s", name)),
-			ops_per_sample     = 100,
+			ops_per_sample     = ops,
 			samples            = samples_per_rec,
 			bytes_per_op       = 64,
 			footprint_bytes    = foot,
 			allocs_per_op      = 0,
 			alloc_bytes_per_op = 0,
-			samples_ns         = samples,
+			samples_batch_ns   = samples,
 			metrics            = make([dynamic]hugi.Metric),
 		}
 		hugi.recompute_record_stats_from_samples(&r)
-		if r.p50_ns > 0 {
-			r.items_per_sec = 1_000_000_000.0 / r.p50_ns
+		if r.p50_fs > 0 {
+			r.items_per_sec = hugi.FS_PER_SEC_F64 / f64(r.p50_fs)
 			r.mb_per_sec = (f64(r.bytes_per_op) * r.items_per_sec) / (1024.0 * 1024.0)
 		}
 		append(&pkt.records, r)
@@ -139,11 +140,11 @@ test_packet_binary_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, decoded.records[0].footprint_bytes, u64(4096))
 	testing.expect_value(t, len(decoded.records[0].metrics), 1)
 	testing.expect_value(t, decoded.records[0].metrics[0].unit, "hit%")
-	testing.expect_value(t, len(decoded.records[1].samples_ns), 16)
+	testing.expect_value(t, len(decoded.records[1].samples_batch_ns), 16)
 	testing.expect_value(
 		t,
-		transmute(u64)decoded.records[0].samples_ns[3],
-		transmute(u64)pkt.records[0].samples_ns[3],
+		decoded.records[0].samples_batch_ns[3],
+		pkt.records[0].samples_batch_ns[3],
 	)
 }
 
@@ -188,7 +189,7 @@ test_store_selective_snapshot_sharing :: proc(t: ^testing.T) {
 	testing.expect_value(t, latest[2].full_name, "core::delete")
 	testing.expect(
 		t,
-		math.abs(latest[1].p50_ns - 38.0) < 2.0,
+		math.abs(hugi.fs_to_ns_f64(latest[1].p50_fs) - 38.0) < 2.0,
 		"selective lookup should update to ~38ns",
 	)
 	testing.expect_value(t, latest[1].commit, "bbb2222")
@@ -488,20 +489,24 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 						records[0].full_name,
 					)
 				}
+				p50_col := skadi.record_batch_column(&batches[0], "p50_ns")
+				testing.expect(t, p50_col != nil, "p50_ns column should exist")
+				if p50_col != nil && batches[0].length > 0 {
+					testing.expect_value(t, skadi.array_get(p50_col, 0, i64), records[0].p50_fs)
+				}
 				blob_col := skadi.record_batch_column(&batches[0], "samples_blob")
 				testing.expect(t, blob_col != nil, "samples_blob column should exist")
 				if blob_col != nil && batches[0].length > 0 {
 					raw_blob := skadi.array_get_binary(blob_col, 0)
-					back_samples, d_ok := store.decompress_samples_f64(raw_blob)
+					back_samples, d_ok := store.decompress_exported_samples_fs(
+						raw_blob,
+						records[0].ops_per_sample,
+					)
 					defer delete(back_samples)
 					testing.expect(t, d_ok, "Arrow samples_blob should decompress")
-					testing.expect_value(t, len(back_samples), len(records[0].samples_ns))
-					for si in 0 ..< len(back_samples) {
-						testing.expect_value(
-							t,
-							transmute(u64)back_samples[si],
-							transmute(u64)records[0].samples_ns[si],
-						)
+					testing.expect_value(t, len(back_samples), len(records[0].samples_fs))
+					for si in 0 ..< min(len(back_samples), len(records[0].samples_fs)) {
+						testing.expect_value(t, back_samples[si], records[0].samples_fs[si])
 					}
 				}
 			}
@@ -557,10 +562,18 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 	if len(post_compact) == 2 {
 		testing.expect_value(t, post_compact[0].full_name, "core::op_a")
 		testing.expect_value(t, post_compact[0].commit, "exp002")
-		testing.expect(t, math.abs(post_compact[0].p50_ns - 75.0) < 2.0, "op_a median ~75ns")
+		testing.expect(
+			t,
+			math.abs(hugi.fs_to_ns_f64(post_compact[0].p50_fs) - 75.0) < 2.0,
+			"op_a median ~75ns",
+		)
 		testing.expect_value(t, post_compact[1].full_name, "core::op_b")
 		testing.expect_value(t, post_compact[1].commit, "exp001")
-		testing.expect(t, math.abs(post_compact[1].p50_ns - 220.0) < 2.0, "op_b median ~220ns")
+		testing.expect(
+			t,
+			math.abs(hugi.fs_to_ns_f64(post_compact[1].p50_fs) - 220.0) < 2.0,
+			"op_b median ~220ns",
+		)
 	}
 }
 
@@ -649,5 +662,671 @@ test_suite_pipeline_and_untimed_zero_alloc :: proc(t: ^testing.T) {
 	testing.expect(t, !ok2, "zero_alloc pipeline allocating heap memory must fail")
 	testing.expect(t, suite2.failed_zero_alloc > 0, "failed_zero_alloc must be recorded")
 	testing.expect_value(t, len(suite2.last_packet.records), 1)
-	testing.expect_value(t, len(suite2.last_packet.records[0].samples_ns), 4)
+	testing.expect_value(t, len(suite2.last_packet.records[0].samples_batch_ns), 4)
+}
+
+@(test)
+test_domain_float_codecs_bit_exact :: proc(t: ^testing.T) {
+	clustered := []f64 {
+		41.732,
+		41.745,
+		41.719,
+		41.738,
+		41.738,
+		41.751,
+		41.702,
+		41.744,
+		0.0,
+		1024.0,
+		-12.34,
+		-0.005,
+		100.125,
+	}
+	codecs := [2]store.Codec{.Zlib_XOR_BSS, .Zlib_ALP}
+	for codec in codecs {
+		blob, c_ok := store.compress_samples_f64(clustered, codec, context.allocator)
+		testing.expect(t, c_ok, "domain codec compress should succeed")
+		if c_ok {
+			defer delete(blob)
+			back, d_ok := store.decompress_samples_f64(blob, context.allocator)
+			testing.expect(t, d_ok, "domain codec decompress should succeed")
+			if d_ok {
+				defer delete(back)
+				testing.expect_value(t, len(back), len(clustered))
+				for i in 0 ..< len(clustered) {
+					testing.expect_value(t, transmute(u64)back[i], transmute(u64)clustered[i])
+				}
+			}
+		}
+	}
+
+	best_blob, b_ok := store.compress_samples_f64_best(clustered, context.allocator)
+	testing.expect(t, b_ok, "compress_samples_f64_best should succeed")
+	if b_ok {
+		defer delete(best_blob)
+		best_back, bd_ok := store.decompress_samples_f64(best_blob, context.allocator)
+		testing.expect(t, bd_ok, "compress_samples_f64_best round-trip decode")
+		if bd_ok {
+			defer delete(best_back)
+			testing.expect_value(t, len(best_back), len(clustered))
+			for i in 0 ..< len(clustered) {
+				testing.expect_value(t, transmute(u64)best_back[i], transmute(u64)clustered[i])
+			}
+		}
+	}
+
+	// Edge floats (-0.0, subnormals, NaN, +/-Inf, huge magnitudes) must preserve every bit via fallback.
+	edge_vals := []f64 {
+		math.copy_sign(0.0, -1.0),
+		1e-310,
+		1e18,
+		math.inf_f64(1),
+		math.inf_f64(-1),
+		math.nan_f64(),
+	}
+	edge_blob, e_ok := store.compress_samples_f64_best(edge_vals, context.allocator)
+	testing.expect(t, e_ok, "edge float fallback compress should succeed")
+	if e_ok {
+		defer delete(edge_blob)
+		edge_back, ed_ok := store.decompress_samples_f64(edge_blob, context.allocator)
+		testing.expect(t, ed_ok, "edge float decompress should succeed")
+		if ed_ok {
+			defer delete(edge_back)
+			testing.expect_value(t, len(edge_back), len(edge_vals))
+			for i in 0 ..< len(edge_vals) {
+				testing.expect_value(t, transmute(u64)edge_back[i], transmute(u64)edge_vals[i])
+			}
+		}
+	}
+
+	empty_blob, emp_ok := store.compress_samples_f64_best([]f64{}, context.allocator)
+	testing.expect(t, emp_ok, "empty samples compress should succeed")
+	if emp_ok {
+		defer delete(empty_blob)
+		empty_back, emp_dok := store.decompress_samples_f64(empty_blob, context.allocator)
+		testing.expect(t, emp_dok, "empty samples decode should succeed")
+		if emp_dok {
+			defer delete(empty_back)
+			testing.expect_value(t, len(empty_back), 0)
+		}
+	}
+}
+
+@(private = "file")
+_make_v3_test_packet :: proc(run_id, commit: string, base_ns: f64) -> hugi.Run_Packet {
+	pkt := hugi.Run_Packet {
+		run_id         = strings.clone(run_id, context.allocator),
+		commit         = strings.clone(commit, context.allocator),
+		timestamp_unix = 1770000000,
+		lang           = strings.clone("odin", context.allocator),
+		suite_name     = strings.clone("kv_bench", context.allocator),
+		os             = strings.clone("linux", context.allocator),
+		arch           = strings.clone("amd64", context.allocator),
+		optimization   = strings.clone("-o:speed", context.allocator),
+		odin_version   = strings.clone("dev-2026", context.allocator),
+		records        = make([dynamic]hugi.Record, context.allocator),
+	}
+
+	r1 := hugi.Record {
+		rank             = 1,
+		name             = strings.clone("get", context.allocator),
+		group_name       = strings.clone("core", context.allocator),
+		full_name        = strings.clone("core::get", context.allocator),
+		ops_per_sample   = 100,
+		bytes_per_op     = 32,
+		items_per_op     = 2,
+		footprint_bytes  = 512,
+		peak_heap_bytes  = 1024,
+		samples_batch_ns = make([dynamic]u64, context.allocator),
+		metrics          = make([dynamic]hugi.Metric, context.allocator),
+	}
+	append(
+		&r1.samples_batch_ns,
+		hugi.legacy_ns_to_batch_ns(base_ns, 100),
+		hugi.legacy_ns_to_batch_ns(base_ns + 0.4, 100),
+		hugi.legacy_ns_to_batch_ns(base_ns - 0.2, 100),
+		hugi.legacy_ns_to_batch_ns(base_ns + 0.1, 100),
+		hugi.legacy_ns_to_batch_ns(base_ns + 0.5, 100),
+	)
+	hugi.recompute_record_stats_from_samples(&r1)
+	if r1.p50_fs > 0 {
+		ops_s := hugi.FS_PER_SEC_F64 / f64(r1.p50_fs)
+		r1.items_per_sec = f64(r1.items_per_op) * ops_s
+		r1.mb_per_sec = (f64(r1.bytes_per_op) * ops_s) / (1024.0 * 1024.0)
+	}
+	append(&pkt.records, r1)
+
+	r2 := hugi.Record {
+		rank             = 10,
+		name             = strings.clone("put", context.allocator),
+		group_name       = strings.clone("core", context.allocator),
+		full_name        = strings.clone("special_put", context.allocator),
+		param            = 64,
+		has_param        = true,
+		threads          = 2,
+		has_threads      = true,
+		ops_per_sample   = 10,
+		samples_batch_ns = make([dynamic]u64, context.allocator),
+		metrics          = make([dynamic]hugi.Metric, context.allocator),
+	}
+	append(
+		&r2.samples_batch_ns,
+		hugi.legacy_ns_to_batch_ns(base_ns * 2.0, 10),
+		hugi.legacy_ns_to_batch_ns(base_ns * 2.0 + 1.0, 10),
+		hugi.legacy_ns_to_batch_ns(base_ns * 2.0 - 0.5, 10),
+	)
+	hugi.recompute_record_stats_from_samples(&r2)
+	if r2.p50_fs > 0 {
+		r2.items_per_sec = hugi.FS_PER_SEC_F64 / f64(r2.p50_fs)
+	}
+	append(&r2.metrics, hugi.Metric{unit = strings.clone("%", context.allocator), value = 99.5})
+	append(&pkt.records, r2)
+
+	r3 := hugi.Record {
+		rank              = 3,
+		name              = strings.clone("scan", context.allocator),
+		group_name        = strings.clone("core", context.allocator),
+		full_name         = strings.clone("scan", context.allocator),
+		zero_alloc_failed = true,
+		error             = strings.clone("timeout", context.allocator),
+		samples_batch_ns  = make([dynamic]u64, context.allocator),
+		metrics           = make([dynamic]hugi.Metric, context.allocator),
+	}
+	append(&pkt.records, r3)
+
+	return pkt
+}
+
+@(test)
+test_v3_symbols_descriptors_cold_rollup_and_hot_append :: proc(t: ^testing.T) {
+	if !os.exists(".tmp") {
+		_ = os.make_directory(".tmp")
+	}
+	db_path := ".tmp/hugi_test_v3.hugidb"
+	if os.exists(db_path) {
+		_ = os.remove(db_path)
+	}
+	defer if os.exists(db_path) {
+		_ = os.remove(db_path)
+	}
+
+	commits := [6]string{"c01", "c02", "c03", "c04", "c05", "c06"}
+	run_ids := [6]string{"r01", "r02", "r03", "r04", "r05", "r06"}
+
+	{
+		st, open_ok := store.store_open(db_path, context.allocator)
+		testing.expect(t, open_ok, "open v3 store")
+		if !open_ok {
+			return
+		}
+		defer store.store_close(&st)
+
+		for i in 0 ..< 6 {
+			pkt := _make_v3_test_packet(run_ids[i], commits[i], 40.0 + f64(i) * 5.0)
+			defer hugi.packet_destroy(&pkt)
+			testing.expect(t, store.store_ingest_packet(&st, pkt), "ingest v3 packet")
+		}
+
+		runs := store.store_list_runs(&st)
+		defer store.run_summaries_destroy(runs)
+		testing.expect_value(t, len(runs), 6)
+
+		latest := store.store_load_pooled_records(&st, "odin")
+		defer store.pooled_records_destroy(latest)
+		testing.expect_value(t, len(latest), 3)
+		if len(latest) == 3 {
+			testing.expect_value(t, latest[0].full_name, "core::get")
+			testing.expect_value(t, latest[0].commit, "c06")
+			testing.expect_value(t, latest[0].bytes_per_op, u64(32))
+			testing.expect_value(t, latest[0].footprint_bytes, u64(512))
+			testing.expect_value(t, latest[0].peak_heap_bytes, i64(1024))
+			testing.expect(
+				t,
+				math.abs(hugi.fs_to_ns_f64(latest[0].p50_fs) - 65.1) < 0.01,
+				"p50_fs recomputed accurately",
+			)
+			testing.expect(
+				t,
+				latest[0].ops_per_sec > 0.0 && latest[0].mb_per_sec > 0.0,
+				"throughput stats recomputed",
+			)
+			testing.expect_value(t, latest[1].full_name, "scan")
+			testing.expect_value(t, latest[2].full_name, "special_put")
+			testing.expect_value(t, latest[2].rank, 10)
+			testing.expect_value(t, len(latest[2].metrics), 1)
+			if len(latest[2].metrics) == 1 {
+				testing.expect_value(t, latest[2].metrics[0].unit, "%")
+				testing.expect_value(t, latest[2].metrics[0].value, 99.5)
+			}
+		}
+	}
+
+	opts := store.default_store_write_options()
+	opts.keep_hot_runs = 2
+	before, after, c_ok := store.store_compact_with_options(db_path, opts)
+	testing.expect(t, c_ok, "v3 compact with cold rollup should succeed")
+	testing.expect(t, before > 0 && after > 0 && after < before, "v3 compact shrinks store")
+
+	st2, open2_ok := store.store_open(db_path, context.allocator)
+	testing.expect(t, open2_ok, "reopen compacted v3 store")
+	if !open2_ok {
+		return
+	}
+	defer store.store_close(&st2)
+
+	runs2 := store.store_list_runs(&st2)
+	defer store.run_summaries_destroy(runs2)
+	testing.expect_value(t, len(runs2), 6)
+	if len(runs2) == 6 {
+		testing.expect_value(t, runs2[0].run_id, "r01")
+		testing.expect_value(t, runs2[5].run_id, "r06")
+	}
+
+	loaded_pkts := store.store_load_all_packets(&st2, context.allocator)
+	defer {
+		for &lp in loaded_pkts {
+			hugi.packet_destroy(&lp)
+		}
+		delete(loaded_pkts)
+	}
+	testing.expect_value(t, len(loaded_pkts), 6)
+	if len(loaded_pkts) == 6 {
+		// Verify cold c02 (idx 1) and hot c06 (idx 5) preserve descriptors, flags, and exact bits.
+		for chk_idx in ([2]int{1, 5}) {
+			ref := _make_v3_test_packet(
+				run_ids[chk_idx],
+				commits[chk_idx],
+				40.0 + f64(chk_idx) * 5.0,
+			)
+			defer hugi.packet_destroy(&ref)
+			got := loaded_pkts[chk_idx]
+			testing.expect_value(t, len(got.records), 3)
+			if len(got.records) == 3 {
+				testing.expect(t, got.records[0].items_per_sec > 0.0, "items_per_sec restored")
+				testing.expect_value(t, got.records[1].param, 64)
+				testing.expect(t, got.records[1].has_param, "has_param preserved")
+				testing.expect_value(t, got.records[1].threads, 2)
+				testing.expect(t, got.records[1].has_threads, "has_threads preserved")
+				testing.expect_value(t, got.records[1].rank, 10)
+				testing.expect_value(t, got.records[2].full_name, "scan")
+				testing.expect(t, got.records[2].zero_alloc_failed, "zero_alloc_failed preserved")
+				testing.expect_value(t, got.records[2].error, "timeout")
+				testing.expect_value(
+					t,
+					len(got.records[0].samples_batch_ns),
+					len(ref.records[0].samples_batch_ns),
+				)
+				for si in 0 ..< min(len(got.records[0].samples_batch_ns), len(ref.records[0].samples_batch_ns)) {
+					testing.expect_value(
+						t,
+						got.records[0].samples_batch_ns[si],
+						ref.records[0].samples_batch_ns[si],
+					)
+				}
+			}
+		}
+	}
+
+	// Query a cold run (r02 / c02 rolled into CZCH) and a hot run (r05 / c05).
+	cold_rec := store.store_load_pooled_records(&st2, "odin", commit = "c02")
+	defer store.pooled_records_destroy(cold_rec)
+	testing.expect_value(t, len(cold_rec), 3)
+	if len(cold_rec) == 3 {
+		testing.expect(
+			t,
+			math.abs(hugi.fs_to_ns_f64(cold_rec[0].p50_fs) - 45.1) < 0.01,
+			"cold c02 p50_fs accurate",
+		)
+	}
+
+	hot_rec := store.store_load_pooled_records(&st2, "odin", commit = "c05")
+	defer store.pooled_records_destroy(hot_rec)
+	testing.expect_value(t, len(hot_rec), 3)
+	if len(hot_rec) == 3 {
+		testing.expect(
+			t,
+			math.abs(hugi.fs_to_ns_f64(hot_rec[0].p50_fs) - 60.1) < 0.01,
+			"hot c05 p50_fs accurate",
+		)
+	}
+
+	// Incremental hot append onto compacted cold+hot store.
+	pkt7 := _make_v3_test_packet("r07", "c07", 75.0)
+	defer hugi.packet_destroy(&pkt7)
+	testing.expect(t, store.store_ingest_packet(&st2, pkt7), "hot append c07 onto compacted store")
+
+	runs3 := store.store_list_runs(&st2)
+	testing.expect_value(t, len(runs3), 7)
+	store.run_summaries_destroy(runs3)
+
+	latest2 := store.store_load_pooled_records(&st2, "odin")
+	defer store.pooled_records_destroy(latest2)
+	testing.expect_value(t, len(latest2), 3)
+	if len(latest2) == 3 {
+		testing.expect_value(t, latest2[0].commit, "c07")
+		testing.expect(
+			t,
+			math.abs(hugi.fs_to_ns_f64(latest2[0].p50_fs) - 75.1) < 0.01,
+			"snapshot updated to c07",
+		)
+	}
+
+	// Re-ingesting an existing cold run_id (r01) must update in-place without duplicating run_order.
+	pkt1_dup := _make_v3_test_packet("r01", "c01", 40.0)
+	defer hugi.packet_destroy(&pkt1_dup)
+	testing.expect(t, store.store_ingest_packet(&st2, pkt1_dup), "re-ingest existing run_id r01")
+
+	runs4 := store.store_list_runs(&st2)
+	defer store.run_summaries_destroy(runs4)
+	testing.expect_value(t, len(runs4), 7)
+}
+
+@(test)
+test_store_core_overlay_zero_disk_mutation :: proc(t: ^testing.T) {
+	if !os.exists(".tmp") {
+		_ = os.make_directory(".tmp")
+	}
+	db_path := ".tmp/hugi_test_overlay.hugidb"
+	if os.exists(db_path) {
+		_ = os.remove(db_path)
+	}
+	defer if os.exists(db_path) {
+		_ = os.remove(db_path)
+	}
+
+	{
+		st, ok := store.store_open(db_path, context.allocator)
+		testing.expect(t, ok, "seed base store")
+		if !ok {
+			return
+		}
+		defer store.store_close(&st)
+
+		p1 := _make_v3_test_packet("base01", "c01", 50.0)
+		defer hugi.packet_destroy(&p1)
+		p2 := _make_v3_test_packet("base02", "c02", 52.0)
+		defer hugi.packet_destroy(&p2)
+		testing.expect(t, store.store_ingest_packet(&st, p1), "ingest base01")
+		testing.expect(t, store.store_ingest_packet(&st, p2), "ingest base02")
+	}
+
+	disk_before, b_err := os.read_entire_file(db_path, context.allocator)
+	testing.expect(t, b_err == nil, "read base file before overlay")
+	if b_err != nil {
+		return
+	}
+	defer delete(disk_before)
+
+	{
+		ov, ov_ok := store.store_open_overlay(db_path, context.allocator)
+		testing.expect(t, ov_ok, "open Core_Overlay over base file")
+		if !ov_ok {
+			return
+		}
+		defer store.store_close(&ov)
+		testing.expect(t, ov.is_overlay, "overlay flag set")
+
+		trial := _make_v3_test_packet("trial01", "exp99", 30.0)
+		defer hugi.packet_destroy(&trial)
+		testing.expect(t, store.store_ingest_packet(&ov, trial), "ingest trial run into overlay")
+		testing.expect(
+			t,
+			store.store_overlay_owned_bytes(&ov) > 0,
+			"overlay owns modified CoW pages",
+		)
+
+		ov_runs := store.store_list_runs(&ov)
+		defer store.run_summaries_destroy(ov_runs)
+		testing.expect_value(t, len(ov_runs), 3)
+
+		ov_latest := store.store_load_pooled_records(&ov, "odin")
+		defer store.pooled_records_destroy(ov_latest)
+		testing.expect_value(t, len(ov_latest), 3)
+		if len(ov_latest) == 3 {
+			testing.expect_value(t, ov_latest[0].commit, "exp99")
+		}
+	}
+
+	disk_after, a_err := os.read_entire_file(db_path, context.allocator)
+	testing.expect(t, a_err == nil, "read base file after overlay")
+	if a_err != nil {
+		return
+	}
+	defer delete(disk_after)
+	testing.expect_value(t, len(disk_after), len(disk_before))
+	if len(disk_after) == len(disk_before) {
+		same := true
+		for i in 0 ..< len(disk_before) {
+			if disk_after[i] != disk_before[i] {
+				same = false
+				break
+			}
+		}
+		testing.expect(t, same, "overlay must not mutate a single byte on disk")
+	}
+
+	st_reopen, r_ok := store.store_open(db_path, context.allocator)
+	testing.expect(t, r_ok, "reopen base store after overlay")
+	if r_ok {
+		defer store.store_close(&st_reopen)
+		base_runs := store.store_list_runs(&st_reopen)
+		defer store.run_summaries_destroy(base_runs)
+		testing.expect_value(t, len(base_runs), 2)
+	}
+}
+
+@(test)
+test_rational_batch_u64_and_femtosecond_decimal_precision :: proc(t: ^testing.T) {
+	// 1. u64 batch codec round-trip across empty, clustered ticks, and large wrapping deltas.
+	emp_blob, emp_ok := store.compress_samples_u64([]u64{}, context.allocator)
+	testing.expect(t, emp_ok, "empty u64 compress should succeed")
+	if emp_ok {
+		defer delete(emp_blob)
+		emp_back, emp_dok := store.decompress_samples_u64(emp_blob, context.allocator)
+		testing.expect(t, emp_dok, "empty u64 decode should succeed")
+		if emp_dok {
+			defer delete(emp_back)
+			testing.expect_value(t, len(emp_back), 0)
+		}
+	}
+
+	clustered := []u64 {
+		41_732_000,
+		41_732_030,
+		41_731_990,
+		41_732_000,
+		41_732_010,
+		41_731_970,
+		0,
+		max(u64),
+		12345,
+	}
+	c_blob, c_ok := store.compress_samples_u64(clustered, context.allocator)
+	testing.expect(t, c_ok, "clustered/wrapping u64 compress should succeed")
+	if c_ok {
+		defer delete(c_blob)
+		c_back, c_dok := store.decompress_samples_u64(c_blob, context.allocator)
+		testing.expect(t, c_dok, "clustered/wrapping u64 decode should succeed")
+		if c_dok {
+			defer delete(c_back)
+			testing.expect_value(t, len(c_back), len(clustered))
+			for v, i in clustered {
+				testing.expect_value(t, c_back[i], v)
+			}
+		}
+	}
+
+	// 2. Signed femtosecond sample codec round-trip (`compress_samples_fs_i64`).
+	fs_vals := []i64{-123_456_789, -1, 0, 1, 5_000, 41_732_000_000}
+	fs_blob, f_ok := store.compress_samples_fs_i64(fs_vals, context.allocator)
+	testing.expect(t, f_ok, "fs i64 compress should succeed")
+	if f_ok {
+		defer delete(fs_blob)
+		fs_back, f_dok := store.decompress_samples_fs_i64(fs_blob, context.allocator)
+		testing.expect(t, f_dok, "fs i64 decode should succeed")
+		if f_dok {
+			defer delete(fs_back)
+			testing.expect_value(t, len(fs_back), len(fs_vals))
+			for v, i in fs_vals {
+				testing.expect_value(t, fs_back[i], v)
+			}
+		}
+	}
+
+	// 3. Exact sub-picosecond SIMD and clamped zero formatting + CZPK\x04 / CZCH\x02 round-trip.
+	sb := strings.builder_make(context.temp_allocator)
+	hugi.write_decimal_ns_fs(&sb, 5_000)
+	testing.expect_value(t, strings.to_string(sb), "0.005000")
+	ps_str := hugi.format_duration_fs(5_000, context.allocator)
+	defer delete(ps_str)
+	testing.expect_value(t, ps_str, "5.00 ps")
+
+	if !os.exists(".tmp") {
+		_ = os.make_directory(".tmp")
+	}
+	db_path := ".tmp/hugi_test_rational.hugidb"
+	csv_path := ".tmp/hugi_test_rational.csv"
+	json_path := ".tmp/hugi_test_rational.json"
+	for p in ([3]string{db_path, csv_path, json_path}) {
+		if os.exists(p) {
+			_ = os.remove(p)
+		}
+	}
+	defer for p in ([3]string{db_path, csv_path, json_path}) {
+		if os.exists(p) {
+			_ = os.remove(p)
+		}
+	}
+
+	make_simd_pkt := proc(run_id, commit: string) -> hugi.Run_Packet {
+		pkt := hugi.Run_Packet {
+			run_id         = strings.clone(run_id),
+			commit         = strings.clone(commit),
+			timestamp_unix = 1770000100,
+			lang           = strings.clone("odin"),
+			suite_name     = strings.clone("simd_suite"),
+			os             = strings.clone("linux"),
+			arch           = strings.clone("amd64"),
+			optimization   = strings.clone("-o:speed"),
+			odin_version   = strings.clone("dev"),
+			records        = make([dynamic]hugi.Record),
+		}
+
+		r_simd := hugi.Record {
+			rank             = 1,
+			group_name       = strings.clone("simd"),
+			name             = strings.clone("dot8"),
+			full_name        = strings.clone("simd::dot8"),
+			ops_per_sample   = 10_000_000,
+			samples_batch_ns = make([dynamic]u64),
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		append(&r_simd.samples_batch_ns, 50_000, 50_000, 50_010)
+		hugi.recompute_record_stats_from_samples(&r_simd)
+		append(&pkt.records, r_simd)
+
+		r_zero := hugi.Record {
+			rank             = 2,
+			group_name       = strings.clone("simd"),
+			name             = strings.clone("clamped_zero"),
+			full_name        = strings.clone("simd::clamped_zero"),
+			ops_per_sample   = 1_000_000,
+			samples_batch_ns = make([dynamic]u64),
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		append(&r_zero.samples_batch_ns, 0, 0, 1)
+		hugi.recompute_record_stats_from_samples(&r_zero)
+		append(&pkt.records, r_zero)
+		return pkt
+	}
+
+	{
+		st, ok := store.store_open(db_path)
+		testing.expect(t, ok, "open rational store")
+		if !ok {
+			return
+		}
+		defer store.store_close(&st)
+
+		p1 := make_simd_pkt("rr-1", "rc01")
+		defer hugi.packet_destroy(&p1)
+		p2 := make_simd_pkt("rr-2", "rc02")
+		defer hugi.packet_destroy(&p2)
+		p3 := make_simd_pkt("rr-3", "rc02")
+		defer hugi.packet_destroy(&p3)
+		testing.expect_value(t, p1.records[0].p50_fs, i64(5_000))
+		testing.expect_value(t, p1.records[1].min_fs, i64(0))
+		testing.expect_value(t, p1.records[1].p50_fs, i64(0))
+		testing.expect_value(t, p1.records[1].max_fs, i64(1))
+
+		testing.expect(t, store.store_ingest_packet(&st, p1), "ingest rational p1")
+		testing.expect(t, store.store_ingest_packet(&st, p2), "ingest rational p2")
+		testing.expect(t, store.store_ingest_packet(&st, p3), "ingest rational p3")
+	}
+
+	_, _, c_ok2 := store.store_compact(db_path)
+	testing.expect(t, c_ok2, "compact rational store into CZCHv2")
+
+	st_back, ok_back := store.store_open(db_path)
+	testing.expect(t, ok_back, "reopen compacted rational store")
+	if !ok_back {
+		return
+	}
+	defer store.store_close(&st_back)
+
+	all_pkts := store.store_load_all_packets(&st_back)
+	defer {
+		for &p in all_pkts {
+			hugi.packet_destroy(&p)
+		}
+		delete(all_pkts)
+	}
+	testing.expect_value(t, len(all_pkts), 3)
+	if len(all_pkts) == 3 && len(all_pkts[0].records) == 2 {
+		rs := all_pkts[0].records[0]
+		rz := all_pkts[0].records[1]
+		testing.expect_value(t, rs.p50_fs, i64(5_000))
+		testing.expect_value(t, len(rs.samples_batch_ns), 3)
+		testing.expect_value(t, rs.samples_batch_ns[0], u64(50_000))
+		testing.expect_value(t, rs.samples_batch_ns[2], u64(50_010))
+		testing.expect_value(t, rz.min_fs, i64(0))
+		testing.expect_value(t, rz.p50_fs, i64(0))
+		testing.expect_value(t, rz.max_fs, i64(1))
+		testing.expect_value(t, rz.samples_batch_ns[0], u64(0))
+		testing.expect_value(t, rz.samples_batch_ns[2], u64(1))
+	}
+
+	pooled := store.store_load_pooled_records(&st_back, "odin")
+	defer store.pooled_records_destroy(pooled)
+	testing.expect_value(t, len(pooled), 2)
+	if len(pooled) == 2 {
+		testing.expect_value(t, pooled[0].p50_fs, i64(5_000))
+		testing.expect_value(t, len(pooled[0].samples_batch_ns), 6)
+		testing.expect_value(t, pooled[1].min_fs, i64(0))
+		testing.expect_value(t, pooled[1].max_fs, i64(1))
+	}
+
+	testing.expect(t, store.export_csv(csv_path, pooled), "export rational csv")
+	testing.expect(t, store.export_json(json_path, pooled), "export rational json")
+	if csv_bytes, err := os.read_entire_file(csv_path, context.allocator); err == nil {
+		defer delete(csv_bytes)
+		testing.expect(
+			t,
+			strings.contains(string(csv_bytes), ",0.005000,"),
+			"csv must format 5000 fs as exact 0.005000",
+		)
+	}
+	if json_bytes, err := os.read_entire_file(json_path, context.allocator); err == nil {
+		defer delete(json_bytes)
+		testing.expect(
+			t,
+			strings.contains(string(json_bytes), `"samples_batch_ns": [50000,`),
+			"json must include raw samples_batch_ns",
+		)
+		testing.expect(
+			t,
+			strings.contains(string(json_bytes), `"p50_ns": 0.005000`),
+			"json must format DECIMAL(18, 6) p50_ns cleanly",
+		)
+	}
 }

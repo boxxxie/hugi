@@ -53,7 +53,7 @@ _Phase_Accum :: struct {
 	footprint_bytes:    u64,
 	metrics:            [MAX_METRICS]Metric,
 	metrics_count:      int,
-	samples_ns:         [dynamic]f64,
+	samples_batch_ns:   [dynamic]u64,
 	samples_cycles:     [dynamic]f64,
 	allocs_per_op:      f64,
 	resizes_per_op:     f64,
@@ -71,7 +71,7 @@ Pipeline :: struct {
 	param:                 int,
 	has_param:             bool,
 	user_ptr:              rawptr,
-	clock_overhead_ns:     f64,
+	clock_overhead_fs:     i64,
 	clock_overhead_cycles: f64,
 	_mode:                 _Phase_Pass_Mode,
 	_slot_cursor:          int,
@@ -113,7 +113,7 @@ phase_begin :: proc(
 				ops = eff_ops,
 				bytes_per_op = bytes_per_op,
 				zero_alloc = eff_zero,
-				samples_ns = make([dynamic]f64, p._allocator),
+				samples_batch_ns = make([dynamic]u64, p._allocator),
 				samples_cycles = make([dynamic]f64, p._allocator),
 			},
 		)
@@ -187,10 +187,10 @@ phase_end :: proc(ph: ^Phase) {
 	case .Warmup:
 	case .Timed:
 		ns, cyc := obench.clock_elapsed(ph.start_ts, end_ts)
-		adj_ns := max(f64(ns) - p.clock_overhead_ns, 0.0)
-		adj_cyc := max(f64(cyc) - p.clock_overhead_cycles, 0.0)
-		append(&acc.samples_ns, adj_ns / f64(ph.ops))
-		append(&acc.samples_cycles, adj_cyc / f64(ph.ops))
+		ov_ns := (i128(p.clock_overhead_fs) + 500_000) / 1_000_000
+		adj_batch_ns := u64(max(i128(ns) - ov_ns, 0))
+		append(&acc.samples_batch_ns, adj_batch_ns)
+		append(&acc.samples_cycles, max(f64(cyc) - p.clock_overhead_cycles, 0.0) / f64(ph.ops))
 	case .Alloc_Check:
 		ops_f := f64(max(ph.ops, 1))
 		hc := p._heap_counter
@@ -305,7 +305,7 @@ _destroy_phase_accums :: proc(accums: []_Phase_Accum, allocator: runtime.Allocat
 		for i in 0 ..< acc.metrics_count {
 			delete(acc.metrics[i].unit, allocator)
 		}
-		delete(acc.samples_ns)
+		delete(acc.samples_batch_ns)
 		delete(acc.samples_cycles)
 	}
 }
@@ -332,12 +332,14 @@ _execute_pipeline :: proc(
 		warmup = 1
 	}
 
+	clock_ov_fs :=
+		s.obench_suite.clock.overhead_fs > 0 ? s.obench_suite.clock.overhead_fs : ns_f64_to_fs(s.obench_suite.clock.overhead_ns)
 	p := Pipeline {
 		group_name            = def.group_name,
 		param                 = def.param,
 		has_param             = def.has_param,
 		user_ptr              = def.user_ptr,
-		clock_overhead_ns     = s.obench_suite.clock.overhead_ns,
+		clock_overhead_fs     = clock_ov_fs,
 		clock_overhead_cycles = s.obench_suite.clock.overhead_cycles,
 		_accums               = make([dynamic]_Phase_Accum, s.allocator),
 		_enforce_zero_alloc   = s.obench_suite.config.enforce_zero_allocs,
@@ -441,7 +443,7 @@ _execute_pipeline :: proc(
 			threads            = 1,
 			has_threads        = false,
 			ops_per_sample     = u64(max(acc.ops, 1)),
-			samples            = len(acc.samples_ns),
+			samples            = len(acc.samples_batch_ns),
 			warmup             = warmup,
 			bytes_per_op       = acc.bytes_per_op,
 			footprint_bytes    = acc.footprint_bytes,
@@ -454,9 +456,9 @@ _execute_pipeline :: proc(
 			zero_alloc_failed  = acc.zero_alloc_failed,
 			error              = strings.clone("", s.allocator),
 			metrics            = make([dynamic]Metric, acc.metrics_count, s.allocator),
-			samples_ns         = make([dynamic]f64, len(acc.samples_ns), s.allocator),
+			samples_batch_ns   = make([dynamic]u64, len(acc.samples_batch_ns), s.allocator),
 		}
-		copy(r.samples_ns[:], acc.samples_ns[:])
+		copy(r.samples_batch_ns[:], acc.samples_batch_ns[:])
 		for i in 0 ..< acc.metrics_count {
 			r.metrics[i] = Metric {
 				unit  = strings.clone(acc.metrics[i].unit, s.allocator),
@@ -465,8 +467,8 @@ _execute_pipeline :: proc(
 		}
 
 		recompute_record_stats_from_samples(&r)
-		if r.p50_ns > 0 {
-			ops_sec := 1_000_000_000.0 / r.p50_ns
+		if r.p50_fs > 0 {
+			ops_sec := FS_PER_SEC_F64 / f64(r.p50_fs)
 			r.items_per_sec = ops_sec
 			if r.bytes_per_op > 0 {
 				r.mb_per_sec = (f64(r.bytes_per_op) * ops_sec) / (1024.0 * 1024.0)

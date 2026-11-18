@@ -343,7 +343,8 @@ _obench_result_to_record :: proc(
 	allocator: runtime.Allocator,
 ) -> Record {
 	st := r.stats
-	ops_sec := st.p50_ns > 0 ? (1_000_000_000.0 / st.p50_ns) : 0.0
+	ops := u64(max(st.batch_size, 1))
+	sample_count := len(st.samples_batch_ns) > 0 ? len(st.samples_batch_ns) : len(st.samples_ns)
 	rec := Record {
 		rank               = rank,
 		group_name         = strings.clone(r.group_name, allocator),
@@ -353,26 +354,26 @@ _obench_result_to_record :: proc(
 		has_param          = r.has_param,
 		threads            = r.threads,
 		has_threads        = r.has_threads,
-		ops_per_sample     = u64(max(st.batch_size, 1)),
+		ops_per_sample     = ops,
 		samples            = st.samples,
-		min_ns             = st.min_ns,
-		p25_ns             = st.p25_ns,
-		p50_ns             = st.p50_ns,
-		p75_ns             = st.p75_ns,
-		p95_ns             = st.p95_ns,
-		p99_ns             = st.p99_ns,
-		max_ns             = st.max_ns,
-		mean_ns            = st.mean_ns,
-		std_dev_ns         = st.std_dev_ns,
-		ci95_ns            = st.ci95_ns,
+		min_fs             = ns_f64_to_fs(st.min_ns),
+		p25_fs             = ns_f64_to_fs(st.p25_ns),
+		p50_fs             = ns_f64_to_fs(st.p50_ns),
+		p75_fs             = ns_f64_to_fs(st.p75_ns),
+		p95_fs             = ns_f64_to_fs(st.p95_ns),
+		p99_fs             = ns_f64_to_fs(st.p99_ns),
+		max_fs             = ns_f64_to_fs(st.max_ns),
+		mean_fs            = ns_f64_to_fs(st.mean_ns),
+		std_dev_fs         = ns_f64_to_fs(st.std_dev_ns),
+		ci95_fs            = ns_f64_to_fs(st.ci95_ns),
 		cv_pct             = st.cv_pct,
-		iqr_ns             = st.iqr_ns,
-		mad_ns             = st.mad_ns,
+		iqr_fs             = ns_f64_to_fs(st.iqr_ns),
+		mad_fs             = ns_f64_to_fs(st.mad_ns),
 		median_cycles      = st.median_cycles,
 		bytes_per_op       = st.bytes_per_op,
 		items_per_op       = st.items_per_op,
 		mb_per_sec         = st.mb_per_sec,
-		items_per_sec      = st.items_per_sec > 0 ? st.items_per_sec : ops_sec,
+		items_per_sec      = st.items_per_sec,
 		allocs_per_op      = st.allocs_per_op,
 		resizes_per_op     = st.resizes_per_op,
 		alloc_bytes_per_op = st.alloc_bytes_per_op,
@@ -382,9 +383,26 @@ _obench_result_to_record :: proc(
 		zero_alloc_failed  = r.zero_alloc_failed,
 		error              = strings.clone(obench.bench_error_string(r.error), allocator),
 		metrics            = make([dynamic]Metric, st.custom_metrics_count, allocator),
-		samples_ns         = make([dynamic]f64, len(st.samples_ns), allocator),
+		samples_batch_ns   = make([dynamic]u64, sample_count, allocator),
 	}
-	copy(rec.samples_ns[:], st.samples_ns)
+	if len(st.samples_batch_ns) > 0 {
+		copy(rec.samples_batch_ns[:], st.samples_batch_ns)
+		recompute_record_stats_from_samples(&rec)
+	} else if len(st.samples_ns) > 0 {
+		for s, i in st.samples_ns {
+			rec.samples_batch_ns[i] = legacy_ns_to_batch_ns(s, ops)
+		}
+		recompute_record_stats_from_samples(&rec)
+	}
+	if rec.p50_fs > 0 {
+		ops_sec := FS_PER_SEC_F64 / f64(rec.p50_fs)
+		if rec.items_per_sec <= 0 {
+			rec.items_per_sec = rec.items_per_op > 0 ? f64(rec.items_per_op) * ops_sec : ops_sec
+		}
+		if rec.bytes_per_op > 0 && rec.mb_per_sec <= 0 {
+			rec.mb_per_sec = (f64(rec.bytes_per_op) * ops_sec) / (1024.0 * 1024.0)
+		}
+	}
 	for i in 0 ..< st.custom_metrics_count {
 		rec.metrics[i] = Metric {
 			unit  = strings.clone(st.custom_metrics[i].unit, allocator),
@@ -536,13 +554,16 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 
 	fmt.sbprintf(
 		sb,
-		"\nhugi pipelines: %s (%s/%s, -o:%v, commit %s, clock overhead %.1f ns)\n",
+		"\nhugi pipelines: %s (%s/%s, -o:%v, commit %s, clock overhead %s)\n",
 		s.name,
 		ODIN_OS_STRING,
 		ODIN_ARCH_STRING,
 		ODIN_OPTIMIZATION_MODE,
 		s.last_packet.commit,
-		s.obench_suite.clock.overhead_ns,
+		format_duration_fs(
+			s.obench_suite.clock.overhead_fs > 0 ? s.obench_suite.clock.overhead_fs : ns_f64_to_fs(s.obench_suite.clock.overhead_ns),
+			context.temp_allocator,
+		),
 	)
 	fmt.sbprintln(
 		sb,
@@ -574,8 +595,8 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 		if in_obench {
 			continue
 		}
-		med_str := obench.format_duration_ns(r.p50_ns, context.temp_allocator)
-		p95_str := obench.format_duration_ns(r.p95_ns, context.temp_allocator)
+		med_str := format_duration_fs(r.p50_fs, context.temp_allocator)
+		p95_str := format_duration_fs(r.p95_fs, context.temp_allocator)
 		alloc_str := "0 allocs"
 		if r.allocs_per_op > 0 || r.alloc_bytes_per_op > 0 {
 			alloc_str = fmt.tprintf(

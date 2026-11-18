@@ -18,19 +18,19 @@ Pooled_Record :: struct {
 	run_ids:            [dynamic]string,
 	ops_per_sample:     u64,
 	samples:            int,
-	min_ns:             f64,
-	p25_ns:             f64,
-	p50_ns:             f64,
-	p75_ns:             f64,
-	p95_ns:             f64,
-	p99_ns:             f64,
-	max_ns:             f64,
-	mean_ns:            f64,
-	std_dev_ns:         f64,
-	ci95_ns:            f64,
+	min_fs:             i64,
+	p25_fs:             i64,
+	p50_fs:             i64,
+	p75_fs:             i64,
+	p95_fs:             i64,
+	p99_fs:             i64,
+	max_fs:             i64,
+	mean_fs:            i64,
+	std_dev_fs:         i64,
+	ci95_fs:            i64,
 	cv_pct:             f64,
-	iqr_ns:             f64,
-	mad_ns:             f64,
+	iqr_fs:             i64,
+	mad_fs:             i64,
 	median_cycles:      f64,
 	bytes_per_op:       u64,
 	mb_per_sec:         f64,
@@ -43,7 +43,8 @@ Pooled_Record :: struct {
 	temp_bytes_per_op:  f64,
 	peak_heap_bytes:    i64,
 	metrics:            [dynamic]hugi.Metric,
-	samples_ns:         [dynamic]f64,
+	samples_fs:         [dynamic]i64,
+	samples_batch_ns:   [dynamic]u64,
 }
 
 pooled_record_destroy :: proc(r: ^Pooled_Record, allocator := context.allocator) {
@@ -64,7 +65,8 @@ pooled_record_destroy :: proc(r: ^Pooled_Record, allocator := context.allocator)
 		delete(m.unit, allocator)
 	}
 	delete(r.metrics)
-	delete(r.samples_ns)
+	delete(r.samples_fs)
+	delete(r.samples_batch_ns)
 	r^ = {}
 }
 
@@ -75,9 +77,19 @@ pooled_records_destroy :: proc(list: []Pooled_Record, allocator := context.alloc
 	delete(list, allocator)
 }
 
+@(private = "file")
+_samples_fs_as_f64 :: proc(src: []i64, allocator := context.temp_allocator) -> []f64 {
+	out := make([]f64, len(src), allocator)
+	for v, i in src {
+		out[i] = f64(v)
+	}
+	return out
+}
+
 /*
-Pools all `samples_ns` across matching runs in `st` and computes unified quantile,
-dispersion, throughput, allocation, and footprint metrics per benchmark.
+Pools all per-op durations (`samples_fs`, plus `samples_batch_ns` when `ops_per_sample` matches
+across runs) across matching runs in `st` and computes unified quantile, dispersion, throughput,
+allocation, and footprint metrics per benchmark.
 */
 @(require_results)
 store_load_pooled_records :: proc(
@@ -97,7 +109,10 @@ store_load_pooled_records :: proc(
 			continue
 		}
 		last := g.records[len(g.records) - 1]
-		pooled_samples := make([dynamic]f64, allocator)
+		first_ops := g.records[0].ops_per_sample
+		same_ops := true
+		pooled_fs := make([dynamic]i64, allocator)
+		pooled_batches := make([dynamic]u64, allocator)
 		footprint := last.footprint_bytes
 		sum_allocs := 0.0
 		sum_resizes := 0.0
@@ -107,10 +122,20 @@ store_load_pooled_records :: proc(
 		max_peak := last.peak_heap_bytes
 
 		for &rec in g.records {
-			if len(rec.samples_ns) > 0 {
-				append(&pooled_samples, ..rec.samples_ns[:])
-			} else if rec.p50_ns > 0 {
-				append(&pooled_samples, rec.p50_ns)
+			if rec.ops_per_sample != first_ops {
+				same_ops = false
+			}
+			if len(rec.samples_batch_ns) > 0 {
+				ops := max(rec.ops_per_sample, 1)
+				for b in rec.samples_batch_ns {
+					append(&pooled_fs, hugi.batch_ns_to_op_fs(b, ops))
+				}
+				if same_ops {
+					append(&pooled_batches, ..rec.samples_batch_ns[:])
+				}
+			} else if rec.p50_fs > 0 {
+				append(&pooled_fs, rec.p50_fs)
+				same_ops = false
 			}
 			if rec.footprint_bytes > footprint {
 				footprint = rec.footprint_bytes
@@ -123,6 +148,9 @@ store_load_pooled_records :: proc(
 			sum_alloc_bytes += rec.alloc_bytes_per_op
 			sum_temp_allocs += rec.temp_allocs_per_op
 			sum_temp_bytes += rec.temp_bytes_per_op
+		}
+		if !same_ops {
+			clear(&pooled_batches)
 		}
 
 		n_recs := f64(len(g.records))
@@ -161,74 +189,77 @@ store_load_pooled_records :: proc(
 			temp_bytes_per_op  = sum_temp_bytes / n_recs,
 			peak_heap_bytes    = max_peak,
 			metrics            = metrics,
-			samples_ns         = pooled_samples,
+			samples_fs         = pooled_fs,
+			samples_batch_ns   = pooled_batches,
 		}
 
-		if len(pr.samples_ns) > 0 {
-			sorted := slice.clone(pr.samples_ns[:], context.temp_allocator)
+		if len(pr.samples_fs) > 0 {
+			sorted := slice.clone(pr.samples_fs[:], context.temp_allocator)
 			slice.sort(sorted)
 			n := len(sorted)
 			pr.samples = n
-			pr.min_ns = sorted[0]
-			pr.max_ns = sorted[n - 1]
-			pr.p25_ns = obench.percentile_sorted(sorted, 0.25)
-			pr.p50_ns = obench.percentile_sorted(sorted, 0.50)
-			pr.p75_ns = obench.percentile_sorted(sorted, 0.75)
-			pr.p95_ns = obench.percentile_sorted(sorted, 0.95)
-			pr.p99_ns = obench.percentile_sorted(sorted, 0.99)
-			pr.iqr_ns = pr.p75_ns - pr.p25_ns
+			pr.min_fs = sorted[0]
+			pr.max_fs = sorted[n - 1]
+			pr.p25_fs = hugi.percentile_sorted_fs(sorted, 25)
+			pr.p50_fs = hugi.percentile_sorted_fs(sorted, 50)
+			pr.p75_fs = hugi.percentile_sorted_fs(sorted, 75)
+			pr.p95_fs = hugi.percentile_sorted_fs(sorted, 95)
+			pr.p99_fs = hugi.percentile_sorted_fs(sorted, 99)
+			pr.iqr_fs = pr.p75_fs - pr.p25_fs
 
-			sum := 0.0
+			sum_fs: i128 = 0
 			for v in sorted {
-				sum += v
+				sum_fs += i128(v)
 			}
-			pr.mean_ns = sum / f64(n)
+			pr.mean_fs = i64((sum_fs + i128(n / 2)) / i128(n))
 
 			var_sum := 0.0
 			for v in sorted {
-				d := v - pr.mean_ns
+				d := f64(v - pr.mean_fs)
 				var_sum += d * d
 			}
 			if n > 1 {
-				pr.std_dev_ns = math.sqrt(var_sum / f64(n - 1))
-				pr.ci95_ns =
-					obench.t_critical_975(f64(n - 1)) * (pr.std_dev_ns / math.sqrt(f64(n)))
-			}
-			if pr.mean_ns > 0 {
-				pr.cv_pct = (pr.std_dev_ns / pr.mean_ns) * 100.0
+				std_f := math.sqrt(var_sum / f64(n - 1))
+				pr.std_dev_fs = i64(math.round(std_f))
+				pr.ci95_fs = i64(
+					math.round(obench.t_critical_975(f64(n - 1)) * (std_f / math.sqrt(f64(n)))),
+				)
+				if pr.mean_fs > 0 {
+					pr.cv_pct = (std_f / f64(pr.mean_fs)) * 100.0
+				}
 			}
 
-			abs_devs := make([]f64, n, context.temp_allocator)
+			abs_devs := make([]i64, n, context.temp_allocator)
 			for v, i in sorted {
-				abs_devs[i] = abs(v - pr.p50_ns)
+				abs_devs[i] = abs(v - pr.p50_fs)
 			}
 			slice.sort(abs_devs)
-			pr.mad_ns = obench.percentile_sorted(abs_devs, 0.50)
+			pr.mad_fs = hugi.percentile_sorted_fs(abs_devs, 50)
 
 			delete(abs_devs, context.temp_allocator)
 			delete(sorted, context.temp_allocator)
 
-			if pr.p50_ns > 0 {
-				pr.ops_per_sec = 1_000_000_000.0 / pr.p50_ns
+			if pr.p50_fs > 0 {
+				pr.ops_per_sec = hugi.FS_PER_SEC_F64 / f64(pr.p50_fs)
 				if pr.bytes_per_op > 0 {
 					pr.mb_per_sec = (f64(pr.bytes_per_op) * pr.ops_per_sec) / (1024.0 * 1024.0)
 				}
 			}
 		} else {
 			pr.samples = last.samples
-			pr.min_ns = last.min_ns
-			pr.p25_ns = last.p25_ns
-			pr.p50_ns = last.p50_ns
-			pr.p75_ns = last.p75_ns
-			pr.p95_ns = last.p95_ns
-			pr.p99_ns = last.p99_ns
-			pr.max_ns = last.max_ns
-			pr.mean_ns = last.mean_ns
-			pr.std_dev_ns = last.std_dev_ns
-			pr.ci95_ns = last.ci95_ns
+			pr.min_fs = last.min_fs
+			pr.p25_fs = last.p25_fs
+			pr.p50_fs = last.p50_fs
+			pr.p75_fs = last.p75_fs
+			pr.p95_fs = last.p95_fs
+			pr.p99_fs = last.p99_fs
+			pr.max_fs = last.max_fs
+			pr.mean_fs = last.mean_fs
+			pr.std_dev_fs = last.std_dev_fs
+			pr.ci95_fs = last.ci95_fs
 			pr.cv_pct = last.cv_pct
-			pr.iqr_ns = last.iqr_ns
-			pr.mad_ns = last.mad_ns
+			pr.iqr_fs = last.iqr_fs
+			pr.mad_fs = last.mad_fs
 			pr.ops_per_sec = last.items_per_sec
 		}
 
@@ -245,10 +276,10 @@ Verdict :: enum u8 {
 
 Comparison_Row :: struct {
 	full_name:        string,
-	base_p50_ns:      f64,
-	cand_p50_ns:      f64,
-	base_std_ns:      f64,
-	cand_std_ns:      f64,
+	base_p50_fs:      i64,
+	cand_p50_fs:      i64,
+	base_std_fs:      i64,
+	cand_std_fs:      i64,
 	base_samples:     int,
 	cand_samples:     int,
 	delta_pct:        f64,
@@ -299,6 +330,7 @@ compare_records :: proc(
 	}
 
 	cand_by_name := make(map[string]Pooled_Record, context.temp_allocator)
+	defer delete(cand_by_name)
 	for c in cand {
 		cand_by_name[c.full_name] = c
 	}
@@ -308,32 +340,32 @@ compare_records :: proc(
 
 	for b in base {
 		c, matched := cand_by_name[b.full_name]
-		if !matched || b.p50_ns <= 0 || c.p50_ns <= 0 {
+		if !matched || b.p50_fs <= 0 || c.p50_fs <= 0 {
 			continue
 		}
 
-		delta_pct := ((c.p50_ns - b.p50_ns) / b.p50_ns) * 100.0
-		speedup := b.p50_ns / c.p50_ns
+		delta_pct := (f64(c.p50_fs - b.p50_fs) / f64(b.p50_fs)) * 100.0
+		speedup := f64(b.p50_fs) / f64(c.p50_fs)
 		wt, wdf := obench.welch_test(
-			c.mean_ns,
-			c.std_dev_ns,
+			f64(c.mean_fs),
+			f64(c.std_dev_fs),
 			c.samples,
-			b.mean_ns,
-			b.std_dev_ns,
+			f64(b.mean_fs),
+			f64(b.std_dev_fs),
 			b.samples,
 		)
 
-		used_rank := len(b.samples_ns) >= 2 && len(c.samples_ns) >= 2
+		used_rank := len(b.samples_fs) >= 2 && len(c.samples_fs) >= 2
 		p_val := 1.0
 		stat_diff := false
 		if used_rank {
-			_, _, p_val = obench.mann_whitney_u(
-				c.samples_ns[:],
-				b.samples_ns[:],
-				context.temp_allocator,
-			)
+			c_f64 := _samples_fs_as_f64(c.samples_fs[:], context.temp_allocator)
+			b_f64 := _samples_fs_as_f64(b.samples_fs[:], context.temp_allocator)
+			_, _, p_val = obench.mann_whitney_u(c_f64, b_f64, context.temp_allocator)
+			delete(c_f64, context.temp_allocator)
+			delete(b_f64, context.temp_allocator)
 			// With n >= 2 per side, check both rank separation and Welch t on small N.
-			if len(b.samples_ns) >= 5 && len(c.samples_ns) >= 5 {
+			if len(b.samples_fs) >= 5 && len(c.samples_fs) >= 5 {
 				stat_diff = p_val < 0.05
 			} else {
 				stat_diff = p_val < 0.05 || (wdf > 0 && abs(wt) >= obench.t_critical_975(wdf))
@@ -354,7 +386,7 @@ compare_records :: proc(
 			rep.unchanged += 1
 		}
 
-		ratio := c.p50_ns / b.p50_ns
+		ratio := f64(c.p50_fs) / f64(b.p50_fs)
 		if ratio > 0 {
 			log_sum += math.ln(ratio)
 			log_cnt += 1
@@ -364,10 +396,10 @@ compare_records :: proc(
 			&rep.rows,
 			Comparison_Row {
 				full_name = strings.clone(b.full_name, allocator),
-				base_p50_ns = b.p50_ns,
-				cand_p50_ns = c.p50_ns,
-				base_std_ns = b.std_dev_ns,
-				cand_std_ns = c.std_dev_ns,
+				base_p50_fs = b.p50_fs,
+				cand_p50_fs = c.p50_fs,
+				base_std_fs = b.std_dev_fs,
+				cand_std_fs = c.std_dev_fs,
 				base_samples = b.samples,
 				cand_samples = c.samples,
 				delta_pct = delta_pct,
@@ -397,11 +429,11 @@ compare_records :: proc(
 Cross_Lang_Row :: struct {
 	full_name:          string,
 	ops:                u64,
-	a_p50_ns:           f64,
-	a_std_ns:           f64,
+	a_p50_fs:           i64,
+	a_std_fs:           i64,
 	a_cv_pct:           f64,
-	b_p50_ns:           f64,
-	b_std_ns:           f64,
+	b_p50_fs:           i64,
+	b_std_fs:           i64,
 	b_cv_pct:           f64,
 	faster_lang:        string, // `lang_a`, `lang_b`, or `"tie"`
 	speedup_ratio:      f64,
@@ -472,10 +504,12 @@ compare_1v1_langs :: proc(
 	defer pooled_records_destroy(rows_b, context.temp_allocator)
 
 	map_b := make(map[string]Pooled_Record, context.temp_allocator)
+	defer delete(map_b)
 	for b in rows_b {
 		map_b[b.full_name] = b
 	}
 	seen_b := make(map[string]bool, context.temp_allocator)
+	defer delete(seen_b)
 
 	for a in rows_a {
 		b, ok := map_b[a.full_name]
@@ -485,32 +519,32 @@ compare_1v1_langs :: proc(
 		}
 		seen_b[a.full_name] = true
 
-		a_med := max(a.p50_ns, 0.001)
-		b_med := max(b.p50_ns, 0.001)
+		a_med := f64(max(a.p50_fs, 1))
+		b_med := f64(max(b.p50_fs, 1))
 		wt, wdf := obench.welch_test(
-			a.mean_ns,
-			a.std_dev_ns,
+			f64(a.mean_fs),
+			f64(a.std_dev_fs),
 			a.samples,
-			b.mean_ns,
-			b.std_dev_ns,
+			f64(b.mean_fs),
+			f64(b.std_dev_fs),
 			b.samples,
 		)
 		p_val := 1.0
 		stat_diff := false
-		if len(a.samples_ns) >= 5 && len(b.samples_ns) >= 5 {
-			_, _, p_val = obench.mann_whitney_u(
-				a.samples_ns[:],
-				b.samples_ns[:],
-				context.temp_allocator,
-			)
+		if len(a.samples_fs) >= 5 && len(b.samples_fs) >= 5 {
+			a_f64 := _samples_fs_as_f64(a.samples_fs[:], context.temp_allocator)
+			b_f64 := _samples_fs_as_f64(b.samples_fs[:], context.temp_allocator)
+			_, _, p_val = obench.mann_whitney_u(a_f64, b_f64, context.temp_allocator)
+			delete(a_f64, context.temp_allocator)
+			delete(b_f64, context.temp_allocator)
 			stat_diff = p_val < 0.05
 		} else {
-			if len(a.samples_ns) >= 2 && len(b.samples_ns) >= 2 {
-				_, _, p_val = obench.mann_whitney_u(
-					a.samples_ns[:],
-					b.samples_ns[:],
-					context.temp_allocator,
-				)
+			if len(a.samples_fs) >= 2 && len(b.samples_fs) >= 2 {
+				a_f64 := _samples_fs_as_f64(a.samples_fs[:], context.temp_allocator)
+				b_f64 := _samples_fs_as_f64(b.samples_fs[:], context.temp_allocator)
+				_, _, p_val = obench.mann_whitney_u(a_f64, b_f64, context.temp_allocator)
+				delete(a_f64, context.temp_allocator)
+				delete(b_f64, context.temp_allocator)
 			}
 			stat_diff = wdf > 0 && abs(wt) >= obench.t_critical_975(wdf)
 		}
@@ -545,11 +579,11 @@ compare_1v1_langs :: proc(
 			Cross_Lang_Row {
 				full_name = strings.clone(a.full_name, allocator),
 				ops = a.ops_per_sample,
-				a_p50_ns = a.p50_ns,
-				a_std_ns = a.std_dev_ns,
+				a_p50_fs = a.p50_fs,
+				a_std_fs = a.std_dev_fs,
 				a_cv_pct = a.cv_pct,
-				b_p50_ns = b.p50_ns,
-				b_std_ns = b.std_dev_ns,
+				b_p50_fs = b.p50_fs,
+				b_std_fs = b.std_dev_fs,
 				b_cv_pct = b.cv_pct,
 				faster_lang = strings.clone(faster, allocator),
 				speedup_ratio = ratio,

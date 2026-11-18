@@ -1,7 +1,7 @@
-package bench_store
+package hugi_store
 
-import bench "../bench"
 import xitdb "../deps/xitdb/xitdb"
+import hugi "../hugi"
 import "base:runtime"
 import "core:fmt"
 import "core:os"
@@ -205,13 +205,13 @@ _read_str_at :: proc(
 
 @(private = "file", require_results)
 _encode_compressed_packet :: proc(
-	pkt: bench.Run_Packet,
+	pkt: hugi.Run_Packet,
 	allocator := context.temp_allocator,
 ) -> (
 	out: []u8,
 	ok: bool,
 ) {
-	meta_raw := bench.encode_packet_bytes(
+	meta_raw := hugi.encode_packet_bytes(
 		pkt,
 		include_samples = false,
 		allocator = context.temp_allocator,
@@ -249,14 +249,14 @@ _decode_compressed_packet :: proc(
 	blob: []u8,
 	allocator := context.allocator,
 ) -> (
-	pkt: bench.Run_Packet,
+	pkt: hugi.Run_Packet,
 	ok: bool,
 ) {
 	if len(blob) < len(CZPK_MAGIC) || string(blob[:len(CZPK_MAGIC)]) != CZPK_MAGIC {
 		return {}, false
 	}
 	defer if !ok {
-		bench.packet_destroy(&pkt, allocator)
+		hugi.packet_destroy(&pkt, allocator)
 	}
 	pos := len(CZPK_MAGIC)
 	meta_len := int(_read_u32_at(blob, &pos) or_return)
@@ -267,7 +267,7 @@ _decode_compressed_packet :: proc(
 	defer delete(meta_raw, context.temp_allocator)
 	pos += meta_len
 
-	pkt = bench.decode_packet_bytes(meta_raw, allocator) or_return
+	pkt = hugi.decode_packet_bytes(meta_raw, allocator) or_return
 
 	rec_count := int(_read_u32_at(blob, &pos) or_return)
 	if rec_count != len(pkt.records) {
@@ -293,7 +293,7 @@ _Snapshot_Entry :: struct {
 	run_id:         string,
 	suite_name:     string,
 	timestamp_unix: i64,
-	record:         bench.Record,
+	record:         hugi.Record,
 }
 
 @(private = "file")
@@ -301,20 +301,20 @@ _snapshot_entry_destroy :: proc(se: ^_Snapshot_Entry, allocator := context.alloc
 	delete(se.commit, allocator)
 	delete(se.run_id, allocator)
 	delete(se.suite_name, allocator)
-	bench.record_destroy(&se.record, allocator)
+	hugi.record_destroy(&se.record, allocator)
 	se^ = {}
 }
 
 @(private = "file", require_results)
 _encode_snapshot_entry :: proc(
-	pkt: bench.Run_Packet,
-	r: bench.Record,
+	pkt: hugi.Run_Packet,
+	r: hugi.Record,
 	allocator := context.temp_allocator,
 ) -> (
 	out: []u8,
 	ok: bool,
 ) {
-	rec_raw := bench.encode_record_bytes(
+	rec_raw := hugi.encode_record_bytes(
 		r,
 		include_samples = false,
 		allocator = context.temp_allocator,
@@ -366,7 +366,7 @@ _decode_snapshot_entry :: proc(
 	defer delete(rec_raw, context.temp_allocator)
 	pos += rec_len
 
-	se.record = bench.decode_record_bytes(rec_raw, allocator) or_return
+	se.record = hugi.decode_record_bytes(rec_raw, allocator) or_return
 
 	s_len := int(_read_u32_at(blob, &pos) or_return)
 	if s_len < 0 || pos + s_len > len(blob) {
@@ -381,7 +381,7 @@ _decode_snapshot_entry :: proc(
 
 @(private = "file")
 _Ingest_Ctx :: struct {
-	pkt:     bench.Run_Packet,
+	pkt:     hugi.Run_Packet,
 	pk_blob: []u8,
 }
 
@@ -461,7 +461,7 @@ Commits `pkt` into `st` as a new CoW `xitdb` `Moment`, structurally sharing unto
 runs, commits, and benchmark snapshot subtrees.
 */
 @(require_results)
-store_ingest_packet :: proc(st: ^Store, pkt: bench.Run_Packet) -> bool {
+store_ingest_packet :: proc(st: ^Store, pkt: hugi.Run_Packet) -> bool {
 	if st == nil {
 		return false
 	}
@@ -529,7 +529,7 @@ _read_run_packet_from_map :: proc(
 	run_id: string,
 	allocator := context.allocator,
 ) -> (
-	pkt: bench.Run_Packet,
+	pkt: hugi.Run_Packet,
 	ok: bool,
 ) {
 	rc_maybe, err := xitdb.hash_map_get_cursor(runs_map, run_id)
@@ -606,7 +606,7 @@ store_list_runs :: proc(st: ^Store, allocator := context.allocator) -> []Run_Sum
 				total_samples = total_samples,
 			},
 		)
-		bench.packet_destroy(&pkt, context.temp_allocator)
+		hugi.packet_destroy(&pkt, context.temp_allocator)
 	}
 	return out[:]
 }
@@ -747,12 +747,12 @@ store_load_raw_groups :: proc(
 		groups: ^[dynamic]_Raw_Group,
 		by_name: ^map[string]int,
 		pkt_commit, pkt_run_id, pkt_suite: string,
-		r: bench.Record,
+		r: hugi.Record,
 		filter: string,
 		allocator: runtime.Allocator,
 	) {
 		key := r.full_name != "" ? r.full_name : r.name
-		if !bench.matches_name_filter(filter, key) {
+		if !hugi.matches_name_filter(filter, key) {
 			return
 		}
 		g_idx, seen := by_name[key]
@@ -767,13 +767,13 @@ store_load_raw_groups :: proc(
 					lang = "",
 					suite_name = strings.clone(pkt_suite, allocator),
 					run_ids = make([dynamic]string, allocator),
-					records = make([dynamic]bench.Record, allocator),
+					records = make([dynamic]hugi.Record, allocator),
 				},
 			)
 		}
 		g := &groups[g_idx]
 		append(&g.run_ids, strings.clone(pkt_run_id, allocator))
-		append(&g.records, bench.record_clone(r, allocator))
+		append(&g.records, hugi.record_clone(r, allocator))
 	}
 
 	if run_id != "" {
@@ -784,11 +784,11 @@ store_load_raw_groups :: proc(
 		}
 		if !pkt_ok || (lang != "" && pkt.lang != lang) {
 			if pkt_ok {
-				bench.packet_destroy(&pkt, context.temp_allocator)
+				hugi.packet_destroy(&pkt, context.temp_allocator)
 			}
 			return groups[:]
 		}
-		defer bench.packet_destroy(&pkt, context.temp_allocator)
+		defer hugi.packet_destroy(&pkt, context.temp_allocator)
 		for r in pkt.records {
 			add_record(
 				&groups,
@@ -847,7 +847,7 @@ store_load_raw_groups :: proc(
 					)
 				}
 			}
-			bench.packet_destroy(&pkt, context.temp_allocator)
+			hugi.packet_destroy(&pkt, context.temp_allocator)
 		}
 		for &g in groups {
 			g.lang = strings.clone(lang != "" ? lang : "odin", allocator)
@@ -902,7 +902,7 @@ store_load_raw_groups :: proc(
 			continue
 		}
 		key := se.record.full_name != "" ? se.record.full_name : se.record.name
-		if bench.matches_name_filter(filter, key) {
+		if hugi.matches_name_filter(filter, key) {
 			snap_latest_commit[strings.clone(key, context.temp_allocator)] = strings.clone(
 				se.commit,
 				context.temp_allocator,
@@ -948,7 +948,7 @@ store_load_raw_groups :: proc(
 							}
 						}
 					}
-					bench.packet_destroy(&pkt, context.temp_allocator)
+					hugi.packet_destroy(&pkt, context.temp_allocator)
 				}
 			}
 		}
@@ -970,7 +970,7 @@ _Raw_Group :: struct {
 	lang:       string,
 	suite_name: string,
 	run_ids:    [dynamic]string,
-	records:    [dynamic]bench.Record,
+	records:    [dynamic]hugi.Record,
 }
 
 @(private)
@@ -985,7 +985,7 @@ _raw_groups_destroy :: proc(groups: []_Raw_Group, allocator := context.allocator
 		}
 		delete(g.run_ids)
 		for &rec in g.records {
-			bench.record_destroy(&rec, allocator)
+			hugi.record_destroy(&rec, allocator)
 		}
 		delete(g.records)
 	}

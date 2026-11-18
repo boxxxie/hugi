@@ -54,7 +54,7 @@ Fork: [`boxxxie/obench`](https://github.com/boxxxie/obench) (forked from [`zeybe
 
 **Title:** `feat: add silent suite_execute API and preserve custom_metrics in baselines`
 
-- **Motivation:** Wrapper libraries (like `odin/bench`) need to drive `obench` suites programmatically, combine micro results with stateful multi-phase pipelines in one summary report, and preserve `custom_metrics` across JSON baseline round-trips without memory leaks.
+- **Motivation:** Wrapper libraries (like `hugi`) need to drive `obench` suites programmatically, combine micro results with stateful multi-phase pipelines in one summary report, and preserve `custom_metrics` across JSON baseline round-trips without memory leaks.
 - **Changes:**
   - `obench/runner.odin`: Extracted public silent `suite_execute(s: ^Suite) -> bool` separately from printing.
   - `obench/report_json.odin`: Preserves `custom_metrics` cleanly on JSON export and baseline load without leaking strings/arrays.

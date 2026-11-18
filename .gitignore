@@ -1,7 +1,9 @@
 bin/
 build/
 .tmp/
+*.hugidb
 *.benchdb
+*.hpk
 *.bpk
 *.arrow
 *.jsonl

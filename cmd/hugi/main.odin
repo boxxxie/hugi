@@ -1,7 +1,7 @@
-package bench_cli
+package hugi_cli
 
-import bench "../../bench"
 import obench "../../deps/obench/obench"
+import hugi "../../hugi"
 import store "../../store"
 import "core:encoding/json"
 import "core:fmt"
@@ -11,7 +11,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 
-VERSION :: "bench 0.1.0"
+VERSION :: "hugi 0.1.0"
 
 @(private = "file")
 _Ols_Collection :: struct {
@@ -21,20 +21,21 @@ _Ols_Collection :: struct {
 
 @(private = "file")
 _Ols_File :: struct {
-	collections: []_Ols_Collection `json:"collections"`,
+	collections:  []_Ols_Collection `json:"collections"`,
+	checker_args: string `json:"checker_args"`,
 }
 
 @(private = "file")
 _print_help :: proc() {
 	fmt.print(
-		`bench — Odin benchmark runner, compressed xitdb store, and comparison CLI
+		`hugi — Odin benchmark runner, compressed xitdb store, and comparison CLI
 
 USAGE:
-  bench <command> [options]
+  hugi <command> [options]
 
 COMMANDS:
   run [pkg_dir]          Build and execute an Odin benchmark package, ingest results into store
-  ingest <file...>       Ingest .bpk packets, obench .json reports, or legacy .jsonl histories
+  ingest <file...>       Ingest .hpk/.bpk packets, obench .json reports, or legacy .jsonl histories
   history                List commits or runs stored in the benchmark database
   inspect [filter]       Inspect pooled metrics (quantiles, CV%, allocations, footprint)
   compare                Compare commits or runs using Mann-Whitney U and Welch t-test
@@ -45,7 +46,7 @@ COMMANDS:
   version                Print version information
 
 COMMON OPTIONS:
-  --db <path>            Store path (default: benchmarks/history.benchdb or history.benchdb)
+  --db <path>            Store path (default: benchmarks/history.hugidb or history.hugidb)
   --lang <lang>          Language tag (default: odin)
   --commit <sha>         Commit identifier override
   --filter <pat>         Benchmark name substring filter (supports ',' or '|' alternation)
@@ -79,9 +80,12 @@ _resolve_db_path :: proc(explicit: string) -> string {
 		return explicit
 	}
 	if os.is_dir("benchmarks") {
-		return "benchmarks/history.benchdb"
+		if !os.exists("benchmarks/history.hugidb") && os.exists("benchmarks/history.benchdb") {
+			return "benchmarks/history.benchdb"
+		}
+		return "benchmarks/history.hugidb"
 	}
-	return "history.benchdb"
+	return "history.hugidb"
 }
 
 @(private = "file")
@@ -112,7 +116,7 @@ _consume_value :: proc(
 		return inline_val, true
 	}
 	if idx^ >= len(args) {
-		fmt.eprintfln("bench: missing value for --%s", flag_name)
+		fmt.eprintfln("hugi: missing value for --%s", flag_name)
 		return "", false
 	}
 	v := args[idx^]
@@ -134,7 +138,7 @@ _run_process :: proc(cmd: []string) -> bool {
 		os.Process_Desc{command = cmd, stdout = os.stdout, stderr = os.stderr, stdin = os.stdin},
 	)
 	if start_err != nil {
-		fmt.eprintfln("bench: failed to start '%s': %v", cmd[0], start_err)
+		fmt.eprintfln("hugi: failed to start '%s': %v", cmd[0], start_err)
 		return false
 	}
 	state, wait_err := os.process_wait(child)
@@ -142,19 +146,23 @@ _run_process :: proc(cmd: []string) -> bool {
 }
 
 @(private = "file")
-_is_bench_repo_root :: proc(dir: string) -> bool {
-	bench_file, _ := filepath.join({dir, "bench", "bench.odin"}, context.temp_allocator)
+_is_hugi_repo_root :: proc(dir: string) -> bool {
+	hugi_file, _ := filepath.join({dir, "hugi", "hugi.odin"}, context.temp_allocator)
 	obench_dir, _ := filepath.join({dir, "deps", "obench", "obench"}, context.temp_allocator)
-	return os.exists(bench_file) && os.is_dir(obench_dir)
+	return os.exists(hugi_file) && os.is_dir(obench_dir)
 }
 
 @(private = "file")
-_resolve_bench_repo_root :: proc() -> string {
+_resolve_hugi_repo_root :: proc() -> string {
+	if env_home, found := os.lookup_env("HUGI_HOME", context.temp_allocator);
+	   found && env_home != "" && _is_hugi_repo_root(env_home) {
+		return env_home
+	}
 	if exe_dir, err := os.get_executable_directory(context.temp_allocator);
 	   err == nil && exe_dir != "" {
 		cur := exe_dir
 		for cur != "" {
-			if _is_bench_repo_root(cur) {
+			if _is_hugi_repo_root(cur) {
 				return cur
 			}
 			parent := filepath.dir(cur)
@@ -167,7 +175,7 @@ _resolve_bench_repo_root :: proc() -> string {
 	if cwd, err := os.get_working_directory(context.temp_allocator); err == nil && cwd != "" {
 		cur := cwd
 		for cur != "" {
-			if _is_bench_repo_root(cur) {
+			if _is_hugi_repo_root(cur) {
 				return cur
 			}
 			parent := filepath.dir(cur)
@@ -181,8 +189,12 @@ _resolve_bench_repo_root :: proc() -> string {
 }
 
 @(private = "file")
-_discover_ols_collections :: proc(start_dir: string) -> [dynamic]string {
-	result := make([dynamic]string, context.temp_allocator)
+_is_reserved_collection :: proc "contextless" (name: string) -> bool {
+	return name == "core" || name == "base" || name == "vendor"
+}
+
+@(private = "file")
+_read_nearest_ols :: proc(start_dir: string) -> (ols_dir: string, doc: _Ols_File, ok: bool) {
 	cur, abs_err := os.get_absolute_path(start_dir, context.temp_allocator)
 	if abs_err != nil || cur == "" {
 		cur = start_dir
@@ -194,21 +206,14 @@ _discover_ols_collections :: proc(start_dir: string) -> [dynamic]string {
 		ols_path, _ := filepath.join({cur, "ols.json"}, context.temp_allocator)
 		if os.exists(ols_path) {
 			data, read_err := os.read_entire_file(ols_path, context.temp_allocator)
-			if read_err == nil {
-				doc: _Ols_File
-				if json.unmarshal(data, &doc, allocator = context.temp_allocator) == nil {
-					for col in doc.collections {
-						if col.name == "" || col.path == "" {
-							continue
-						}
-						resolved := col.path
-						if !filepath.is_abs(col.path) {
-							resolved, _ = filepath.join({cur, col.path}, context.temp_allocator)
-						}
-						append(&result, fmt.tprintf("%s=%s", col.name, resolved))
-					}
-				}
+			if read_err == nil &&
+			   json.unmarshal(data, &doc, allocator = context.temp_allocator) == nil {
+				return cur, doc, true
 			}
+			break
+		}
+		git_marker, _ := filepath.join({cur, ".git"}, context.temp_allocator)
+		if os.exists(git_marker) {
 			break
 		}
 		parent := filepath.dir(cur)
@@ -216,6 +221,41 @@ _discover_ols_collections :: proc(start_dir: string) -> [dynamic]string {
 			break
 		}
 		cur = parent
+	}
+	return "", {}, false
+}
+
+@(private = "file")
+_discover_ols_collections :: proc(start_dir: string) -> [dynamic]string {
+	result := make([dynamic]string, context.temp_allocator)
+	ols_dir, doc, ok := _read_nearest_ols(start_dir)
+	if !ok {
+		return result
+	}
+	for col in doc.collections {
+		if col.name == "" || col.path == "" || _is_reserved_collection(col.name) {
+			continue
+		}
+		resolved := col.path
+		if !filepath.is_abs(col.path) {
+			resolved, _ = filepath.join({ols_dir, col.path}, context.temp_allocator)
+		}
+		append(&result, fmt.tprintf("%s=%s", col.name, resolved))
+	}
+	return result
+}
+
+@(private = "file")
+_discover_ols_build_flags :: proc(start_dir: string) -> [dynamic]string {
+	result := make([dynamic]string, context.temp_allocator)
+	_, doc, ok := _read_nearest_ols(start_dir)
+	if !ok || doc.checker_args == "" {
+		return result
+	}
+	for tok in strings.fields(doc.checker_args, context.temp_allocator) {
+		if strings.has_prefix(tok, "-custom-attribute:") || tok == "-ignore-unknown-attributes" {
+			append(&result, tok)
+		}
 	}
 	return result
 }
@@ -256,7 +296,7 @@ _cmd_run :: proc(args: []string) -> int {
 				i += 1
 				continue
 			}
-			fmt.eprintfln("bench run: unexpected argument '%s'", args[i])
+			fmt.eprintfln("hugi run: unexpected argument '%s'", args[i])
 			return 1
 		}
 		switch key {
@@ -306,7 +346,7 @@ _cmd_run :: proc(args: []string) -> int {
 			if !ok {return 1}
 			parsed, p_ok := strconv.parse_f64(v)
 			if !p_ok || parsed < 0 {
-				fmt.eprintfln("bench run: invalid --threshold '%s'", v)
+				fmt.eprintfln("hugi run: invalid --threshold '%s'", v)
 				return 1
 			}
 			threshold_pct = parsed
@@ -315,13 +355,13 @@ _cmd_run :: proc(args: []string) -> int {
 			if !ok {return 1}
 			extra_build_flags = v
 		case:
-			fmt.eprintfln("bench run: unknown flag '--%s'", key)
+			fmt.eprintfln("hugi run: unknown flag '--%s'", key)
 			return 1
 		}
 	}
 
 	if !os.exists(pkg_dir) {
-		fmt.eprintfln("bench run: package path does not exist: '%s'", pkg_dir)
+		fmt.eprintfln("hugi run: package path does not exist: '%s'", pkg_dir)
 		return 1
 	}
 
@@ -332,13 +372,13 @@ _cmd_run :: proc(args: []string) -> int {
 	pid := os.get_pid()
 	ts := time.to_unix_nanoseconds(time.now())
 
-	bin_name := fmt.tprintf("odin_bench_%d_%d", pid, ts)
+	bin_name := fmt.tprintf("odin_hugi_%d_%d", pid, ts)
 	when ODIN_OS == .Windows {
-		bin_name = fmt.tprintf("odin_bench_%d_%d.exe", pid, ts)
+		bin_name = fmt.tprintf("odin_hugi_%d_%d.exe", pid, ts)
 	}
 	bin_path, _ := filepath.join({tmp_dir, bin_name}, context.temp_allocator)
 	pkt_path, _ := filepath.join(
-		{tmp_dir, fmt.tprintf("odin_pkt_%d_%d.bpk", pid, ts)},
+		{tmp_dir, fmt.tprintf("odin_hugi_pkt_%d_%d.hpk", pid, ts)},
 		context.temp_allocator,
 	)
 	defer {
@@ -363,16 +403,16 @@ _cmd_run :: proc(args: []string) -> int {
 	seen_cols := make(map[string]bool, context.temp_allocator)
 	for col in _discover_ols_collections(pkg_dir) {
 		name := _collection_name(col)
-		if name not_in seen_cols {
+		if !_is_reserved_collection(name) && name not_in seen_cols {
 			append(&build_cmd, fmt.tprintf("-collection:%s", col))
 			seen_cols[name] = true
 		}
 	}
-	if repo_root := _resolve_bench_repo_root(); repo_root != "" {
-		if "bench" not_in seen_cols {
-			b_dir, _ := filepath.join({repo_root, "bench"}, context.temp_allocator)
-			append(&build_cmd, fmt.tprintf("-collection:bench=%s", b_dir))
-			seen_cols["bench"] = true
+	if repo_root := _resolve_hugi_repo_root(); repo_root != "" {
+		if "hugi" not_in seen_cols {
+			h_dir, _ := filepath.join({repo_root, "hugi"}, context.temp_allocator)
+			append(&build_cmd, fmt.tprintf("-collection:hugi=%s", h_dir))
+			seen_cols["hugi"] = true
 		}
 		if "obench" not_in seen_cols {
 			o_dir, _ := filepath.join(
@@ -383,20 +423,28 @@ _cmd_run :: proc(args: []string) -> int {
 			seen_cols["obench"] = true
 		}
 	}
+	seen_flags := make(map[string]bool, context.temp_allocator)
+	for tok in _discover_ols_build_flags(pkg_dir) {
+		if tok != "" && tok not_in seen_flags {
+			append(&build_cmd, tok)
+			seen_flags[tok] = true
+		}
+	}
 	if extra_build_flags != "" {
 		for tok in strings.fields(extra_build_flags, context.temp_allocator) {
-			if tok != "" {
+			if tok != "" && tok not_in seen_flags {
 				append(&build_cmd, tok)
+				seen_flags[tok] = true
 			}
 		}
 	}
 
 	if !_run_process(build_cmd[:]) {
-		fmt.eprintfln("bench run: build failed for '%s'", pkg_dir)
+		fmt.eprintfln("hugi run: build failed for '%s'", pkg_dir)
 		return 1
 	}
 	if !os.exists(bin_path) {
-		fmt.eprintfln("bench run: compiler did not emit '%s'", bin_path)
+		fmt.eprintfln("hugi run: compiler did not emit '%s'", bin_path)
 		return 1
 	}
 
@@ -429,28 +477,28 @@ _cmd_run :: proc(args: []string) -> int {
 		if !run_ok {
 			return 1
 		}
-		fmt.eprintfln("bench run: binary exited cleanly but did not write '%s'", pkt_path)
+		fmt.eprintfln("hugi run: binary exited cleanly but did not write '%s'", pkt_path)
 		return 1
 	}
 
-	pkt, pkt_ok := bench.read_packet_file(pkt_path, context.allocator)
+	pkt, pkt_ok := hugi.read_packet_file(pkt_path, context.allocator)
 	if !pkt_ok {
-		fmt.eprintfln("bench run: failed to decode packet '%s'", pkt_path)
+		fmt.eprintfln("hugi run: failed to decode packet '%s'", pkt_path)
 		return 1
 	}
-	defer bench.packet_destroy(&pkt)
+	defer hugi.packet_destroy(&pkt)
 
 	if !no_db {
 		db_path := _resolve_db_path(db_flag)
 		st, open_ok := store.store_open(db_path, context.allocator)
 		if !open_ok {
-			fmt.eprintfln("bench run: could not open store '%s'", db_path)
+			fmt.eprintfln("hugi run: could not open store '%s'", db_path)
 			return 1
 		}
 		defer store.store_close(&st)
 
 		if !store.store_ingest_packet(&st, pkt) {
-			fmt.eprintfln("bench run: failed to ingest run packet into '%s'", db_path)
+			fmt.eprintfln("hugi run: failed to ingest run packet into '%s'", db_path)
 			return 1
 		}
 
@@ -490,7 +538,7 @@ _cmd_run :: proc(args: []string) -> int {
 
 			if len(base) == 0 || len(cand) == 0 {
 				fmt.eprintfln(
-					"bench run: insufficient baseline (%d) or candidate (%d) records for commit comparison",
+					"hugi run: insufficient baseline (%d) or candidate (%d) records for commit comparison",
 					len(base),
 					len(cand),
 				)
@@ -516,7 +564,7 @@ _cmd_run :: proc(args: []string) -> int {
 }
 
 @(private = "file")
-_file_has_magic_obpk :: proc(path: string) -> bool {
+_file_has_packet_magic :: proc(path: string) -> bool {
 	f, err := os.open(path, {.Read})
 	if err != nil {
 		return false
@@ -524,7 +572,7 @@ _file_has_magic_obpk :: proc(path: string) -> bool {
 	defer os.close(f)
 	hdr: [4]u8
 	n, r_err := os.read(f, hdr[:])
-	return r_err == nil && n == 4 && string(hdr[:]) == "OBPK"
+	return r_err == nil && n == 4 && (string(hdr[:]) == "HPKT" || string(hdr[:]) == "OBPK")
 }
 
 @(private = "file")
@@ -559,20 +607,22 @@ _cmd_ingest :: proc(args: []string) -> int {
 			if !ok {return 1}
 			commit_override = v
 		case:
-			fmt.eprintfln("bench ingest: unknown flag '--%s'", key)
+			fmt.eprintfln("hugi ingest: unknown flag '--%s'", key)
 			return 1
 		}
 	}
 
 	if len(files) == 0 {
-		fmt.eprintln("bench ingest: expected at least one input file (.bpk, .json, or .jsonl)")
+		fmt.eprintln(
+			"hugi ingest: expected at least one input file (.hpk, .bpk, .json, or .jsonl)",
+		)
 		return 1
 	}
 
 	db_path := _resolve_db_path(db_flag)
 	st, open_ok := store.store_open(db_path, context.allocator)
 	if !open_ok {
-		fmt.eprintfln("bench ingest: could not open store '%s'", db_path)
+		fmt.eprintfln("hugi ingest: could not open store '%s'", db_path)
 		return 1
 	}
 	defer store.store_close(&st)
@@ -581,16 +631,18 @@ _cmd_ingest :: proc(args: []string) -> int {
 	total_recs := 0
 	for path in files {
 		if !os.exists(path) {
-			fmt.eprintfln("bench ingest: file not found: '%s'", path)
+			fmt.eprintfln("hugi ingest: file not found: '%s'", path)
 			return 1
 		}
-		if _file_has_magic_obpk(path) || strings.has_suffix(path, ".bpk") {
-			pkt, ok := bench.read_packet_file(path, context.allocator)
+		if _file_has_packet_magic(path) ||
+		   strings.has_suffix(path, ".hpk") ||
+		   strings.has_suffix(path, ".bpk") {
+			pkt, ok := hugi.read_packet_file(path, context.allocator)
 			if !ok {
-				fmt.eprintfln("bench ingest: failed to read packet '%s'", path)
+				fmt.eprintfln("hugi ingest: failed to read packet '%s'", path)
 				return 1
 			}
-			defer bench.packet_destroy(&pkt)
+			defer hugi.packet_destroy(&pkt)
 			if lang_override != "" {
 				delete(pkt.lang)
 				pkt.lang = strings.clone(lang_override)
@@ -600,7 +652,7 @@ _cmd_ingest :: proc(args: []string) -> int {
 				pkt.commit = strings.clone(commit_override)
 			}
 			if !store.store_ingest_packet(&st, pkt) {
-				fmt.eprintfln("bench ingest: failed to write packet '%s' to store", path)
+				fmt.eprintfln("hugi ingest: failed to write packet '%s' to store", path)
 				return 1
 			}
 			total_pkts += 1
@@ -608,10 +660,10 @@ _cmd_ingest :: proc(args: []string) -> int {
 			continue
 		}
 
-		pkts: []bench.Run_Packet
+		pkts: []hugi.Run_Packet
 		ok: bool
 		if strings.has_suffix(path, ".jsonl") {
-			pkts, ok = bench.read_jsonl_packets(
+			pkts, ok = hugi.read_jsonl_packets(
 				path,
 				lang_override,
 				commit_override,
@@ -619,7 +671,7 @@ _cmd_ingest :: proc(args: []string) -> int {
 				context.allocator,
 			)
 		} else {
-			pkts, ok = bench.read_obench_json_packets(
+			pkts, ok = hugi.read_obench_json_packets(
 				path,
 				lang_override,
 				commit_override,
@@ -628,9 +680,9 @@ _cmd_ingest :: proc(args: []string) -> int {
 			)
 			if !ok || len(pkts) == 0 {
 				if ok {
-					bench.packets_destroy(pkts)
+					hugi.packets_destroy(pkts)
 				}
-				pkts, ok = bench.read_jsonl_packets(
+				pkts, ok = hugi.read_jsonl_packets(
 					path,
 					lang_override,
 					commit_override,
@@ -640,14 +692,14 @@ _cmd_ingest :: proc(args: []string) -> int {
 			}
 		}
 		if !ok {
-			fmt.eprintfln("bench ingest: failed to parse '%s'", path)
+			fmt.eprintfln("hugi ingest: failed to parse '%s'", path)
 			return 1
 		}
-		defer bench.packets_destroy(pkts)
+		defer hugi.packets_destroy(pkts)
 
 		for &pkt in pkts {
 			if !store.store_ingest_packet(&st, pkt) {
-				fmt.eprintfln("bench ingest: failed to store packet from '%s'", path)
+				fmt.eprintfln("hugi ingest: failed to store packet from '%s'", path)
 				return 1
 			}
 			total_pkts += 1
@@ -669,7 +721,7 @@ _cmd_history :: proc(args: []string) -> int {
 	for i < len(args) {
 		key, inline_val, is_flag := _parse_flag_kv(args, &i)
 		if !is_flag {
-			fmt.eprintfln("bench history: unexpected argument '%s'", args[i])
+			fmt.eprintfln("hugi history: unexpected argument '%s'", args[i])
 			return 1
 		}
 		switch key {
@@ -689,12 +741,12 @@ _cmd_history :: proc(args: []string) -> int {
 			if !ok {return 1}
 			n, n_ok := strconv.parse_int(v)
 			if !n_ok || n < 0 {
-				fmt.eprintfln("bench history: invalid --limit '%s'", v)
+				fmt.eprintfln("hugi history: invalid --limit '%s'", v)
 				return 1
 			}
 			limit = n
 		case:
-			fmt.eprintfln("bench history: unknown flag '--%s'", key)
+			fmt.eprintfln("hugi history: unknown flag '--%s'", key)
 			return 1
 		}
 	}
@@ -702,7 +754,7 @@ _cmd_history :: proc(args: []string) -> int {
 	db_path := _resolve_db_path(db_flag)
 	st, open_ok := store.store_open(db_path, context.allocator)
 	if !open_ok {
-		fmt.eprintfln("bench history: could not open store '%s'", db_path)
+		fmt.eprintfln("hugi history: could not open store '%s'", db_path)
 		return 1
 	}
 	defer store.store_close(&st)
@@ -732,13 +784,15 @@ _cmd_history :: proc(args: []string) -> int {
 		)
 		for idx := len(runs) - 1; idx >= start; idx -= 1 {
 			rs := runs[idx]
+			recs_str := fmt.tprintf("%d", rs.record_count)
+			samples_str := fmt.tprintf("%d", rs.total_samples)
 			fmt.printfln(
-				"%-28s | %-12s | %-8s | %7d | %8d | %s",
+				"%-28s | %-12s | %-8s | %7s | %8s | %s",
 				rs.run_id,
 				rs.commit,
 				rs.lang,
-				rs.record_count,
-				rs.total_samples,
+				recs_str,
+				samples_str,
 				rs.suite_name,
 			)
 		}
@@ -767,13 +821,16 @@ _cmd_history :: proc(args: []string) -> int {
 	for idx := len(commits) - 1; idx >= start; idx -= 1 {
 		cs := commits[idx]
 		langs_str := strings.join(cs.langs[:], ",", context.temp_allocator)
+		runs_str := fmt.tprintf("%d", len(cs.run_ids))
+		benches_str := fmt.tprintf("%d", cs.bench_count)
+		samples_str := fmt.tprintf("%d", cs.total_samples)
 		fmt.printfln(
-			"%-14s | %-16s | %5d | %10d | %d",
+			"%-14s | %-16s | %5s | %10s | %s",
 			cs.commit,
 			langs_str,
-			len(cs.run_ids),
-			cs.bench_count,
-			cs.total_samples,
+			runs_str,
+			benches_str,
+			samples_str,
 		)
 	}
 	return 0
@@ -798,7 +855,7 @@ _cmd_inspect :: proc(args: []string) -> int {
 				i += 1
 				continue
 			}
-			fmt.eprintfln("bench inspect: unexpected argument '%s'", args[i])
+			fmt.eprintfln("hugi inspect: unexpected argument '%s'", args[i])
 			return 1
 		}
 		switch key {
@@ -826,7 +883,7 @@ _cmd_inspect :: proc(args: []string) -> int {
 			if !ok {return 1}
 			filter = v
 		case:
-			fmt.eprintfln("bench inspect: unknown flag '--%s'", key)
+			fmt.eprintfln("hugi inspect: unknown flag '--%s'", key)
 			return 1
 		}
 	}
@@ -834,7 +891,7 @@ _cmd_inspect :: proc(args: []string) -> int {
 	db_path := _resolve_db_path(db_flag)
 	st, open_ok := store.store_open(db_path, context.allocator)
 	if !open_ok {
-		fmt.eprintfln("bench inspect: could not open store '%s'", db_path)
+		fmt.eprintfln("hugi inspect: could not open store '%s'", db_path)
 		return 1
 	}
 	defer store.store_close(&st)
@@ -910,7 +967,7 @@ _cmd_compare :: proc(args: []string) -> int {
 	for i < len(args) {
 		key, inline_val, is_flag := _parse_flag_kv(args, &i)
 		if !is_flag {
-			fmt.eprintfln("bench compare: unexpected argument '%s'", args[i])
+			fmt.eprintfln("hugi compare: unexpected argument '%s'", args[i])
 			return 1
 		}
 		switch key {
@@ -944,14 +1001,14 @@ _cmd_compare :: proc(args: []string) -> int {
 			if !ok {return 1}
 			parsed, p_ok := strconv.parse_f64(v)
 			if !p_ok || parsed < 0 {
-				fmt.eprintfln("bench compare: invalid --threshold '%s'", v)
+				fmt.eprintfln("hugi compare: invalid --threshold '%s'", v)
 				return 1
 			}
 			threshold_pct = parsed
 		case "fail-on-regression":
 			fail_on_reg = true
 		case:
-			fmt.eprintfln("bench compare: unknown flag '--%s'", key)
+			fmt.eprintfln("hugi compare: unknown flag '--%s'", key)
 			return 1
 		}
 	}
@@ -959,7 +1016,7 @@ _cmd_compare :: proc(args: []string) -> int {
 	db_path := _resolve_db_path(db_flag)
 	st, open_ok := store.store_open(db_path, context.allocator)
 	if !open_ok {
-		fmt.eprintfln("bench compare: could not open store '%s'", db_path)
+		fmt.eprintfln("hugi compare: could not open store '%s'", db_path)
 		return 1
 	}
 	defer store.store_close(&st)
@@ -974,7 +1031,7 @@ _cmd_compare :: proc(args: []string) -> int {
 	if runs_arg != "" {
 		r1, r2, r_ok := _split_range(runs_arg)
 		if !r_ok {
-			fmt.eprintfln("bench compare: --runs requires <run1>..<run2>, got '%s'", runs_arg)
+			fmt.eprintfln("hugi compare: --runs requires <run1>..<run2>, got '%s'", runs_arg)
 			return 1
 		}
 		base_label = r1
@@ -998,10 +1055,7 @@ _cmd_compare :: proc(args: []string) -> int {
 	} else if commits_arg != "" {
 		c1, c2, c_ok := _split_range(commits_arg)
 		if !c_ok {
-			fmt.eprintfln(
-				"bench compare: --commits requires <base>..<cand>, got '%s'",
-				commits_arg,
-			)
+			fmt.eprintfln("hugi compare: --commits requires <base>..<cand>, got '%s'", commits_arg)
 			return 1
 		}
 		base_label = c1
@@ -1071,7 +1125,7 @@ _cmd_compare :: proc(args: []string) -> int {
 			}
 			if len(matching_runs) < 2 {
 				fmt.eprintfln(
-					"bench compare: need at least 2 commits or runs for lang=%s in %s",
+					"hugi compare: need at least 2 commits or runs for lang=%s in %s",
 					lang,
 					db_path,
 				)
@@ -1102,7 +1156,7 @@ _cmd_compare :: proc(args: []string) -> int {
 
 	if len(base_records) == 0 || len(cand_records) == 0 {
 		fmt.eprintfln(
-			"bench compare: no records for baseline (%d) or candidate (%d)",
+			"hugi compare: no records for baseline (%d) or candidate (%d)",
 			len(base_records),
 			len(cand_records),
 		)
@@ -1130,7 +1184,7 @@ _cmd_compare_1v1 :: proc(args: []string) -> int {
 	for i < len(args) {
 		key, inline_val, is_flag := _parse_flag_kv(args, &i)
 		if !is_flag {
-			fmt.eprintfln("bench compare-1v1: unexpected argument '%s'", args[i])
+			fmt.eprintfln("hugi compare-1v1: unexpected argument '%s'", args[i])
 			return 1
 		}
 		switch key {
@@ -1154,12 +1208,12 @@ _cmd_compare_1v1 :: proc(args: []string) -> int {
 			if !ok {return 1}
 			parsed, p_ok := strconv.parse_f64(v)
 			if !p_ok || parsed < 0 {
-				fmt.eprintfln("bench compare-1v1: invalid --threshold '%s'", v)
+				fmt.eprintfln("hugi compare-1v1: invalid --threshold '%s'", v)
 				return 1
 			}
 			threshold_pct = parsed
 		case:
-			fmt.eprintfln("bench compare-1v1: unknown flag '--%s'", key)
+			fmt.eprintfln("hugi compare-1v1: unknown flag '--%s'", key)
 			return 1
 		}
 	}
@@ -1169,7 +1223,7 @@ _cmd_compare_1v1 :: proc(args: []string) -> int {
 	   strings.trim_space(parts[0]) == "" ||
 	   strings.trim_space(parts[1]) == "" {
 		fmt.eprintfln(
-			"bench compare-1v1: --langs requires two comma-separated languages, got '%s'",
+			"hugi compare-1v1: --langs requires two comma-separated languages, got '%s'",
 			langs_arg,
 		)
 		return 1
@@ -1180,7 +1234,7 @@ _cmd_compare_1v1 :: proc(args: []string) -> int {
 	db_path := _resolve_db_path(db_flag)
 	st, open_ok := store.store_open(db_path, context.allocator)
 	if !open_ok {
-		fmt.eprintfln("bench compare-1v1: could not open store '%s'", db_path)
+		fmt.eprintfln("hugi compare-1v1: could not open store '%s'", db_path)
 		return 1
 	}
 	defer store.store_close(&st)
@@ -1205,7 +1259,7 @@ _cmd_export :: proc(args: []string) -> int {
 	for i < len(args) {
 		key, inline_val, is_flag := _parse_flag_kv(args, &i)
 		if !is_flag {
-			fmt.eprintfln("bench export: unexpected argument '%s'", args[i])
+			fmt.eprintfln("hugi export: unexpected argument '%s'", args[i])
 			return 1
 		}
 		switch key {
@@ -1241,7 +1295,7 @@ _cmd_export :: proc(args: []string) -> int {
 			if !ok {return 1}
 			readme_path = v
 		case:
-			fmt.eprintfln("bench export: unknown flag '--%s'", key)
+			fmt.eprintfln("hugi export: unknown flag '--%s'", key)
 			return 1
 		}
 	}
@@ -1250,18 +1304,18 @@ _cmd_export :: proc(args: []string) -> int {
 		format = "md"
 	}
 	if format == "" {
-		fmt.eprintln("bench export: --format <arrow|jsonl|csv|md> is required")
+		fmt.eprintln("hugi export: --format <arrow|jsonl|csv|md> is required")
 		return 1
 	}
 	if out_path == "" && readme_path == "" {
-		fmt.eprintln("bench export: --out <path> (or --update-readme <path>) is required")
+		fmt.eprintln("hugi export: --out <path> (or --update-readme <path>) is required")
 		return 1
 	}
 
 	db_path := _resolve_db_path(db_flag)
 	st, open_ok := store.store_open(db_path, context.allocator)
 	if !open_ok {
-		fmt.eprintfln("bench export: could not open store '%s'", db_path)
+		fmt.eprintfln("hugi export: could not open store '%s'", db_path)
 		return 1
 	}
 	defer store.store_close(&st)
@@ -1269,7 +1323,7 @@ _cmd_export :: proc(args: []string) -> int {
 	records := store.store_load_pooled_records(&st, lang, commit, "", filter, context.allocator)
 	defer store.pooled_records_destroy(records)
 	if len(records) == 0 {
-		fmt.eprintfln("bench export: no matching records (lang=%s, commit=%q)", lang, commit)
+		fmt.eprintfln("hugi export: no matching records (lang=%s, commit=%q)", lang, commit)
 		return 1
 	}
 
@@ -1286,13 +1340,13 @@ _cmd_export :: proc(args: []string) -> int {
 			ok = store.export_markdown(out_path, records)
 		case:
 			fmt.eprintfln(
-				"bench export: unsupported format '%s' (expected arrow|jsonl|csv|md)",
+				"hugi export: unsupported format '%s' (expected arrow|jsonl|csv|md)",
 				format,
 			)
 			return 1
 		}
 		if !ok {
-			fmt.eprintfln("bench export: failed writing %s export to '%s'", format, out_path)
+			fmt.eprintfln("hugi export: failed writing %s export to '%s'", format, out_path)
 			return 1
 		}
 		if fi, s_err := os.stat(out_path, context.temp_allocator); s_err == nil {
@@ -1311,7 +1365,7 @@ _cmd_export :: proc(args: []string) -> int {
 	if readme_path != "" {
 		md := store.format_markdown_table(records, context.temp_allocator)
 		if !store.update_readme_markers(readme_path, md) {
-			fmt.eprintfln("bench export: failed updating benchmark markers in '%s'", readme_path)
+			fmt.eprintfln("hugi export: failed updating benchmark markers in '%s'", readme_path)
 			return 1
 		}
 		fmt.printfln("Updated benchmark table in %s", readme_path)
@@ -1327,7 +1381,7 @@ _cmd_compact :: proc(args: []string) -> int {
 	for i < len(args) {
 		key, inline_val, is_flag := _parse_flag_kv(args, &i)
 		if !is_flag {
-			fmt.eprintfln("bench compact: unexpected argument '%s'", args[i])
+			fmt.eprintfln("hugi compact: unexpected argument '%s'", args[i])
 			return 1
 		}
 		switch key {
@@ -1339,7 +1393,7 @@ _cmd_compact :: proc(args: []string) -> int {
 			if !ok {return 1}
 			db_flag = v
 		case:
-			fmt.eprintfln("bench compact: unknown flag '--%s'", key)
+			fmt.eprintfln("hugi compact: unknown flag '--%s'", key)
 			return 1
 		}
 	}
@@ -1347,7 +1401,7 @@ _cmd_compact :: proc(args: []string) -> int {
 	db_path := _resolve_db_path(db_flag)
 	before, after, ok := store.store_compact(db_path)
 	if !ok {
-		fmt.eprintfln("bench compact: failed to compact '%s'", db_path)
+		fmt.eprintfln("hugi compact: failed to compact '%s'", db_path)
 		return 1
 	}
 	saved_pct := 0.0
@@ -1394,7 +1448,7 @@ main :: proc() {
 	case "version", "--version", "-V":
 		fmt.println(VERSION)
 	case:
-		fmt.eprintfln("bench: unknown command '%s' (run 'bench help' for usage)", args[0])
+		fmt.eprintfln("hugi: unknown command '%s' (run 'hugi help' for usage)", args[0])
 		code = 1
 	}
 	os.exit(code)

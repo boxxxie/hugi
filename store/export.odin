@@ -1,4 +1,4 @@
-package bench_store
+package hugi_store
 
 import obench "../deps/obench/obench"
 import skadi "../deps/skadi/skadi"

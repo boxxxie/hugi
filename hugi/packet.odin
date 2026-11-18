@@ -1,4 +1,4 @@
-package bench
+package hugi
 
 import obench "../deps/obench/obench"
 import "base:runtime"
@@ -10,7 +10,8 @@ import "core:slice"
 import "core:strings"
 import "core:time"
 
-PACKET_MAGIC :: "OBPK\x01\x00\x00\x00"
+PACKET_MAGIC :: "HPKT\x01\x00\x00\x00"
+LEGACY_PACKET_MAGIC :: "OBPK\x01\x00\x00\x00"
 RECORD_MAGIC :: "OBRC\x01\x00\x00\x00"
 MAX_METRICS :: 8
 
@@ -404,7 +405,7 @@ decode_record_bytes :: proc(
 }
 
 /*
-Serializes `pkt` into a compact little-endian binary `OBPK` byte buffer.
+Serializes `pkt` into a compact little-endian binary `HPKT` byte buffer.
 */
 @(require_results)
 encode_packet_bytes :: proc(
@@ -432,7 +433,7 @@ encode_packet_bytes :: proc(
 }
 
 /*
-Decodes an `OBPK` binary buffer into a `Run_Packet`.
+Decodes an `HPKT` (or legacy `OBPK`) binary buffer into a `Run_Packet`.
 */
 @(require_results)
 decode_packet_bytes :: proc(
@@ -442,7 +443,11 @@ decode_packet_bytes :: proc(
 	pkt: Run_Packet,
 	ok: bool,
 ) {
-	if len(data) < len(PACKET_MAGIC) || string(data[:len(PACKET_MAGIC)]) != PACKET_MAGIC {
+	if len(data) < len(PACKET_MAGIC) {
+		return {}, false
+	}
+	hdr := string(data[:len(PACKET_MAGIC)])
+	if hdr != PACKET_MAGIC && hdr != LEGACY_PACKET_MAGIC {
 		return {}, false
 	}
 	defer if !ok {

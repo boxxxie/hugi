@@ -1,4 +1,4 @@
-package bench
+package hugi
 
 import obench "../deps/obench/obench"
 import "base:intrinsics"
@@ -222,7 +222,7 @@ phase_end :: proc(ph: ^Phase) {
 Scoped RAII helper for a pipeline phase:
 
 	{
-		ph := bench.scoped_phase(p, "HAMT lookup", ops = N)
+		ph := hugi.scoped_phase(p, "HAMT lookup", ops = N)
 		...
 	}
 */

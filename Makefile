@@ -1,41 +1,41 @@
-.PHONY: all build check test example fmt fmt-check clean
+.PHONY: all build check test example fmt fmt-check clean install
 
 ODIN ?= odin
 ODINFMT ?= odinfmt
 
-COLS := -collection:bench=./bench -collection:bench_store=./store -collection:obench=./deps/obench/obench -collection:xitdb=./deps/xitdb/xitdb -collection:skadi=./deps/skadi/skadi
-BENCH_ONLY_COL := -collection:obench=./deps/obench/obench
-BENCH_FLAGS := -vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-errors -disallow-do
-FULL_FLAGS := -vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:bench,bench_store,bench_cli,bench_tests
+COLS := -collection:hugi=./hugi -collection:hugi_store=./store -collection:obench=./deps/obench/obench -collection:xitdb=./deps/xitdb/xitdb -collection:skadi=./deps/skadi/skadi
+HUGI_ONLY_COL := -collection:obench=./deps/obench/obench
+HUGI_FLAGS := -vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-errors -disallow-do
+FULL_FLAGS := -vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests
 TEST_FLAGS ?= -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
-SOURCES := bench/*.odin store/*.odin cmd/bench/*.odin examples/micro_and_phases/*.odin tests/*.odin
+SOURCES := hugi/*.odin store/*.odin cmd/hugi/*.odin examples/micro_and_phases/*.odin tests/*.odin
 
 BIN_DIR := bin
-BENCH_BIN := $(BIN_DIR)/bench
+HUGI_BIN := $(BIN_DIR)/hugi
 
 all: check test build
 
-build: $(BENCH_BIN)
+build: $(HUGI_BIN)
 
-$(BENCH_BIN): bench/*.odin store/*.odin cmd/bench/*.odin
+$(HUGI_BIN): hugi/*.odin store/*.odin cmd/hugi/*.odin
 	@mkdir -p $(BIN_DIR)
-	$(ODIN) build cmd/bench -out:$(BENCH_BIN) -o:speed $(COLS) $(FULL_FLAGS)
+	$(ODIN) build cmd/hugi -out:$(HUGI_BIN) -o:speed $(COLS) $(FULL_FLAGS)
 
 check:
-	$(ODIN) check bench -no-entry-point $(BENCH_ONLY_COL) $(BENCH_FLAGS)
+	$(ODIN) check hugi -no-entry-point $(HUGI_ONLY_COL) $(HUGI_FLAGS)
 	$(ODIN) check store -no-entry-point $(COLS) $(FULL_FLAGS)
-	$(ODIN) check cmd/bench $(COLS) $(FULL_FLAGS)
+	$(ODIN) check cmd/hugi $(COLS) $(FULL_FLAGS)
 	$(ODIN) check examples/micro_and_phases $(COLS) $(FULL_FLAGS)
 	$(ODIN) check tests -no-entry-point $(COLS) $(FULL_FLAGS)
 
 test:
 	@mkdir -p .tmp
-	$(ODIN) test tests -out:.tmp/bench_tests $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)
+	$(ODIN) test tests -out:.tmp/hugi_tests $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)
 
 example: build
 	@mkdir -p .tmp
-	./$(BENCH_BIN) run examples/micro_and_phases --db .tmp/example.benchdb --runs 5
+	./$(HUGI_BIN) run examples/micro_and_phases --db .tmp/example.hugidb --runs 5
 
 fmt:
 	@for f in $(SOURCES); do $(ODINFMT) -config:odinfmt.json -w "$$f" || exit 1; done
@@ -44,6 +44,10 @@ fmt-check:
 	@status=0; for f in $(SOURCES); do \
 		$(ODINFMT) -config:odinfmt.json "$$f" | diff -q "$$f" - >/dev/null || { echo "needs formatting: $$f"; status=1; }; \
 	done; exit $$status
+
+install: build
+	@mkdir -p $(HOME)/.local/bin
+	ln -sf $(CURDIR)/$(HUGI_BIN) $(HOME)/.local/bin/hugi
 
 clean:
 	rm -rf $(BIN_DIR) build .tmp

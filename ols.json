@@ -1,8 +1,8 @@
 {
 	"$schema": "https://raw.githubusercontent.com/DanielGavin/ols/master/misc/ols.schema.json",
 	"collections": [
-		{ "name": "bench", "path": "./bench" },
-		{ "name": "bench_store", "path": "./store" },
+		{ "name": "hugi", "path": "./hugi" },
+		{ "name": "hugi_store", "path": "./store" },
 		{ "name": "obench", "path": "./deps/obench/obench" },
 		{ "name": "xitdb", "path": "./deps/xitdb/xitdb" },
 		{ "name": "skadi", "path": "./deps/skadi/skadi" }
@@ -13,5 +13,5 @@
 	"enable_semantic_tokens": true,
 	"enable_inlay_hints": true,
 	"enable_checker_only_saved": true,
-	"checker_args": "-vet -strict-style -vet-tabs -vet-packages:bench,bench_store,bench_cli,bench_tests"
+	"checker_args": "-vet -strict-style -vet-tabs -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests"
 }

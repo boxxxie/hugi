@@ -1,4 +1,4 @@
-package bench
+package hugi
 
 import obench "../deps/obench/obench"
 import "base:runtime"
@@ -497,7 +497,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 
 	if s.config.packet_out_path != "" {
 		if err := write_packet_file(s.config.packet_out_path, s.last_packet); err != nil {
-			fmt.eprintfln("bench: could not write packet '%s' (%v)", s.config.packet_out_path, err)
+			fmt.eprintfln("hugi: could not write packet '%s' (%v)", s.config.packet_out_path, err)
 			s.failed_io += 1
 		}
 	}
@@ -536,7 +536,7 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 
 	fmt.sbprintf(
 		sb,
-		"\nbench pipelines: %s (%s/%s, -o:%v, commit %s, clock overhead %.1f ns)\n",
+		"\nhugi pipelines: %s (%s/%s, -o:%v, commit %s, clock overhead %.1f ns)\n",
 		s.name,
 		ODIN_OS_STRING,
 		ODIN_ARCH_STRING,
@@ -604,14 +604,16 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 		if r.zero_alloc_failed {
 			strings.write_string(&notes, "[FAIL: @zero_alloc]")
 		}
+		ops_str := fmt.tprintf("%.0f", r.items_per_sec)
+		cv_str := fmt.tprintf("%.1f%%", r.cv_pct)
 		fmt.sbprintf(
 			sb,
-			"%-42s │ %11s │ %11s │ %11.0f │ %5.1f%% │ %14s │ %s\n",
+			"%-42s │ %11s │ %11s │ %11s │ %6s │ %14s │ %s\n",
 			r.full_name,
 			med_str,
 			p95_str,
-			r.items_per_sec,
-			r.cv_pct,
+			ops_str,
+			cv_str,
 			alloc_str,
 			strings.trim_space(strings.to_string(notes)),
 		)
@@ -664,7 +666,7 @@ run_test :: proc(t: ^testing.T, s: ^Suite, loc := #caller_location) {
 	testing.expectf(
 		t,
 		ok,
-		"bench suite %q failed: %d errors, %d @zero_alloc failures, %d regressions, %d file errors",
+		"hugi suite %q failed: %d errors, %d @zero_alloc failures, %d regressions, %d file errors",
 		s.name,
 		s.failed_errors,
 		s.failed_zero_alloc,

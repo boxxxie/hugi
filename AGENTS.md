@@ -1,34 +1,34 @@
-# Agent Guidelines for `odin/bench`
+# Agent Guidelines for `hugi` (`odin/hugi`)
 
-This repository provides a pure-Odin benchmarking library (`bench`), a compressed transactional history store and cross-run/cross-language comparator (`bench_store` built on `xitdb` + `skadi`), and a CLI (`bin/bench`).
+This repository provides a pure-Odin benchmarking library (`hugi`), a compressed transactional history store and cross-run/cross-language comparator (`hugi_store` built on `xitdb` + `skadi`), and a CLI (`bin/hugi`).
 
 ## Build, Format, Check, and Test Commands
 
-Run all commands from the repository root (`/home/pauli/projects/odin/bench`):
+Run all commands from the repository root (`/home/pauli/projects/odin/hugi`):
 
 ```bash
 make fmt          # Format all project .odin files with odinfmt -config:odinfmt.json
 make fmt-check    # Verify formatting cleanly (fails on any diff)
 make check        # Strict compiler/vet checks across all 5 packages
 make test         # Run tests with -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
-make build        # Build -o:speed CLI binary at bin/bench
+make build        # Build -o:speed CLI binary at bin/hugi
 ```
 
 ## Architectural Boundaries & Dependency Rules
 
-1. **Keep `bench/` completely isolated from `xitdb` and `skadi`:**
-   - `bench/` (`package bench`) may ONLY import `base:*`, `core:*`, and `../deps/obench/obench`.
-   - `bench/` must NEVER import `deps/xitdb` or `deps/skadi`. Downstream projects such as `xitdb`, `skadi`, and `heimdall` import `bench` to execute benchmarks; keeping `bench` free of storage/columnar dependencies avoids circular package dependencies.
-   - All persistence, sample compression, statistical pooling/comparison, and Arrow IPC export live in `store/` (`package bench_store`).
+1. **Keep `hugi/` completely isolated from `xitdb` and `skadi`:**
+   - `hugi/` (`package hugi`) may ONLY import `base:*`, `core:*`, and `../deps/obench/obench`.
+   - `hugi/` must NEVER import `deps/xitdb` or `deps/skadi`. Downstream projects such as `xitdb`, `skadi`, and `heimdall` import `hugi` to execute benchmarks; keeping `hugi` free of storage/columnar dependencies avoids circular package dependencies.
+   - All persistence, sample compression, statistical pooling/comparison, and Arrow IPC export live in `store/` (`package hugi_store`).
 
 2. **Relative dependency imports vs collection imports:**
-   - Internal files import `../bench`, `../store`, `../deps/obench/obench`, `../deps/xitdb/xitdb`, and `../deps/skadi/skadi` via relative paths so package identities remain unambiguous. Never mix a collection import (`bench:...`) and a relative import (`../bench`) targeting the same directory inside a single build graph.
+   - Internal files import `../hugi`, `../store`, `../deps/obench/obench`, `../deps/xitdb/xitdb`, and `../deps/skadi/skadi` via relative paths so package identities remain unambiguous. Never mix a collection import (`hugi:...`) and a relative import (`../hugi`) targeting the same directory inside a single build graph.
 
 3. **Compiler flag split (`-disallow-do`):**
-   - Check `bench/` with strict flags including `-disallow-do`:
+   - Check `hugi/` with strict flags including `-disallow-do`:
      `-vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-errors -disallow-do`
-   - Do NOT pass `-disallow-do` when building or checking `store/`, `cmd/bench/`, `examples/`, or `tests/` because `deps/xitdb/xitdb/lua.odin` uses `do`. Always use:
-     `-vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:bench,bench_store,bench_cli,bench_tests`
+   - Do NOT pass `-disallow-do` when building or checking `store/`, `cmd/hugi/`, `examples/`, or `tests/` because `deps/xitdb/xitdb/lua.odin` uses `do`. Always use:
+     `-vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests`
    - Still avoid `do` statements and preserve hard tabs across every `.odin` file written in this repository.
 
 ## `xitdb` Storage Invariants
@@ -42,4 +42,4 @@ make build        # Build -o:speed CLI binary at bin/bench
 
 ## Upstream `obench` Dependency
 
-`deps/obench` tracks the local `/home/pauli/projects/odin/obench` branch `odin-bench`, which integrates four focused feature/perf PR branches layered cleanly on top of upstream `main` (`44000fb`). Never edit files inside `deps/*` directly from `odin/bench`; make upstream changes in `/home/pauli/projects/odin/obench` on feature branches and update the submodule pointer deliberately.
+`deps/obench` tracks the local `/home/pauli/projects/odin/obench` branch `odin-bench`, which integrates four focused feature/perf PR branches layered cleanly on top of upstream `main` (`44000fb`). Never edit files inside `deps/*` directly from `hugi`; make upstream changes in `/home/pauli/projects/odin/obench` on feature branches and update the submodule pointer deliberately.

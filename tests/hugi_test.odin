@@ -1,7 +1,7 @@
-package bench_tests
+package hugi_tests
 
-import bench "../bench"
 import skadi "../deps/skadi/skadi"
+import hugi "../hugi"
 import store "../store"
 import "core:fmt"
 import "core:math"
@@ -18,8 +18,8 @@ _make_packet :: proc(
 	selective := false,
 	samples_per_rec := 16,
 	spread_ns := 1.0,
-) -> bench.Run_Packet {
-	pkt := bench.Run_Packet {
+) -> hugi.Run_Packet {
+	pkt := hugi.Run_Packet {
 		suite_name     = strings.clone(suite_name),
 		lang           = strings.clone(lang),
 		commit         = strings.clone(commit),
@@ -30,7 +30,7 @@ _make_packet :: proc(
 		odin_version   = strings.clone("test"),
 		timestamp_unix = 1700000000,
 		selective      = selective,
-		records        = make([dynamic]bench.Record, 0, len(names)),
+		records        = make([dynamic]hugi.Record, 0, len(names)),
 	}
 
 	for name, i in names {
@@ -42,7 +42,7 @@ _make_packet :: proc(
 			samples[s] = max(med + offset, 1.0)
 		}
 
-		r := bench.Record {
+		r := hugi.Record {
 			rank               = i + 1,
 			group_name         = strings.clone("core"),
 			name               = strings.clone(name),
@@ -54,9 +54,9 @@ _make_packet :: proc(
 			allocs_per_op      = 0,
 			alloc_bytes_per_op = 0,
 			samples_ns         = samples,
-			metrics            = make([dynamic]bench.Metric),
+			metrics            = make([dynamic]hugi.Metric),
 		}
-		bench.recompute_record_stats_from_samples(&r)
+		hugi.recompute_record_stats_from_samples(&r)
 		if r.p50_ns > 0 {
 			r.items_per_sec = 1_000_000_000.0 / r.p50_ns
 			r.mb_per_sec = (f64(r.bytes_per_op) * r.items_per_sec) / (1024.0 * 1024.0)
@@ -121,15 +121,15 @@ test_packet_binary_roundtrip :: proc(t: ^testing.T) {
 		[]u64{4096, 8192},
 		selective = true,
 	)
-	defer bench.packet_destroy(&pkt)
+	defer hugi.packet_destroy(&pkt)
 
-	append(&pkt.records[0].metrics, bench.Metric{unit = strings.clone("hit%"), value = 99.5})
+	append(&pkt.records[0].metrics, hugi.Metric{unit = strings.clone("hit%"), value = 99.5})
 
-	encoded := bench.encode_packet_bytes(pkt, true)
+	encoded := hugi.encode_packet_bytes(pkt, true)
 	defer delete(encoded)
 
-	decoded, ok := bench.decode_packet_bytes(encoded)
-	defer bench.packet_destroy(&decoded)
+	decoded, ok := hugi.decode_packet_bytes(encoded)
+	defer hugi.packet_destroy(&decoded)
 	testing.expect(t, ok, "packet decode should succeed")
 	testing.expect_value(t, decoded.commit, "abc1234")
 	testing.expect_value(t, decoded.lang, "odin")
@@ -162,7 +162,7 @@ test_store_selective_snapshot_sharing :: proc(t: ^testing.T) {
 		[]u64{4096, 4096, 2048},
 		selective = false,
 	)
-	defer bench.packet_destroy(&p1)
+	defer hugi.packet_destroy(&p1)
 	testing.expect(t, store.store_ingest_packet(&st, p1), "first ingest should succeed")
 
 	p2 := _make_packet(
@@ -176,7 +176,7 @@ test_store_selective_snapshot_sharing :: proc(t: ^testing.T) {
 		selective = true,
 	)
 	p2.records[0].rank = 2
-	defer bench.packet_destroy(&p2)
+	defer hugi.packet_destroy(&p2)
 	testing.expect(t, store.store_ingest_packet(&st, p2), "selective ingest should succeed")
 
 	latest := store.store_load_pooled_records(&st, "odin")
@@ -214,7 +214,7 @@ test_pooling_and_mann_whitney_welch :: proc(t: ^testing.T) {
 			spread_ns = 0.2,
 		)
 		testing.expect(t, store.store_ingest_packet(&st, pb), "baseline run ingest")
-		bench.packet_destroy(&pb)
+		hugi.packet_destroy(&pb)
 
 		rid_c := fmt.tprintf("cand-%d", i)
 		pc := _make_packet(
@@ -229,7 +229,7 @@ test_pooling_and_mann_whitney_welch :: proc(t: ^testing.T) {
 			spread_ns = 0.2,
 		)
 		testing.expect(t, store.store_ingest_packet(&st, pc), "candidate run ingest")
-		bench.packet_destroy(&pc)
+		hugi.packet_destroy(&pc)
 	}
 
 	base := store.store_load_pooled_records(&st, "odin", "base111")
@@ -265,7 +265,7 @@ test_compare_1v1_and_footprint_mismatch :: proc(t: ^testing.T) {
 		[]f64{50.0, 120.0},
 		[]u64{4096, 4096},
 	)
-	defer bench.packet_destroy(&po)
+	defer hugi.packet_destroy(&po)
 	pz := _make_packet(
 		"cmp001",
 		"zig",
@@ -275,7 +275,7 @@ test_compare_1v1_and_footprint_mismatch :: proc(t: ^testing.T) {
 		[]f64{100.0, 118.0},
 		[]u64{4096, 16384},
 	)
-	defer bench.packet_destroy(&pz)
+	defer hugi.packet_destroy(&pz)
 
 	testing.expect(t, store.store_ingest_packet(&st, po), "ingest odin packet")
 	testing.expect(t, store.store_ingest_packet(&st, pz), "ingest zig packet")
@@ -297,12 +297,12 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 		tmp_dir = "/tmp"
 	}
 	pid := os.get_pid()
-	db_path := fmt.aprintf("%s/bench_test_%d.benchdb", tmp_dir, pid)
-	arrow_path := fmt.aprintf("%s/bench_test_%d.arrow", tmp_dir, pid)
-	jsonl_path := fmt.aprintf("%s/bench_test_%d.jsonl", tmp_dir, pid)
-	csv_path := fmt.aprintf("%s/bench_test_%d.csv", tmp_dir, pid)
-	md_path := fmt.aprintf("%s/bench_test_%d.md", tmp_dir, pid)
-	readme_path := fmt.aprintf("%s/bench_readme_%d.md", tmp_dir, pid)
+	db_path := fmt.aprintf("%s/hugi_test_%d.hugidb", tmp_dir, pid)
+	arrow_path := fmt.aprintf("%s/hugi_test_%d.arrow", tmp_dir, pid)
+	jsonl_path := fmt.aprintf("%s/hugi_test_%d.jsonl", tmp_dir, pid)
+	csv_path := fmt.aprintf("%s/hugi_test_%d.csv", tmp_dir, pid)
+	md_path := fmt.aprintf("%s/hugi_test_%d.md", tmp_dir, pid)
+	readme_path := fmt.aprintf("%s/hugi_readme_%d.md", tmp_dir, pid)
 	defer {
 		for p in ([]string{db_path, arrow_path, jsonl_path, csv_path, md_path, readme_path}) {
 			if os.exists(p) {
@@ -325,7 +325,7 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 			[]u64{1024, 4096},
 		)
 		testing.expect(t, store.store_ingest_packet(&st, p1), "ingest for export test")
-		bench.packet_destroy(&p1)
+		hugi.packet_destroy(&p1)
 
 		p2 := _make_packet(
 			"exp002",
@@ -338,7 +338,7 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 			selective = true,
 		)
 		testing.expect(t, store.store_ingest_packet(&st, p2), "second ingest before compact")
-		bench.packet_destroy(&p2)
+		hugi.packet_destroy(&p2)
 
 		records := store.store_load_pooled_records(&st, "odin")
 		testing.expect_value(t, len(records), 2)
@@ -443,57 +443,57 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-_zero_alloc_sum :: proc(b: ^bench.Bencher) {
+_zero_alloc_sum :: proc(b: ^hugi.Bencher) {
 	data := [8]u64{1, 2, 3, 4, 5, 6, 7, 8}
-	bench.expect_zero_allocs(b)
-	for bench.step(b) {
+	hugi.expect_zero_allocs(b)
+	for hugi.step(b) {
 		acc := u64(0)
 		for v in data {
 			acc += v
 		}
-		_ = bench.black_box(acc)
+		_ = hugi.black_box(acc)
 	}
 }
 
 @(private = "file")
-_clean_pipeline :: proc(p: ^bench.Pipeline) {
+_clean_pipeline :: proc(p: ^hugi.Pipeline) {
 	vals := make([]u64, 16)
 	defer delete(vals)
 
 	{
-		ph := bench.scoped_phase(p, "fill", ops = 16, bytes_per_op = 8)
+		ph := hugi.scoped_phase(p, "fill", ops = 16, bytes_per_op = 8)
 		for i in 0 ..< 16 {
 			vals[i] = u64(i * 3)
 		}
-		bench.phase_set_footprint(ph, u64(len(vals) * size_of(u64)))
+		hugi.phase_set_footprint(ph, u64(len(vals) * size_of(u64)))
 	}
 	{
-		ph := bench.scoped_phase(p, "sum", ops = 16, bytes_per_op = 8, zero_alloc = true)
+		ph := hugi.scoped_phase(p, "sum", ops = 16, bytes_per_op = 8, zero_alloc = true)
 		acc := u64(0)
 		for v in vals {
 			acc += v
 		}
-		_ = bench.black_box(acc)
-		bench.phase_metric(ph, 100.0, "hit%")
+		_ = hugi.black_box(acc)
+		hugi.phase_metric(ph, 100.0, "hit%")
 	}
 	{
-		_ = bench.scoped_phase(p, "verify", ops = 16, zero_alloc = true)
-		_ = bench.black_box(vals[0] + vals[15])
+		_ = hugi.scoped_phase(p, "verify", ops = 16, zero_alloc = true)
+		_ = hugi.black_box(vals[0] + vals[15])
 	}
 }
 
 @(private = "file")
-_violating_pipeline :: proc(p: ^bench.Pipeline) {
-	ph := bench.scoped_phase(p, "leaking_phase", ops = 1, zero_alloc = true)
+_violating_pipeline :: proc(p: ^hugi.Pipeline) {
+	ph := hugi.scoped_phase(p, "leaking_phase", ops = 1, zero_alloc = true)
 	buf := make([]u8, 64)
-	_ = bench.black_box(buf[0])
+	_ = hugi.black_box(buf[0])
 	delete(buf)
 	_ = ph
 }
 
 @(test)
 test_suite_pipeline_and_untimed_zero_alloc :: proc(t: ^testing.T) {
-	cfg := bench.default_suite_config()
+	cfg := hugi.default_suite_config()
 	cfg.quiet = true
 	cfg.runs = 5
 	cfg.warmup = 1
@@ -501,13 +501,13 @@ test_suite_pipeline_and_untimed_zero_alloc :: proc(t: ^testing.T) {
 	cfg.obench_cfg.warmup_time = 0
 	cfg.obench_cfg.fixed_batch_size = 16
 
-	suite := bench.suite_create("pipeline_test", cfg)
-	defer bench.suite_destroy(&suite)
+	suite := hugi.suite_create("pipeline_test", cfg)
+	defer hugi.suite_destroy(&suite)
 
-	bench.bench(&suite, "sum_zero_alloc", _zero_alloc_sum, zero_alloc = true)
-	bench.group_pipeline(&suite, "kv_pipe", _clean_pipeline)
+	hugi.bench(&suite, "sum_zero_alloc", _zero_alloc_sum, zero_alloc = true)
+	hugi.group_pipeline(&suite, "kv_pipe", _clean_pipeline)
 
-	ok := bench.suite_execute(&suite)
+	ok := hugi.suite_execute(&suite)
 	testing.expect(t, ok, "clean suite with @zero_alloc and phases should pass")
 	testing.expect_value(t, suite.failed_zero_alloc, 0)
 	testing.expect_value(t, len(suite.last_packet.records), 4)
@@ -515,15 +515,15 @@ test_suite_pipeline_and_untimed_zero_alloc :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(suite.last_packet.records[2].metrics), 1)
 	testing.expect_value(t, suite.last_packet.records[2].metrics[0].unit, "hit%")
 
-	cfg2 := bench.default_suite_config()
+	cfg2 := hugi.default_suite_config()
 	cfg2.quiet = true
 	cfg2.runs = 4
 	cfg2.warmup = 1
-	suite2 := bench.suite_create("violation_test", cfg2)
-	defer bench.suite_destroy(&suite2)
+	suite2 := hugi.suite_create("violation_test", cfg2)
+	defer hugi.suite_destroy(&suite2)
 
-	bench.group_pipeline(&suite2, "bad_pipe", _violating_pipeline)
-	ok2 := bench.suite_execute(&suite2)
+	hugi.group_pipeline(&suite2, "bad_pipe", _violating_pipeline)
+	ok2 := hugi.suite_execute(&suite2)
 	testing.expect(t, !ok2, "zero_alloc pipeline allocating heap memory must fail")
 	testing.expect(t, suite2.failed_zero_alloc > 0, "failed_zero_alloc must be recorded")
 	testing.expect_value(t, len(suite2.last_packet.records), 1)

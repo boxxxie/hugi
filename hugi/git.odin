@@ -1,4 +1,4 @@
-package bench
+package hugi
 
 import "core:fmt"
 import "core:os"

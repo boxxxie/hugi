@@ -1,7 +1,7 @@
-package bench_store
+package hugi_store
 
-import bench "../bench"
 import obench "../deps/obench/obench"
+import hugi "../hugi"
 import "core:math"
 import "core:slice"
 import "core:strings"
@@ -42,7 +42,7 @@ Pooled_Record :: struct {
 	temp_allocs_per_op: f64,
 	temp_bytes_per_op:  f64,
 	peak_heap_bytes:    i64,
-	metrics:            [dynamic]bench.Metric,
+	metrics:            [dynamic]hugi.Metric,
 	samples_ns:         [dynamic]f64,
 }
 
@@ -131,9 +131,9 @@ store_load_pooled_records :: proc(
 			run_ids[i] = strings.clone(rid, allocator)
 		}
 
-		metrics := make([dynamic]bench.Metric, len(last.metrics), allocator)
+		metrics := make([dynamic]hugi.Metric, len(last.metrics), allocator)
 		for m, i in last.metrics {
-			metrics[i] = bench.Metric {
+			metrics[i] = hugi.Metric {
 				unit  = strings.clone(m.unit, allocator),
 				value = m.value,
 			}

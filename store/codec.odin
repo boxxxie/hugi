@@ -1,4 +1,4 @@
-package bench_store
+package hugi_store
 
 import "core:c"
 import "vendor:compress/lz4"

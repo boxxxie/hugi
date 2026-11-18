@@ -2,16 +2,16 @@
 
 Fork: [`boxxxie/obench`](https://github.com/boxxxie/obench) (forked from [`zeybek/obench`](https://github.com/zeybek/obench)).
 
-`deps/obench` tracks branch `odin-bench` (`cb0657a`) in `/home/pauli/projects/odin/obench`, which merges four independent PR branches layered cleanly over upstream `main` (`44000fb`):
+`deps/obench` tracks branch `odin-bench` (`e693b1d`) in `/home/pauli/projects/odin/obench`, which merges four independent PR branches layered cleanly over upstream `main` (`44000fb`):
 
-- [#14](https://github.com/zeybek/obench/pull/14) — `perf/linux-vdso-clock-and-noalias` (`c7a1295`)
-- [#15](https://github.com/zeybek/obench/pull/15) — `feat/untimed-alloc-tracking` (`29be614`)
-- [#16](https://github.com/zeybek/obench/pull/16) — `feat/cli-compiler-flags-and-ols` (`0b33369`)
-- [#17](https://github.com/zeybek/obench/pull/17) — `feat/programmatic-hooks-and-phases` (`71a1e5f`)
+- [#14](https://github.com/zeybek/obench/pull/14) — `perf/linux-vdso-clock-and-noalias` (`ca4ba89`)
+- [#15](https://github.com/zeybek/obench/pull/15) — `feat/untimed-alloc-tracking` (`10fd173`)
+- [#16](https://github.com/zeybek/obench/pull/16) — `feat/cli-compiler-flags-and-ols` (`be4857c`)
+- [#17](https://github.com/zeybek/obench/pull/17) — `feat/programmatic-hooks-and-phases` (`b9bcf11`)
 
 ---
 
-## PR #14 — `perf/linux-vdso-clock-and-noalias` (`c7a1295`)
+## PR #14 — `perf/linux-vdso-clock-and-noalias` (`ca4ba89`)
 
 **Title:** `perf: use libc vDSO clock_gettime on 64-bit Linux and #no_alias in step`
 
@@ -24,7 +24,7 @@ Fork: [`boxxxie/obench`](https://github.com/boxxxie/obench) (forked from [`zeybe
 
 ---
 
-## PR #15 — `feat/untimed-alloc-tracking` (`29be614`)
+## PR #15 — `feat/untimed-alloc-tracking` (`10fd173`)
 
 **Title:** `feat: add untimed allocation counting option (--untimed-allocs)`
 
@@ -38,7 +38,7 @@ Fork: [`boxxxie/obench`](https://github.com/boxxxie/obench) (forked from [`zeybe
 
 ---
 
-## PR #16 — `feat/cli-compiler-flags-and-ols` (`0b33369`)
+## PR #16 — `feat/cli-compiler-flags-and-ols` (`be4857c`)
 
 **Title:** `feat(cli): forward --extra-linker-flags, --custom-attribute, and ols.json collections`
 
@@ -50,7 +50,7 @@ Fork: [`boxxxie/obench`](https://github.com/boxxxie/obench) (forked from [`zeybe
 
 ---
 
-## PR #17 — `feat/programmatic-hooks-and-phases` (`71a1e5f`)
+## PR #17 — `feat/programmatic-hooks-and-phases` (`b9bcf11`)
 
 **Title:** `feat: add silent suite_execute API and preserve custom_metrics in baselines`
 
@@ -63,6 +63,6 @@ Fork: [`boxxxie/obench`](https://github.com/boxxxie/obench) (forked from [`zeybe
 
 ---
 
-## Integration Branch — `odin-bench` (`cb0657a`)
+## Integration Branch — `odin-bench` (`e693b1d`)
 
-Merges all four PR branches above (`perf/linux-vdso-clock-and-noalias`, `feat/untimed-alloc-tracking`, `feat/cli-compiler-flags-and-ols`, `feat/programmatic-hooks-and-phases`) into a single ref consumed by `deps/obench`, verified end-to-end with `make fmt && make fmt-check && make check && make check-barriers && make test && make smoke && make clean` (46 library tests + 20 CLI tests + `core_style` + barrier probes + smoke).
+Merges all four PR branches above (`perf/linux-vdso-clock-and-noalias`, `feat/untimed-alloc-tracking`, `feat/cli-compiler-flags-and-ols`, `feat/programmatic-hooks-and-phases`) into a single ref consumed by `deps/obench`, verified end-to-end with `make fmt && make fmt-check && make check && make check-barriers && make test && make smoke && make clean`.

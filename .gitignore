@@ -1,0 +1,9 @@
+bin/
+build/
+.tmp/
+*.benchdb
+*.bpk
+*.arrow
+*.jsonl
+*.csv
+*.md.bak

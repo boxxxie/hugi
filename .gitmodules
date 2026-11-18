@@ -1,0 +1,10 @@
+[submodule "deps/obench"]
+	path = deps/obench
+	url = /home/pauli/projects/odin/obench
+	branch = odin-bench
+[submodule "deps/xitdb"]
+	path = deps/xitdb
+	url = /home/pauli/projects/odin/xitdb
+[submodule "deps/skadi"]
+	path = deps/skadi
+	url = /home/pauli/projects/odin/skadi

@@ -3,6 +3,7 @@ package hugi_tests
 import skadi "../deps/skadi/skadi"
 import hugi "../hugi"
 import store "../store"
+import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:os"
@@ -299,12 +300,17 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 	pid := os.get_pid()
 	db_path := fmt.aprintf("%s/hugi_test_%d.hugidb", tmp_dir, pid)
 	arrow_path := fmt.aprintf("%s/hugi_test_%d.arrow", tmp_dir, pid)
+	arrow_raw_path := fmt.aprintf("%s/hugi_test_raw_%d.arrow", tmp_dir, pid)
+	parquet_path := fmt.aprintf("%s/hugi_test_%d.parquet", tmp_dir, pid)
+	parquet_raw_path := fmt.aprintf("%s/hugi_test_raw_%d.parquet", tmp_dir, pid)
+	json_path := fmt.aprintf("%s/hugi_test_%d.json", tmp_dir, pid)
 	jsonl_path := fmt.aprintf("%s/hugi_test_%d.jsonl", tmp_dir, pid)
 	csv_path := fmt.aprintf("%s/hugi_test_%d.csv", tmp_dir, pid)
+	tsv_path := fmt.aprintf("%s/hugi_test_%d.tsv", tmp_dir, pid)
 	md_path := fmt.aprintf("%s/hugi_test_%d.md", tmp_dir, pid)
 	readme_path := fmt.aprintf("%s/hugi_readme_%d.md", tmp_dir, pid)
 	defer {
-		for p in ([]string{db_path, arrow_path, jsonl_path, csv_path, md_path, readme_path}) {
+		for p in ([]string{db_path, arrow_path, arrow_raw_path, parquet_path, parquet_raw_path, json_path, jsonl_path, csv_path, tsv_path, md_path, readme_path}) {
 			if os.exists(p) {
 				_ = os.remove(p)
 			}
@@ -348,13 +354,113 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 			store.export_arrow_ipc(arrow_path, records),
 			"arrow export should succeed",
 		)
+		testing.expect(
+			t,
+			store.export_arrow_ipc(arrow_raw_path, records, .Zlib_BSS, .None),
+			"uncompressed arrow export should succeed",
+		)
+		testing.expect(
+			t,
+			store.export_parquet(parquet_path, records),
+			"parquet export should succeed",
+		)
+		testing.expect(
+			t,
+			store.export_parquet(parquet_raw_path, records, .Zlib_BSS, false),
+			"uncompressed parquet export should succeed",
+		)
+		testing.expect(t, store.export_json(json_path, records), "json export should succeed")
 		testing.expect(t, store.export_jsonl(jsonl_path, records), "jsonl export should succeed")
 		testing.expect(t, store.export_csv(csv_path, records), "csv export should succeed")
+		testing.expect(t, store.export_tsv(tsv_path, records), "tsv export should succeed")
 		testing.expect(
 			t,
 			store.export_markdown(md_path, records),
 			"markdown export should succeed",
 		)
+
+		// Verify TSV structure.
+		if tsv_bytes, t_err2 := os.read_entire_file(tsv_path, context.allocator); t_err2 == nil {
+			defer delete(tsv_bytes)
+			tsv_str := string(tsv_bytes)
+			testing.expect(
+				t,
+				strings.contains(tsv_str, "commit\tlang\tsuite\tgroup"),
+				"tsv header uses tabs",
+			)
+			testing.expect(t, strings.contains(tsv_str, "\tcore::op_a\t"), "tsv contains op_a")
+			testing.expect(t, strings.contains(tsv_str, "\tcore::op_b\t"), "tsv contains op_b")
+		}
+
+		// Verify JSON structure.
+		if json_bytes, j_err := os.read_entire_file(json_path, context.allocator); j_err == nil {
+			defer delete(json_bytes)
+			parsed, p_err := json.parse(json_bytes, allocator = context.allocator)
+			testing.expect_value(t, p_err, json.Error.None)
+			if p_err == .None {
+				defer json.destroy_value(parsed, context.allocator)
+				arr, is_arr := parsed.(json.Array)
+				testing.expect(t, is_arr && len(arr) == 2, "json export must be a 2-element array")
+			}
+		}
+
+		// Verify Parquet magic & footer framing (plus uncompressed & empty exports).
+		if pq_bytes, pq_err := os.read_entire_file(parquet_path, context.allocator);
+		   pq_err == nil {
+			defer delete(pq_bytes)
+			n := len(pq_bytes)
+			testing.expect(t, n > 16, "parquet file should be non-empty")
+			if n > 16 {
+				testing.expect_value(t, string(pq_bytes[:4]), "PAR1")
+				testing.expect_value(t, string(pq_bytes[n - 4:]), "PAR1")
+			}
+		}
+		if pq_raw_bytes, pq_raw_err := os.read_entire_file(parquet_raw_path, context.allocator);
+		   pq_raw_err == nil {
+			defer delete(pq_raw_bytes)
+			n := len(pq_raw_bytes)
+			testing.expect(
+				t,
+				n > 16 &&
+				string(pq_raw_bytes[:4]) == "PAR1" &&
+				string(pq_raw_bytes[n - 4:]) == "PAR1",
+			)
+		}
+		testing.expect(
+			t,
+			store.export_parquet(parquet_raw_path, nil),
+			"empty parquet export should succeed",
+		)
+		if pq_empty_bytes, pq_e_err := os.read_entire_file(parquet_raw_path, context.allocator);
+		   pq_e_err == nil {
+			defer delete(pq_empty_bytes)
+			n := len(pq_empty_bytes)
+			testing.expect(
+				t,
+				n > 12 &&
+				string(pq_empty_bytes[:4]) == "PAR1" &&
+				string(pq_empty_bytes[n - 4:]) == "PAR1",
+			)
+		}
+
+		// Verify uncompressed Arrow IPC path too.
+		sc_raw, bs_raw, read_raw_ok := skadi.ipc_read_file(
+			arrow_raw_path,
+			context.allocator,
+			true,
+			true,
+		)
+		testing.expect(t, read_raw_ok, "uncompressed arrow file should decode cleanly")
+		if read_raw_ok {
+			for &b in bs_raw {
+				skadi.record_batch_free(&b)
+			}
+			delete(bs_raw)
+			if sc_raw != nil {
+				skadi.schema_free(sc_raw)
+				free(sc_raw)
+			}
+		}
 
 		// Verify Arrow IPC file round-trip via Skadi.
 		schema, batches, read_ok := skadi.ipc_read_file(arrow_path, context.allocator, true, false)
@@ -432,7 +538,11 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 
 	before, after, c_ok := store.store_compact(db_path)
 	testing.expect(t, c_ok, "store_compact should succeed")
-	testing.expect(t, before > 0 && after > 0, "compacted store must remain non-empty")
+	testing.expect(
+		t,
+		before > 0 && after > 0 && after < before,
+		"compacted store must shrink and stay non-empty",
+	)
 
 	st2, open2_ok := store.store_open(db_path)
 	testing.expect(t, open2_ok, "reopening compacted store should succeed")
@@ -440,6 +550,18 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 	commits := store.store_list_commits(&st2)
 	defer store.commit_summaries_destroy(commits)
 	testing.expect_value(t, len(commits), 2)
+
+	post_compact := store.store_load_pooled_records(&st2, "odin")
+	defer store.pooled_records_destroy(post_compact)
+	testing.expect_value(t, len(post_compact), 2)
+	if len(post_compact) == 2 {
+		testing.expect_value(t, post_compact[0].full_name, "core::op_a")
+		testing.expect_value(t, post_compact[0].commit, "exp002")
+		testing.expect(t, math.abs(post_compact[0].p50_ns - 75.0) < 2.0, "op_a median ~75ns")
+		testing.expect_value(t, post_compact[1].full_name, "core::op_b")
+		testing.expect_value(t, post_compact[1].commit, "exp001")
+		testing.expect(t, math.abs(post_compact[1].p50_ns - 220.0) < 2.0, "op_b median ~220ns")
+	}
 }
 
 @(private = "file")

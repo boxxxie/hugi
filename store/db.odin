@@ -138,7 +138,8 @@ run_summaries_destroy :: proc(list: []Run_Summary, allocator := context.allocato
 	delete(list, allocator)
 }
 
-CZPK_MAGIC :: "CZPK\x01\x00\x00\x00"
+CZPK_V1_MAGIC :: "CZPK\x01\x00\x00\x00"
+CZPK_V2_MAGIC :: "CZPK\x02\x00\x00\x00"
 CZRC_MAGIC :: "CZRC\x01\x00\x00\x00"
 
 @(private = "file")
@@ -220,27 +221,33 @@ _encode_compressed_packet :: proc(
 	meta_comp := compress_bytes_zlib(meta_raw, context.temp_allocator) or_return
 	defer delete(meta_comp, context.temp_allocator)
 
+	total_samples := 0
+	for r in pkt.records {
+		total_samples += len(r.samples_ns)
+	}
+	all_samples := make([dynamic]f64, 0, total_samples, context.temp_allocator)
+	defer delete(all_samples)
+	for r in pkt.records {
+		append(&all_samples, ..r.samples_ns[:])
+	}
+	s_blob := compress_samples_f64(all_samples[:], .Zlib_BSS, context.temp_allocator) or_return
+	defer delete(s_blob, context.temp_allocator)
+
 	buf := make(
 		[dynamic]u8,
 		0,
-		len(CZPK_MAGIC) + 4 + len(meta_comp) + len(pkt.records) * 64,
+		len(CZPK_V2_MAGIC) + 12 + len(meta_comp) + len(pkt.records) * 4 + len(s_blob),
 		allocator,
 	)
-	append(&buf, ..transmute([]u8)string(CZPK_MAGIC))
+	append(&buf, ..transmute([]u8)string(CZPK_V2_MAGIC))
 	_append_u32_le(&buf, u32(len(meta_comp)))
 	append(&buf, ..meta_comp)
 	_append_u32_le(&buf, u32(len(pkt.records)))
-
 	for r in pkt.records {
-		s_blob := compress_samples_f64(
-			r.samples_ns[:],
-			.Zlib_BSS,
-			context.temp_allocator,
-		) or_return
-		_append_u32_le(&buf, u32(len(s_blob)))
-		append(&buf, ..s_blob)
-		delete(s_blob, context.temp_allocator)
+		_append_u32_le(&buf, u32(len(r.samples_ns)))
 	}
+	_append_u32_le(&buf, u32(len(s_blob)))
+	append(&buf, ..s_blob)
 	return buf[:], true
 }
 
@@ -252,13 +259,17 @@ _decode_compressed_packet :: proc(
 	pkt: hugi.Run_Packet,
 	ok: bool,
 ) {
-	if len(blob) < len(CZPK_MAGIC) || string(blob[:len(CZPK_MAGIC)]) != CZPK_MAGIC {
+	if len(blob) < len(CZPK_V2_MAGIC) {
+		return {}, false
+	}
+	magic := string(blob[:len(CZPK_V2_MAGIC)])
+	if magic != CZPK_V1_MAGIC && magic != CZPK_V2_MAGIC {
 		return {}, false
 	}
 	defer if !ok {
 		hugi.packet_destroy(&pkt, allocator)
 	}
-	pos := len(CZPK_MAGIC)
+	pos := len(CZPK_V2_MAGIC)
 	meta_len := int(_read_u32_at(blob, &pos) or_return)
 	if meta_len < 0 || pos + meta_len > len(blob) {
 		return {}, false
@@ -273,110 +284,87 @@ _decode_compressed_packet :: proc(
 	if rec_count != len(pkt.records) {
 		return pkt, false
 	}
+
+	if magic == CZPK_V1_MAGIC {
+		for i in 0 ..< rec_count {
+			s_len := int(_read_u32_at(blob, &pos) or_return)
+			if s_len < 0 || pos + s_len > len(blob) {
+				return pkt, false
+			}
+			samples := decompress_samples_f64(
+				blob[pos:pos + s_len],
+				context.temp_allocator,
+			) or_return
+			pos += s_len
+			clear(&pkt.records[i].samples_ns)
+			append(&pkt.records[i].samples_ns, ..samples)
+			delete(samples, context.temp_allocator)
+		}
+		return pkt, true
+	}
+
+	sample_counts := make([]int, rec_count, context.temp_allocator)
+	defer delete(sample_counts, context.temp_allocator)
+	expected_total := 0
 	for i in 0 ..< rec_count {
-		s_len := int(_read_u32_at(blob, &pos) or_return)
-		if s_len < 0 || pos + s_len > len(blob) {
+		cnt := int(_read_u32_at(blob, &pos) or_return)
+		if cnt < 0 || cnt > 10_000_000 || expected_total > 100_000_000 - cnt {
 			return pkt, false
 		}
-		samples := decompress_samples_f64(blob[pos:pos + s_len], context.temp_allocator) or_return
-		pos += s_len
+		sample_counts[i] = cnt
+		expected_total += cnt
+	}
+
+	s_len := int(_read_u32_at(blob, &pos) or_return)
+	if s_len < 0 || pos + s_len > len(blob) {
+		return pkt, false
+	}
+	all_samples := decompress_samples_f64(blob[pos:pos + s_len], context.temp_allocator) or_return
+	defer delete(all_samples, context.temp_allocator)
+	if len(all_samples) != expected_total {
+		return pkt, false
+	}
+
+	off := 0
+	for i in 0 ..< rec_count {
+		cnt := sample_counts[i]
 		clear(&pkt.records[i].samples_ns)
-		append(&pkt.records[i].samples_ns, ..samples)
-		delete(samples, context.temp_allocator)
+		if cnt > 0 {
+			append(&pkt.records[i].samples_ns, ..all_samples[off:off + cnt])
+		}
+		off += cnt
 	}
 	return pkt, true
 }
 
 @(private = "file")
-_Snapshot_Entry :: struct {
-	commit:         string,
-	run_id:         string,
-	suite_name:     string,
-	timestamp_unix: i64,
-	record:         hugi.Record,
+_pack_snapshot_ref :: #force_inline proc "contextless" (run_ord: int, rec_idx: int) -> u64 {
+	return (u64(u32(run_ord) & 0x7FFF_FFFF) << 32) | u64(u32(rec_idx))
 }
 
 @(private = "file")
-_snapshot_entry_destroy :: proc(se: ^_Snapshot_Entry, allocator := context.allocator) {
-	delete(se.commit, allocator)
-	delete(se.run_id, allocator)
-	delete(se.suite_name, allocator)
-	hugi.record_destroy(&se.record, allocator)
-	se^ = {}
+_unpack_snapshot_ref :: #force_inline proc "contextless" (
+	packed: u64,
+) -> (
+	run_ord: int,
+	rec_idx: int,
+) {
+	return int((packed >> 32) & 0x7FFF_FFFF), int(packed & 0xFFFF_FFFF)
 }
 
 @(private = "file", require_results)
-_encode_snapshot_entry :: proc(
-	pkt: hugi.Run_Packet,
-	r: hugi.Record,
+_decode_legacy_snapshot_commit :: proc(
+	blob: []u8,
 	allocator := context.temp_allocator,
 ) -> (
-	out: []u8,
-	ok: bool,
-) {
-	rec_raw := hugi.encode_record_bytes(
-		r,
-		include_samples = false,
-		allocator = context.temp_allocator,
-	)
-	defer delete(rec_raw, context.temp_allocator)
-	rec_comp := compress_bytes_zlib(rec_raw, context.temp_allocator) or_return
-	defer delete(rec_comp, context.temp_allocator)
-	s_comp := compress_samples_f64(r.samples_ns[:], .Zlib_BSS, context.temp_allocator) or_return
-	defer delete(s_comp, context.temp_allocator)
-
-	buf := make([dynamic]u8, 0, len(CZRC_MAGIC) + 64 + len(rec_comp) + len(s_comp), allocator)
-	append(&buf, ..transmute([]u8)string(CZRC_MAGIC))
-	_append_str_le(&buf, pkt.commit)
-	_append_str_le(&buf, pkt.run_id)
-	_append_str_le(&buf, pkt.suite_name)
-	_append_i64_le(&buf, pkt.timestamp_unix)
-	_append_u32_le(&buf, u32(len(rec_comp)))
-	append(&buf, ..rec_comp)
-	_append_u32_le(&buf, u32(len(s_comp)))
-	append(&buf, ..s_comp)
-	return buf[:], true
-}
-
-@(private = "file", require_results)
-_decode_snapshot_entry :: proc(
-	blob: []u8,
-	allocator := context.allocator,
-) -> (
-	se: _Snapshot_Entry,
+	commit: string,
 	ok: bool,
 ) {
 	if len(blob) < len(CZRC_MAGIC) || string(blob[:len(CZRC_MAGIC)]) != CZRC_MAGIC {
-		return {}, false
-	}
-	defer if !ok {
-		_snapshot_entry_destroy(&se, allocator)
+		return "", false
 	}
 	pos := len(CZRC_MAGIC)
-	se.commit = _read_str_at(blob, &pos, allocator) or_return
-	se.run_id = _read_str_at(blob, &pos, allocator) or_return
-	se.suite_name = _read_str_at(blob, &pos, allocator) or_return
-	se.timestamp_unix = _read_i64_at(blob, &pos) or_return
-
-	rec_len := int(_read_u32_at(blob, &pos) or_return)
-	if rec_len < 0 || pos + rec_len > len(blob) {
-		return se, false
-	}
-	rec_raw := decompress_bytes_zlib(blob[pos:pos + rec_len], context.temp_allocator) or_return
-	defer delete(rec_raw, context.temp_allocator)
-	pos += rec_len
-
-	se.record = hugi.decode_record_bytes(rec_raw, allocator) or_return
-
-	s_len := int(_read_u32_at(blob, &pos) or_return)
-	if s_len < 0 || pos + s_len > len(blob) {
-		return se, false
-	}
-	samples := decompress_samples_f64(blob[pos:pos + s_len], context.temp_allocator) or_return
-	pos += s_len
-	append(&se.record.samples_ns, ..samples)
-	delete(samples, context.temp_allocator)
-	return se, true
+	return _read_str_at(blob, &pos, allocator)
 }
 
 @(private = "file")
@@ -386,11 +374,17 @@ _Ingest_Ctx :: struct {
 }
 
 @(private = "file")
-_array_list_contains_str :: proc(list: xitdb.Read_Array_List, target: string) -> bool {
+_Ingest_Batch_Ctx :: struct {
+	items: []_Ingest_Ctx,
+}
+
+@(private = "file")
+_array_list_index_of_str :: proc(list: xitdb.Read_Array_List, target: string) -> int {
 	it, it_err := xitdb.array_list_iterator(list)
 	if it_err != nil {
-		return false
+		return -1
 	}
+	idx := 0
 	for {
 		cur_maybe, n_err := xitdb.cursor_iterator_next(&it)
 		if n_err != nil || cur_maybe == nil {
@@ -398,39 +392,49 @@ _array_list_contains_str :: proc(list: xitdb.Read_Array_List, target: string) ->
 		}
 		s, s_err := xitdb.cursor_read_string(cur_maybe.?, 0, context.temp_allocator)
 		if s_err == nil && s == target {
-			return true
+			return idx
 		}
+		idx += 1
 	}
-	return false
+	return -1
 }
 
 @(private = "file")
-_ingest_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
-	ctx := (^_Ingest_Ctx)(user_data)
-	pkt := ctx.pkt
+_array_list_contains_str :: proc(list: xitdb.Read_Array_List, target: string) -> bool {
+	return _array_list_index_of_str(list, target) >= 0
+}
 
-	moment := xitdb.write_hash_map_init(cursor^) or_return
-	xitdb.hash_map_put(&moment, "schema_version", u64(1)) or_return
-
+@(private = "file")
+_put_packet_into_moment :: proc(
+	moment: ^xitdb.Write_Hash_Map,
+	pkt: hugi.Run_Packet,
+	pk_blob: []u8,
+) -> xitdb.Error {
 	lang_key := pkt.lang != "" ? pkt.lang : "odin"
 	run_key := fmt.tprintf("%s:%s", lang_key, pkt.run_id)
 
 	// 1. Store compressed Run_Packet under "runs"[<lang>:<run_id>].
-	runs_cur := xitdb.hash_map_put_cursor(&moment, "runs") or_return
+	runs_cur := xitdb.hash_map_put_cursor(moment, "runs") or_return
 	runs_map := xitdb.write_hash_map_init(runs_cur) or_return
 	existed_slot, _ := xitdb.hash_map_get_slot(runs_map.read_hash_map, run_key)
 	already_in_runs := existed_slot != nil
-	xitdb.hash_map_put(&runs_map, run_key, ctx.pk_blob) or_return
+	xitdb.hash_map_put(&runs_map, run_key, pk_blob) or_return
 
-	// 2. Append composite run_key to "run_order" if new.
-	order_cur := xitdb.hash_map_put_cursor(&moment, "run_order") or_return
+	// 2. Append composite run_key to "run_order" (or look up existing ordinal).
+	order_cur := xitdb.hash_map_put_cursor(moment, "run_order") or_return
 	order_list := xitdb.write_array_list_init(order_cur) or_return
-	if !already_in_runs {
+	run_ord := -1
+	if already_in_runs {
+		run_ord = _array_list_index_of_str(order_list.read_array_list, run_key)
+	}
+	if run_ord < 0 {
+		ord_cnt := xitdb.array_list_count(order_list.read_array_list) or_return
+		run_ord = int(ord_cnt)
 		xitdb.array_list_append(&order_list, run_key) or_return
 	}
 
 	// 3. Index composite run_key under "commits"[commit].
-	commits_cur := xitdb.hash_map_put_cursor(&moment, "commits") or_return
+	commits_cur := xitdb.hash_map_put_cursor(moment, "commits") or_return
 	commits_map := xitdb.write_hash_map_init(commits_cur) or_return
 	commit_key := pkt.commit != "" ? pkt.commit : "unknown"
 	c_list_cur := xitdb.hash_map_put_cursor(&commits_map, commit_key) or_return
@@ -439,21 +443,84 @@ _ingest_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Erro
 		xitdb.array_list_append(&c_list, run_key) or_return
 	}
 
-	// 4. Update rank-preserving Sorted_Map under "snapshots"[lang][full_name].
-	snaps_cur := xitdb.hash_map_put_cursor(&moment, "snapshots") or_return
+	// 4. Update inline (run_ord << 32) | rec_idx pointers under "snapshots"[lang][full_name].
+	snaps_cur := xitdb.hash_map_put_cursor(moment, "snapshots") or_return
 	snaps_map := xitdb.write_hash_map_init(snaps_cur) or_return
 	lang_cur := xitdb.hash_map_put_cursor(&snaps_map, lang_key) or_return
 	lang_sorted := xitdb.write_sorted_map_init(lang_cur) or_return
-	for r in pkt.records {
+	for r, rec_idx in pkt.records {
 		key := r.full_name != "" ? r.full_name : r.name
-		snap_blob, s_ok := _encode_snapshot_entry(pkt, r, context.temp_allocator)
-		if !s_ok {
-			continue
+		xitdb.sorted_map_put(&lang_sorted, key, _pack_snapshot_ref(run_ord, rec_idx)) or_return
+	}
+	return nil
+}
+
+@(private = "file")
+_ingest_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+	ctx := (^_Ingest_Ctx)(user_data)
+	moment := xitdb.write_hash_map_init(cursor^) or_return
+	xitdb.hash_map_put(&moment, "schema_version", u64(2)) or_return
+	return _put_packet_into_moment(&moment, ctx.pkt, ctx.pk_blob)
+}
+
+@(private = "file")
+_ingest_batch_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitdb.Error {
+	ctx := (^_Ingest_Batch_Ctx)(user_data)
+	moment := xitdb.write_hash_map_init(cursor^) or_return
+	xitdb.hash_map_put(&moment, "schema_version", u64(2)) or_return
+	for item in ctx.items {
+		_put_packet_into_moment(&moment, item.pkt, item.pk_blob) or_return
+	}
+	return nil
+}
+
+@(private = "file", require_results)
+_store_ingest_batch_single_moment :: proc(st: ^Store, pkts: []hugi.Run_Packet) -> bool {
+	if st == nil {
+		return false
+	}
+	items := make([]_Ingest_Ctx, len(pkts), context.temp_allocator)
+	defer {
+		for item in items {
+			delete(item.pk_blob, context.temp_allocator)
 		}
-		xitdb.sorted_map_put(&lang_sorted, key, snap_blob) or_return
+		delete(items, context.temp_allocator)
+	}
+	for pkt, i in pkts {
+		pk_blob, pk_ok := _encode_compressed_packet(pkt, context.temp_allocator)
+		if !pk_ok {
+			return false
+		}
+		items[i] = _Ingest_Ctx {
+			pkt     = pkt,
+			pk_blob = pk_blob,
+		}
 	}
 
-	return nil
+	rc := xitdb.database_root_cursor(&st.db)
+	history, h_err := xitdb.write_array_list_init(rc)
+	if h_err != nil {
+		return false
+	}
+	count, c_err := xitdb.array_list_count(history.read_array_list)
+	if c_err != nil {
+		return false
+	}
+	base_slot := xitdb.Slot{}
+	if count > 0 {
+		latest, l_err := xitdb.array_list_get_slot(history.read_array_list, -1)
+		if l_err != nil || latest == nil {
+			return false
+		}
+		base_slot = latest.?
+	}
+	batch_ctx := _Ingest_Batch_Ctx {
+		items = items,
+	}
+	return(
+		xitdb.array_list_append_context(&history, base_slot, _ingest_batch_cb, &batch_ctx) ==
+		nil \
+	)
 }
 
 /*
@@ -655,9 +722,57 @@ store_list_commits :: proc(st: ^Store, allocator := context.allocator) -> []Comm
 	return out[:]
 }
 
+@(private = "file", require_results)
+_read_string_list :: proc(
+	list_cur: xitdb.Read_Cursor,
+	allocator := context.temp_allocator,
+) -> [dynamic]string {
+	out := make([dynamic]string, allocator)
+	list, err := xitdb.read_array_list_init(list_cur)
+	if err != nil {
+		return out
+	}
+	it, it_err := xitdb.array_list_iterator(list)
+	if it_err != nil {
+		return out
+	}
+	for {
+		c_maybe, n_err := xitdb.cursor_iterator_next(&it)
+		if n_err != nil || c_maybe == nil {
+			break
+		}
+		s, s_err := xitdb.cursor_read_string(c_maybe.?, 0, allocator)
+		if s_err == nil {
+			append(&out, s)
+		}
+	}
+	return out
+}
+
+@(private = "file", require_results)
+_get_cached_packet :: proc(
+	cache: ^map[string]hugi.Run_Packet,
+	runs_map: xitdb.Read_Hash_Map,
+	rid: string,
+) -> (
+	pkt: hugi.Run_Packet,
+	ok: bool,
+) {
+	if cached, exists := cache[rid]; exists {
+		return cached, true
+	}
+	decoded, p_ok := _read_run_packet_from_map(runs_map, rid, context.temp_allocator)
+	if !p_ok {
+		return {}, false
+	}
+	cache[strings.clone(rid, context.temp_allocator)] = decoded
+	return decoded, true
+}
+
 /*
-Compacts the `xitdb` store at `db_path` into a fresh file via `xitdb.database_compact`
-and atomically replaces `db_path`.
+Compacts the `xitdb` store at `db_path` by collapsing all historical runs into a single
+clean v2 Moment (`CZPK\x02` packets + inline `u64` snapshot pointers) via `xitdb.database_compact`
+and atomically replacing `db_path`.
 */
 @(require_results)
 store_compact :: proc(db_path: string) -> (before_bytes: i64, after_bytes: i64, ok: bool) {
@@ -673,7 +788,43 @@ store_compact :: proc(db_path: string) -> (before_bytes: i64, after_bytes: i64, 
 		_ = os.remove(tmp_path)
 	}
 
+	pkts := make([dynamic]hugi.Run_Packet, context.allocator)
+	defer {
+		for &p in pkts {
+			hugi.packet_destroy(&p)
+		}
+		delete(pkts)
+	}
+
 	{
+		src_st, open_ok := store_open(db_path, context.allocator)
+		if !open_ok {
+			return before_bytes, 0, false
+		}
+		defer store_close(&src_st)
+
+		if moment, has_m := _latest_moment_map(&src_st); has_m {
+			runs_cur, r_err := xitdb.hash_map_get_cursor(moment, "runs")
+			order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order")
+			if r_err == nil && runs_cur != nil && o_err == nil && order_cur != nil {
+				if runs_map, rm_err := xitdb.read_hash_map_init(runs_cur.?); rm_err == nil {
+					run_keys := _read_string_list(order_cur.?, context.temp_allocator)
+					defer delete(run_keys)
+					for rid in run_keys {
+						if pkt, pkt_ok := _read_run_packet_from_map(
+							runs_map,
+							rid,
+							context.allocator,
+						); pkt_ok {
+							append(&pkts, pkt)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(pkts) == 0 {
 		src_core, src_err := xitdb.core_buffered_file_open(
 			db_path,
 			2 * 1024 * 1024,
@@ -700,6 +851,27 @@ store_compact :: proc(db_path: string) -> (before_bytes: i64, after_bytes: i64, 
 		if comp_err != nil {
 			return before_bytes, 0, false
 		}
+	} else {
+		mem_st, mem_ok := store_open(":memory:", context.allocator)
+		if !mem_ok {
+			return before_bytes, 0, false
+		}
+		defer store_close(&mem_st)
+
+		if !_store_ingest_batch_single_moment(&mem_st, pkts[:]) {
+			return before_bytes, 0, false
+		}
+
+		dst_core, dst_err := xitdb.core_file_open(tmp_path, {.Read, .Write, .Create, .Trunc})
+		if dst_err != nil {
+			return before_bytes, 0, false
+		}
+		defer _ = xitdb.core_destroy(&dst_core, close_file = true)
+
+		_, comp_err := xitdb.database_compact(&mem_st.db, &dst_core)
+		if comp_err != nil {
+			return before_bytes, 0, false
+		}
 	}
 
 	if fi, err := os.stat(tmp_path, context.temp_allocator); err == nil {
@@ -708,6 +880,7 @@ store_compact :: proc(db_path: string) -> (before_bytes: i64, after_bytes: i64, 
 	if os.rename(tmp_path, db_path) != nil {
 		return before_bytes, 0, false
 	}
+	ok = true
 	return before_bytes, after_bytes, true
 }
 
@@ -776,19 +949,22 @@ store_load_raw_groups :: proc(
 		append(&g.records, hugi.record_clone(r, allocator))
 	}
 
+	pkt_cache := make(map[string]hugi.Run_Packet, context.temp_allocator)
+	defer {
+		for _, &p in pkt_cache {
+			hugi.packet_destroy(&p, context.temp_allocator)
+		}
+	}
+
 	if run_id != "" {
 		prefixed_key := fmt.tprintf("%s:%s", lang != "" ? lang : "odin", run_id)
-		pkt, pkt_ok := _read_run_packet_from_map(runs_map, prefixed_key, context.temp_allocator)
+		pkt, pkt_ok := _get_cached_packet(&pkt_cache, runs_map, prefixed_key)
 		if !pkt_ok {
-			pkt, pkt_ok = _read_run_packet_from_map(runs_map, run_id, context.temp_allocator)
+			pkt, pkt_ok = _get_cached_packet(&pkt_cache, runs_map, run_id)
 		}
 		if !pkt_ok || (lang != "" && pkt.lang != lang) {
-			if pkt_ok {
-				hugi.packet_destroy(&pkt, context.temp_allocator)
-			}
 			return groups[:]
 		}
-		defer hugi.packet_destroy(&pkt, context.temp_allocator)
 		for r in pkt.records {
 			add_record(
 				&groups,
@@ -808,28 +984,27 @@ store_load_raw_groups :: proc(
 	}
 
 	if commit != "" {
-		order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order")
-		if o_err != nil || order_cur == nil {
-			return groups[:]
-		}
-		order_list, ol_err := xitdb.read_array_list_init(order_cur.?)
-		if ol_err != nil {
-			return groups[:]
-		}
-		it, it_err := xitdb.array_list_iterator(order_list)
-		if it_err != nil {
-			return groups[:]
-		}
-		for {
-			c_maybe, n_err := xitdb.cursor_iterator_next(&it)
-			if n_err != nil || c_maybe == nil {
-				break
+		candidate_rids: [dynamic]string
+		used_commits_index := false
+		if c_cur, cm_err := xitdb.hash_map_get_cursor(moment, "commits");
+		   cm_err == nil && c_cur != nil {
+			if c_map, map_err := xitdb.read_hash_map_init(c_cur.?); map_err == nil {
+				if list_cur, l_err := xitdb.hash_map_get_cursor(c_map, commit);
+				   l_err == nil && list_cur != nil {
+					candidate_rids = _read_string_list(list_cur.?, context.temp_allocator)
+					used_commits_index = true
+				}
 			}
-			rid, s_err := xitdb.cursor_read_string(c_maybe.?, 0, context.temp_allocator)
-			if s_err != nil {
-				continue
+		}
+		if !used_commits_index {
+			order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order")
+			if o_err != nil || order_cur == nil {
+				return groups[:]
 			}
-			pkt, pkt_ok := _read_run_packet_from_map(runs_map, rid, context.temp_allocator)
+			candidate_rids = _read_string_list(order_cur.?, context.temp_allocator)
+		}
+		for rid in candidate_rids {
+			pkt, pkt_ok := _get_cached_packet(&pkt_cache, runs_map, rid)
 			if !pkt_ok {
 				continue
 			}
@@ -847,7 +1022,6 @@ store_load_raw_groups :: proc(
 					)
 				}
 			}
-			hugi.packet_destroy(&pkt, context.temp_allocator)
 		}
 		for &g in groups {
 			g.lang = strings.clone(lang != "" ? lang : "odin", allocator)
@@ -858,8 +1032,7 @@ store_load_raw_groups :: proc(
 		return groups[:]
 	}
 
-	// Default: read latest snapshots for `lang` (structurally shared across selective runs),
-	// then pool any extra runs matching each benchmark's latest commit.
+	// Default: read latest snapshot pointers for `lang`, then pool matching commits.
 	eff_lang := lang != "" ? lang : "odin"
 	snaps_cur, s_err := xitdb.hash_map_get_cursor(moment, "snapshots")
 	if s_err != nil || snaps_cur == nil {
@@ -878,7 +1051,14 @@ store_load_raw_groups :: proc(
 		return groups[:]
 	}
 
+	order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order")
+	if o_err != nil || order_cur == nil {
+		return groups[:]
+	}
+	run_keys := _read_string_list(order_cur.?, context.temp_allocator)
+
 	snap_latest_commit := make(map[string]string, context.temp_allocator)
+	active_commits := make(map[string]bool, context.temp_allocator)
 	it, it_err := xitdb.sorted_map_iterator(lang_sorted)
 	if it_err != nil {
 		return groups[:]
@@ -892,64 +1072,90 @@ store_load_raw_groups :: proc(
 		if kv_err != nil {
 			continue
 		}
-		blob, b_err := xitdb.cursor_read_bytes(kv.value_cursor, 0, context.temp_allocator)
-		if b_err != nil {
+		key, k_err := xitdb.cursor_read_string(kv.key_cursor, 0, context.temp_allocator)
+		if k_err != nil || !hugi.matches_name_filter(filter, key) {
 			continue
 		}
-		se, se_ok := _decode_snapshot_entry(blob, context.temp_allocator)
-		delete(blob, context.temp_allocator)
-		if !se_ok {
-			continue
+
+		snap_commit := ""
+		#partial switch kv.value_cursor.slot_ptr.slot.tag {
+		case .Uint:
+			packed, u_err := xitdb.cursor_read_uint(kv.value_cursor)
+			if u_err == nil {
+				run_ord, _ := _unpack_snapshot_ref(packed)
+				if run_ord >= 0 && run_ord < len(run_keys) {
+					if pkt, p_ok := _get_cached_packet(&pkt_cache, runs_map, run_keys[run_ord]);
+					   p_ok {
+						snap_commit = pkt.commit
+					}
+				}
+			}
+		case .Bytes, .Short_Bytes:
+			blob, b_err := xitdb.cursor_read_bytes(kv.value_cursor, 0, context.temp_allocator)
+			if b_err == nil {
+				if legacy_commit, c_ok := _decode_legacy_snapshot_commit(
+					blob,
+					context.temp_allocator,
+				); c_ok {
+					snap_commit = legacy_commit
+				}
+				delete(blob, context.temp_allocator)
+			}
 		}
-		key := se.record.full_name != "" ? se.record.full_name : se.record.name
-		if hugi.matches_name_filter(filter, key) {
+		if snap_commit != "" {
 			snap_latest_commit[strings.clone(key, context.temp_allocator)] = strings.clone(
-				se.commit,
+				snap_commit,
 				context.temp_allocator,
 			)
+			active_commits[snap_commit] = true
 		}
-		_snapshot_entry_destroy(&se, context.temp_allocator)
 	}
 
-	// Pool all runs matching each benchmark's latest commit from `run_order`.
-	order_cur, o_err := xitdb.hash_map_get_cursor(moment, "run_order")
-	if o_err == nil && order_cur != nil {
-		if order_list, ol_err := xitdb.read_array_list_init(order_cur.?); ol_err == nil {
-			oit, oit_err := xitdb.array_list_iterator(order_list)
-			if oit_err == nil {
-				for {
-					c_maybe, n_err := xitdb.cursor_iterator_next(&oit)
-					if n_err != nil || c_maybe == nil {
-						break
+	needed_rids := make(map[string]bool, context.temp_allocator)
+	fallback_all := false
+	if c_cur, cm_err := xitdb.hash_map_get_cursor(moment, "commits");
+	   cm_err == nil && c_cur != nil {
+		if c_map, map_err := xitdb.read_hash_map_init(c_cur.?); map_err == nil {
+			for ac in active_commits {
+				if list_cur, lc_err := xitdb.hash_map_get_cursor(c_map, ac);
+				   lc_err == nil && list_cur != nil {
+					for crid in _read_string_list(list_cur.?, context.temp_allocator) {
+						needed_rids[crid] = true
 					}
-					rid, str_err := xitdb.cursor_read_string(c_maybe.?, 0, context.temp_allocator)
-					if str_err != nil {
-						continue
-					}
-					pkt, pkt_ok := _read_run_packet_from_map(runs_map, rid, context.temp_allocator)
-					if !pkt_ok {
-						continue
-					}
-					if pkt.lang == eff_lang {
-						for r in pkt.records {
-							key := r.full_name != "" ? r.full_name : r.name
-							if target_commit, found := snap_latest_commit[key];
-							   found && pkt.commit == target_commit {
-								add_record(
-									&groups,
-									&by_name,
-									pkt.commit,
-									pkt.run_id,
-									pkt.suite_name,
-									r,
-									filter,
-									allocator,
-								)
-							}
-						}
-					}
-					hugi.packet_destroy(&pkt, context.temp_allocator)
+				} else {
+					fallback_all = true
+					break
 				}
+			}
+		} else {
+			fallback_all = true
+		}
+	} else {
+		fallback_all = true
+	}
+
+	for rid in run_keys {
+		if !fallback_all && rid not_in needed_rids {
+			continue
+		}
+		pkt, pkt_ok := _get_cached_packet(&pkt_cache, runs_map, rid)
+		if !pkt_ok || pkt.lang != eff_lang {
+			continue
+		}
+		for r in pkt.records {
+			key := r.full_name != "" ? r.full_name : r.name
+			if target_commit, found := snap_latest_commit[key];
+			   found && pkt.commit == target_commit {
+				add_record(
+					&groups,
+					&by_name,
+					pkt.commit,
+					pkt.run_id,
+					pkt.suite_name,
+					r,
+					filter,
+					allocator,
+				)
 			}
 		}
 	}

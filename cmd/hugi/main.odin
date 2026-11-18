@@ -40,7 +40,7 @@ COMMANDS:
   inspect [filter]       Inspect pooled metrics (quantiles, CV%, allocations, footprint)
   compare                Compare commits or runs using Mann-Whitney U and Welch t-test
   compare-1v1            Cross-language 1v1 comparison (e.g., odin vs zig) with footprint checks
-  export                 Export pooled benchmarks to Arrow IPC (.arrow), JSONL, CSV, or Markdown
+  export                 Export pooled benchmarks to Arrow IPC, Parquet, JSON, JSONL, CSV, TSV, or Markdown
   compact                Compact the xitdb store and reclaim dead pages
   help                   Show this help message
   version                Print version information
@@ -66,7 +66,7 @@ COMPARE / EXPORT OPTIONS:
   --runs <a..b>          Compare run_id <a> against run_id <b>
   --last                 Compare the last two commits (or last two runs)
   --langs <a,b>          Languages for compare-1v1 (default: odin,zig)
-  --format <fmt>         Export format: arrow | jsonl | csv | md
+  --format <fmt>         Export format: arrow | parquet | json | jsonl | csv | tsv | md (auto-detected from --out extension if omitted)
   --out <path>           Output path for export
   --update-readme <path> Replace <!-- BEGIN_BENCHMARK_TABLE -->..<!-- END_BENCHMARK_TABLE -->
   --limit <N>            Maximum history entries to display (0 = all)
@@ -1300,11 +1300,30 @@ _cmd_export :: proc(args: []string) -> int {
 		}
 	}
 
+	if format == "" && out_path != "" {
+		ext := strings.to_lower(filepath.ext(out_path), context.temp_allocator)
+		switch ext {
+		case ".arrow", ".feather", ".ipc":
+			format = "arrow"
+		case ".parquet", ".pq":
+			format = "parquet"
+		case ".json":
+			format = "json"
+		case ".jsonl", ".ndjson":
+			format = "jsonl"
+		case ".csv":
+			format = "csv"
+		case ".tsv", ".tab":
+			format = "tsv"
+		case ".md", ".markdown":
+			format = "md"
+		}
+	}
 	if format == "" && readme_path != "" {
 		format = "md"
 	}
 	if format == "" {
-		fmt.eprintln("hugi export: --format <arrow|jsonl|csv|md> is required")
+		fmt.eprintln("hugi export: --format <arrow|parquet|json|jsonl|csv|tsv|md> is required")
 		return 1
 	}
 	if out_path == "" && readme_path == "" {
@@ -1330,17 +1349,29 @@ _cmd_export :: proc(args: []string) -> int {
 	if out_path != "" {
 		ok := false
 		switch format {
-		case "arrow", "feather":
-			ok = store.export_arrow_ipc(out_path, records, .Zlib_BSS, context.allocator)
-		case "jsonl":
+		case "arrow", "feather", "ipc":
+			ok = store.export_arrow_ipc(
+				out_path,
+				records,
+				.Zlib_BSS,
+				.LZ4_Frame,
+				context.allocator,
+			)
+		case "parquet", "pq":
+			ok = store.export_parquet(out_path, records, .Zlib_BSS, true, context.allocator)
+		case "json":
+			ok = store.export_json(out_path, records)
+		case "jsonl", "ndjson":
 			ok = store.export_jsonl(out_path, records)
 		case "csv":
 			ok = store.export_csv(out_path, records)
+		case "tsv", "tab":
+			ok = store.export_tsv(out_path, records)
 		case "md", "markdown":
 			ok = store.export_markdown(out_path, records)
 		case:
 			fmt.eprintfln(
-				"hugi export: unsupported format '%s' (expected arrow|jsonl|csv|md)",
+				"hugi export: unsupported format '%s' (expected arrow|parquet|json|jsonl|csv|tsv|md)",
 				format,
 			)
 			return 1

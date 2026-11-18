@@ -8,7 +8,7 @@ import "core:os"
 import "core:path/filepath"
 import "core:strings"
 
-@(private = "file")
+@(private = "package")
 _ensure_export_parent_dir :: proc(path: string) {
 	dir := filepath.dir(path)
 	if dir == "" || dir == "." || dir == "/" || os.exists(dir) {
@@ -50,8 +50,8 @@ _write_json_str :: proc(sb: ^strings.Builder, s: string) {
 }
 
 @(private = "file")
-_write_csv_str :: proc(sb: ^strings.Builder, s: string) {
-	needs_quote := strings.contains_any(s, ",\"\n\r")
+_write_delimited_str :: proc(sb: ^strings.Builder, s: string, delim: byte) {
+	needs_quote := strings.index_byte(s, delim) >= 0 || strings.contains_any(s, "\"\n\r")
 	if !needs_quote {
 		strings.write_string(sb, s)
 		return
@@ -70,13 +70,15 @@ _write_csv_str :: proc(sb: ^strings.Builder, s: string) {
 
 /*
 Exports pooled benchmark records to an Apache Arrow IPC (Feather v2) file via `skadi`,
-including lossless `Codec.Zlib_BSS` or `Codec.LZ4_BSS` compressed `samples_blob` columns.
+including lossless `Codec.Zlib_BSS` or `Codec.LZ4_BSS` compressed `samples_blob` columns
+and optional Arrow IPC body buffer compression (`LZ4_Frame` by default).
 */
 @(require_results)
 export_arrow_ipc :: proc(
 	path: string,
 	records: []Pooled_Record,
 	codec := Codec.Zlib_BSS,
+	ipc_compression := skadi.IPC_Compression.LZ4_Frame,
 	allocator := context.allocator,
 ) -> bool {
 	_ensure_export_parent_dir(path)
@@ -431,7 +433,123 @@ export_arrow_ipc :: proc(
 	defer skadi.record_batch_free(&rb)
 
 	batches := [1]skadi.Record_Batch{rb}
-	return skadi.ipc_write_file(path, &schema, batches[:])
+	return skadi.ipc_write_file(path, &schema, batches[:], ipc_compression)
+}
+
+@(private = "file")
+_write_json_record :: proc(sb: ^strings.Builder, r: Pooled_Record, pretty: bool) {
+	sep := ",\n    " if pretty else ","
+	kv := ": " if pretty else ":"
+	if pretty {
+		strings.write_string(sb, "  {\n    ")
+	} else {
+		strings.write_byte(sb, '{')
+	}
+
+	write_str_field :: proc(
+		sb: ^strings.Builder,
+		key, val, kv_sep, rec_sep: string,
+		first := false,
+	) {
+		if !first {
+			strings.write_string(sb, rec_sep)
+		}
+		strings.write_byte(sb, '"')
+		strings.write_string(sb, key)
+		strings.write_byte(sb, '"')
+		strings.write_string(sb, kv_sep)
+		_write_json_str(sb, val)
+	}
+
+	write_int_field :: proc(sb: ^strings.Builder, key: string, v: i64, kv_sep, rec_sep: string) {
+		fmt.sbprintf(sb, `%s"%s"%s%d`, rec_sep, key, kv_sep, v)
+	}
+	write_u64_field :: proc(sb: ^strings.Builder, key: string, v: u64, kv_sep, rec_sep: string) {
+		fmt.sbprintf(sb, `%s"%s"%s%d`, rec_sep, key, kv_sep, v)
+	}
+	write_f64_field :: proc(
+		sb: ^strings.Builder,
+		key: string,
+		v: f64,
+		prec, kv_sep, rec_sep: string,
+	) {
+		strings.write_string(sb, rec_sep)
+		strings.write_byte(sb, '"')
+		strings.write_string(sb, key)
+		strings.write_byte(sb, '"')
+		strings.write_string(sb, kv_sep)
+		fmt.sbprintf(sb, prec, v)
+	}
+
+	write_str_field(sb, "commit", r.commit, kv, sep, first = true)
+	write_str_field(sb, "lang", r.lang, kv, sep)
+	write_str_field(sb, "suite", r.suite_name, kv, sep)
+	write_str_field(sb, "group", r.group_name, kv, sep)
+	write_str_field(sb, "name", r.name, kv, sep)
+	write_str_field(sb, "full_name", r.full_name, kv, sep)
+
+	write_int_field(sb, "rank", i64(r.rank), kv, sep)
+	write_int_field(sb, "runs", i64(r.run_count), kv, sep)
+	write_int_field(sb, "samples", i64(r.samples), kv, sep)
+	write_u64_field(sb, "ops_per_sample", r.ops_per_sample, kv, sep)
+	write_f64_field(sb, "min_ns", r.min_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "p25_ns", r.p25_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "p50_ns", r.p50_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "p75_ns", r.p75_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "p95_ns", r.p95_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "p99_ns", r.p99_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "max_ns", r.max_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "mean_ns", r.mean_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "std_dev_ns", r.std_dev_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "ci95_ns", r.ci95_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "cv_pct", r.cv_pct, "%.4f", kv, sep)
+	write_f64_field(sb, "iqr_ns", r.iqr_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "mad_ns", r.mad_ns, "%.6f", kv, sep)
+	write_f64_field(sb, "ops_per_sec", r.ops_per_sec, "%.3f", kv, sep)
+	write_u64_field(sb, "bytes_per_op", r.bytes_per_op, kv, sep)
+	write_f64_field(sb, "mb_per_sec", r.mb_per_sec, "%.4f", kv, sep)
+	write_u64_field(sb, "footprint_bytes", r.footprint_bytes, kv, sep)
+	write_f64_field(sb, "allocs_per_op", r.allocs_per_op, "%.4f", kv, sep)
+	write_f64_field(sb, "alloc_bytes_per_op", r.alloc_bytes_per_op, "%.2f", kv, sep)
+	write_f64_field(sb, "temp_allocs_per_op", r.temp_allocs_per_op, "%.4f", kv, sep)
+	write_f64_field(sb, "temp_bytes_per_op", r.temp_bytes_per_op, "%.2f", kv, sep)
+	write_int_field(sb, "peak_heap_bytes", r.peak_heap_bytes, kv, sep)
+	fmt.sbprintf(sb, `%s"samples_ns"%s[`, sep, kv)
+	for s, idx in r.samples_ns {
+		if idx > 0 {
+			strings.write_string(sb, ", " if pretty else ",")
+		}
+		fmt.sbprintf(sb, "%.3f", s)
+	}
+	if pretty {
+		strings.write_string(sb, "]\n  }")
+	} else {
+		strings.write_string(sb, "]}")
+	}
+}
+
+/*
+Exports pooled benchmark records to a formatted JSON array document.
+*/
+@(require_results)
+export_json :: proc(path: string, records: []Pooled_Record) -> bool {
+	_ensure_export_parent_dir(path)
+
+	if len(records) == 0 {
+		return os.write_entire_file(path, transmute([]u8)string("[]\n")) == nil
+	}
+
+	sb := strings.builder_make(context.temp_allocator)
+	strings.write_string(&sb, "[\n")
+	for r, idx in records {
+		if idx > 0 {
+			strings.write_string(&sb, ",\n")
+		}
+		_write_json_record(&sb, r, true)
+	}
+	strings.write_string(&sb, "\n]\n")
+
+	return os.write_entire_file(path, transmute([]u8)strings.to_string(sb)) == nil
 }
 
 /*
@@ -443,50 +561,115 @@ export_jsonl :: proc(path: string, records: []Pooled_Record) -> bool {
 
 	sb := strings.builder_make(context.temp_allocator)
 	for r in records {
-		strings.write_string(&sb, `{"commit":`)
-		_write_json_str(&sb, r.commit)
-		strings.write_string(&sb, `,"lang":`)
-		_write_json_str(&sb, r.lang)
-		strings.write_string(&sb, `,"suite":`)
-		_write_json_str(&sb, r.suite_name)
-		strings.write_string(&sb, `,"group":`)
-		_write_json_str(&sb, r.group_name)
-		strings.write_string(&sb, `,"name":`)
-		_write_json_str(&sb, r.name)
-		strings.write_string(&sb, `,"full_name":`)
-		_write_json_str(&sb, r.full_name)
+		_write_json_record(&sb, r, false)
+		strings.write_byte(&sb, '\n')
+	}
+
+	return os.write_entire_file(path, transmute([]u8)strings.to_string(sb)) == nil
+}
+
+@(private = "file")
+_export_delimited :: proc(path: string, records: []Pooled_Record, delim: byte) -> bool {
+	_ensure_export_parent_dir(path)
+
+	cols := [?]string {
+		"commit",
+		"lang",
+		"suite",
+		"group",
+		"name",
+		"full_name",
+		"rank",
+		"runs",
+		"samples",
+		"ops_per_sample",
+		"min_ns",
+		"p25_ns",
+		"p50_ns",
+		"p75_ns",
+		"p95_ns",
+		"p99_ns",
+		"max_ns",
+		"mean_ns",
+		"std_dev_ns",
+		"ci95_ns",
+		"cv_pct",
+		"ops_per_sec",
+		"bytes_per_op",
+		"mb_per_sec",
+		"footprint_bytes",
+		"allocs_per_op",
+		"alloc_bytes_per_op",
+	}
+
+	sb := strings.builder_make(context.temp_allocator)
+	for col, idx in cols {
+		if idx > 0 {
+			strings.write_byte(&sb, delim)
+		}
+		strings.write_string(&sb, col)
+	}
+	strings.write_byte(&sb, '\n')
+
+	d := rune(delim)
+	for r in records {
+		_write_delimited_str(&sb, r.commit, delim)
+		strings.write_byte(&sb, delim)
+		_write_delimited_str(&sb, r.lang, delim)
+		strings.write_byte(&sb, delim)
+		_write_delimited_str(&sb, r.suite_name, delim)
+		strings.write_byte(&sb, delim)
+		_write_delimited_str(&sb, r.group_name, delim)
+		strings.write_byte(&sb, delim)
+		_write_delimited_str(&sb, r.name, delim)
+		strings.write_byte(&sb, delim)
+		_write_delimited_str(&sb, r.full_name, delim)
 		fmt.sbprintf(
 			&sb,
-			`,"rank":%d,"runs":%d,"samples":%d,"ops_per_sample":%d,"min_ns":%.6f,"p25_ns":%.6f,"p50_ns":%.6f,"p75_ns":%.6f,"p95_ns":%.6f,"p99_ns":%.6f,"max_ns":%.6f,"mean_ns":%.6f,"std_dev_ns":%.6f,"ci95_ns":%.6f,"cv_pct":%.4f,"ops_per_sec":%.3f,"bytes_per_op":%d,"mb_per_sec":%.4f,"footprint_bytes":%d,"allocs_per_op":%.4f,"alloc_bytes_per_op":%.2f,"samples_ns":[`,
+			"%c%d%c%d%c%d%c%d%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.6f%c%.4f%c%.3f%c%d%c%.4f%c%d%c%.4f%c%.2f\n",
+			d,
 			r.rank,
+			d,
 			r.run_count,
+			d,
 			r.samples,
+			d,
 			r.ops_per_sample,
+			d,
 			r.min_ns,
+			d,
 			r.p25_ns,
+			d,
 			r.p50_ns,
+			d,
 			r.p75_ns,
+			d,
 			r.p95_ns,
+			d,
 			r.p99_ns,
+			d,
 			r.max_ns,
+			d,
 			r.mean_ns,
+			d,
 			r.std_dev_ns,
+			d,
 			r.ci95_ns,
+			d,
 			r.cv_pct,
+			d,
 			r.ops_per_sec,
+			d,
 			r.bytes_per_op,
+			d,
 			r.mb_per_sec,
+			d,
 			r.footprint_bytes,
+			d,
 			r.allocs_per_op,
+			d,
 			r.alloc_bytes_per_op,
 		)
-		for s, idx in r.samples_ns {
-			if idx > 0 {
-				strings.write_byte(&sb, ',')
-			}
-			fmt.sbprintf(&sb, "%.3f", s)
-		}
-		strings.write_string(&sb, "]}\n")
 	}
 
 	return os.write_entire_file(path, transmute([]u8)strings.to_string(sb)) == nil
@@ -497,53 +680,15 @@ Exports pooled benchmark records as an RFC 4180 CSV file.
 */
 @(require_results)
 export_csv :: proc(path: string, records: []Pooled_Record) -> bool {
-	_ensure_export_parent_dir(path)
+	return _export_delimited(path, records, ',')
+}
 
-	sb := strings.builder_make(context.temp_allocator)
-	strings.write_string(
-		&sb,
-		"commit,lang,suite,group,name,full_name,rank,runs,samples,ops_per_sample,min_ns,p25_ns,p50_ns,p75_ns,p95_ns,p99_ns,max_ns,mean_ns,std_dev_ns,ci95_ns,cv_pct,ops_per_sec,bytes_per_op,mb_per_sec,footprint_bytes,allocs_per_op,alloc_bytes_per_op\n",
-	)
-	for r in records {
-		_write_csv_str(&sb, r.commit)
-		strings.write_byte(&sb, ',')
-		_write_csv_str(&sb, r.lang)
-		strings.write_byte(&sb, ',')
-		_write_csv_str(&sb, r.suite_name)
-		strings.write_byte(&sb, ',')
-		_write_csv_str(&sb, r.group_name)
-		strings.write_byte(&sb, ',')
-		_write_csv_str(&sb, r.name)
-		strings.write_byte(&sb, ',')
-		_write_csv_str(&sb, r.full_name)
-		fmt.sbprintf(
-			&sb,
-			",%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.3f,%d,%.4f,%d,%.4f,%.2f\n",
-			r.rank,
-			r.run_count,
-			r.samples,
-			r.ops_per_sample,
-			r.min_ns,
-			r.p25_ns,
-			r.p50_ns,
-			r.p75_ns,
-			r.p95_ns,
-			r.p99_ns,
-			r.max_ns,
-			r.mean_ns,
-			r.std_dev_ns,
-			r.ci95_ns,
-			r.cv_pct,
-			r.ops_per_sec,
-			r.bytes_per_op,
-			r.mb_per_sec,
-			r.footprint_bytes,
-			r.allocs_per_op,
-			r.alloc_bytes_per_op,
-		)
-	}
-
-	return os.write_entire_file(path, transmute([]u8)strings.to_string(sb)) == nil
+/*
+Exports pooled benchmark records as a Tab-Separated Values (TSV) file.
+*/
+@(require_results)
+export_tsv :: proc(path: string, records: []Pooled_Record) -> bool {
+	return _export_delimited(path, records, '\t')
 }
 
 /*

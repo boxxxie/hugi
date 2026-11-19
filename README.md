@@ -12,6 +12,8 @@
 
 `hugi` is a benchmark harness and historical performance database written in Odin. Instead of treating benchmarks as ephemeral terminal output or ad-hoc log files, `hugi` records every run against its Git commit SHA inside a compact, transactional `.hugidb` file—allowing you to track performance over the lifetime of a codebase, add or filter benchmarks arbitrarily without breaking schemas, audit regressions with statistical rigor, and export clean datasets or reports into standard analytics formats.
 
+> **Built on [`obench`](https://github.com/zeybek/obench):** `hugi` relies heavily on [`obench`](https://github.com/zeybek/obench) ([`deps/obench`](deps/obench)) as its core micro-benchmarking and measurement engine. Its `Bencher` / `Parallel_Bencher` / `Group` primitives, `step` loop, optimizer barriers (`black_box`, `clobber_memory`), calibrated platform clock timing, `Counting_Allocator` heap/temp tracking, and terminal report formatter are powered directly by `obench`, which `hugi` extends with stateful multi-phase `Pipeline` lifecycles, exact femtosecond storage, longitudinal `.hugidb` history, statistical regression gates, and dataset exports.
+
 ---
 
 ## Why `hugi`?

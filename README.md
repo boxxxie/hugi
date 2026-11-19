@@ -110,7 +110,7 @@ hugi inspect "hash::fnv1a" --commit a1b2c3d4
 hugi compare --last
 
 # Audit a specific commit range and fail CI (non-zero exit) on statistically significant regressions > 3%
-hugi compare --commits main..HEAD --threshold 3.0 --fail-on-regression
+hugi compare --commits "$(git rev-parse --short=12 main)..$(git rev-parse --short=12 HEAD)" --threshold 3.0 --fail-on-regression
 
 # Run and gate against a baseline commit in one step
 hugi run ./benchmarks --baseline-commit a1b2c3d4e5f6 --fail-on-regression
@@ -215,6 +215,8 @@ main :: proc() {
 You can also execute benchmark suites inside standard Odin test suites—failing the test automatically on `@zero_alloc` violations, benchmark errors, or I/O failures:
 
 ```odin
+import "core:testing"
+
 @(test)
 test_zero_alloc_benchmarks :: proc(t: ^testing.T) {
 	suite := hugi.suite_create("ci_sanity")
@@ -233,10 +235,12 @@ In addition to the `hugi` CLI, you can embed `.hugidb` storage, Copy-on-Write ov
 
 ### Compiler Collections
 
-While benchmark binaries only need `hugi/`, tools that import `hugi_store` resolve `hugi/` and `store/` (and their relative `../deps/*` dependencies) via a single `-collection:hugi=./deps/hugi` flag (add `-collection:obench=./deps/hugi/deps/obench/obench`, `-collection:xitdb=./deps/hugi/deps/xitdb/xitdb`, and `-collection:skadi=./deps/hugi/deps/skadi/skadi` if your own code imports those packages directly):
+While benchmark binaries only need `hugi` (`-collection:hugi=./deps/hugi/hugi`, matching `HUGI_HOME` in `hugi run`), tools that also import `hugi_store` can map both collections cleanly in `ols.json` or on the command line (add `-collection:obench=./deps/hugi/deps/obench/obench`, `-collection:xitdb=./deps/hugi/deps/xitdb/xitdb`, and `-collection:skadi=./deps/hugi/deps/skadi/skadi` if your own code imports those packages directly):
 
 ```bash
-odin build ./cmd/my_audit_tool -collection:hugi=./deps/hugi
+odin build ./cmd/my_audit_tool \
+  -collection:hugi=./deps/hugi/hugi \
+  -collection:hugi_store=./deps/hugi/store
 ```
 
 ### End-to-End Library Example: Ingest, Compare & Export
@@ -246,8 +250,8 @@ package custom_audit
 
 import "core:fmt"
 import "core:os"
-import "hugi:hugi"
-import store "hugi:store"
+import hugi "hugi:."
+import store "hugi_store:."
 
 run_and_audit :: proc(db_path: string, baseline_sha: string) -> bool {
 	// 1. Execute a benchmark suite silently in-process
@@ -364,8 +368,10 @@ Because `hugi` exports native `DECIMAL(18, 6)` columns to Parquet and Arrow IPC,
 
 ```bash
 hugi export --all-commits --out history.parquet
-duckdb -c "SELECT commit, full_name, p50_ns, p99_ns, ops_per_sec FROM 'history.parquet' ORDER BY timestamp_unix DESC LIMIT 10;"
+duckdb -c "SELECT commit, full_name, p50_ns, p99_ns, ops_per_sec FROM read_parquet('history.parquet', file_row_number = true) ORDER BY file_row_number DESC LIMIT 10;"
 ```
+
+*(Ordering by `file_row_number` preserves chronological commit order even for backfilled JSONL histories where multiple commits were imported in the same second.)*
 
 ### Automated README Benchmark Tables
 
@@ -384,6 +390,26 @@ Then run:
 
 `hugi` replaces only the block between the markers while leaving the rest of your document untouched.
 
+### Customizing Benchmark Reports & Real-World Showcase
+
+`hugi` separates measurement, compressed history, and statistical inference from presentation. When a project outgrows the built-in 9-column table—such as needing grouped sections, latency-tiered bandwidth tables, multi-runtime pivots, or source `#L` links—consume `hugi`'s machine-readable streams (`--out -`, `--lang all`, `compare --format json|csv`, `compare-1v1 --format json|csv`, Parquet/Arrow IPC) or embed `hugi_store` directly:
+
+* **Runnable Recipes in This Repo:**
+  * [`examples/custom_markdown_odin/`](examples/custom_markdown_odin/) — Pure-Odin renderer importing `hugi_store` to group benchmarks by `group_name`, switch `MB/s` vs `ops/s`, and update README markers.
+  * [`examples/custom_reports/`](examples/custom_reports/) — [`duckdb_report.sql`](examples/custom_reports/duckdb_report.sql) (latency-tiered tables and commit deltas over Parquet) and [`render_1v1_report.py`](examples/custom_reports/render_1v1_report.py) (stdlib Python renderer consuming `hugi compare-1v1 --format json --out -` and `hugi export --lang all --format json --out -`).
+
+* **Real-World Odin Ecosystem References:**
+
+| Repository | Rendering Pattern | How `hugi` Is Used |
+| :--- | :--- | :--- |
+| **`mimir`** | Zero-config built-in Markdown | `hugi run benchmarks` + `hugi export --update-readme benchmarks/README.md` (17 micro & pipeline benchmarks). |
+| [**`boxxxie/heimdall`**](https://github.com/boxxxie/heimdall) | Zero-config built-in Markdown | Strict `-disallow-do` suite (`zero_cost` micro-benchmarks + 6 pipeline groups, 31 benchmarks) updated directly via `hugi export --update-readme`. |
+| [**`boxxxie/temple`**](https://github.com/boxxxie/temple) | **AOT `temple` templates (`tools/bench_report/`)** | Streams `hugi export --format json --out -` into Odin structs and renders grouped suite tables + root README headline table with `temple`'s zero-alloc AOT `.temple.twig` templates. |
+| [**`boxxxie/odin-duckdb`**](https://github.com/boxxxie/odin-duckdb) | **Latency-tiered bandwidth + DuckDB SQL** | Emits `hugi` packets (`--extra-build-flags` for `libduckdb`), streams `hugi export --all-commits --format jsonl --out -` into tiered bandwidth tables, and includes `query_hugidb.sql` over Parquet. |
+| [**`boxxxie/odin-xitdb`**](https://github.com/boxxxie/odin-xitdb) | **Polyglot 1v1 + code-slice links** | Unifies `odin`, `zig`, and `lua` histories in `history.hugidb` (`hugi compare-1v1 --langs odin,zig`) and streams `--lang all --all-commits --format jsonl --out -` into tiered diff + slice reports. |
+| [**`boxxxie/skadi`**](https://github.com/boxxxie/skadi) | **Pivoted ST/MT/Actor vs C++ 1v1** | Records exact batch ticks + `Buffer_Pool` custom metrics (`pool_hits`/`pool_misses`), ingests `odin` + `cpp` runs, and drives `compare_1v1.py --from-hugidb` via `hugi export --lang all --format jsonl --out -`. |
+| [**`boxxxie/sleipnir`**](https://github.com/boxxxie/sleipnir) | **Multi-runtime concurrency suite** | Captures all 5 actor/mailbox workloads (`1.4M`–`825M` msgs/s across `chan`, DOD, MPSC, SPSC, and `M:N` swarms) into `benchmarks/history.hugidb`. |
+
 ---
 
 ## Ingesting External & Cross-Language Benchmarks
@@ -391,14 +417,17 @@ Then run:
 `hugi` is language-agnostic at the storage, comparison, and export layers. Any benchmark harness in C, Zig, Rust, Go, or Python can emit a simple `.jsonl` line per benchmark and ingest it into `.hugidb`:
 
 ```json
-{"group":"kv","lang":"zig","commit":"a1b2c3d4e5f6","run_id":"zig-run-1","name":"kv::lookup","ops":1000,"runs":7,"median_ns":41.25,"samples_ns":[41.1,41.25,41.4],"bytes_used":16384}
+{"group":"kv","lang":"zig","commit":"a1b2c3d4e5f6","run_id":"zig-run-1","name":"kv::lookup[1024]","ops":1000,"runs":7,"median_ns":41.25,"samples_ns":[41.1,41.25,41.4],"bytes_used":16384}
 ```
 
 ```bash
 # Ingest external JSONL logs, obench JSON reports, or binary .hpk packets
 hugi ingest zig_results.jsonl --db benchmarks/history.hugidb
 
-# Run a 1v1 statistical & memory-footprint audit between Odin and Zig
+# Inspect or export a non-Odin language explicitly (inspect/compare/export default to --lang odin)
+hugi inspect --db benchmarks/history.hugidb --lang zig
+
+# Run a 1v1 statistical & memory-footprint audit between Odin and Zig (matches on exact full_name)
 hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig --commit a1b2c3d4e5f6
 ```
 
@@ -411,7 +440,7 @@ hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig --commit a1b2c3
 Floating-point `f64` IEEE-754 significands have 53 bits of precision, which introduces representation error when scaling batched clock deltas or aggregating quantiles.
 
 * Inside `hugi`, raw batch timings are recorded as overhead-adjusted `u64` nanoseconds alongside `ops_per_sample`.
-* Per-operation durations are scaled using 128-bit integer arithmetic (`u128`) into signed 64-bit **femtoseconds** (`1 fs = 10^-15 s = 10^-6 ns`), supporting exact sub-picosecond SIMD measurements (e.g., `5,000 fs = 5.00 ps`) up to `> 9,200 seconds` without overflow or floating-point rounding drift.
+* Per-operation durations are scaled using 128-bit integer arithmetic (`u128`) into signed 64-bit **femtoseconds** (`1 fs = 10^-15 s = 10^-6 ns`), supporting exact sub-picosecond SIMD measurements (e.g., `5,000 fs = 5.00 ps`) up to `> 9.22 million seconds (~106.75 days)` without overflow or floating-point rounding drift.
 * Quantiles (`min`, `p25`, `p50`, `p75`, `p95`, `p99`, `max`), `mean`, `IQR`, and `MAD` are computed deterministically over `i64` femtoseconds using `i128` linear interpolation.
 
 ### Multi-Tiered Compression (`xitdb v5` + `HCAT\x01` + `CZPK\x04` + `CZCH\x02` + `BU`)
@@ -460,19 +489,21 @@ Exporting the exact same full-fidelity Odin run history from [`boxxxie/odin-xitd
 
 Across the full multi-language [`boxxxie/odin-xitdb`](https://github.com/boxxxie/odin-xitdb) history (`history.jsonl`, `lua.jsonl`, and `zig.jsonl` — 13 ingested packets, 773 benchmark records across 7 commits and 3 languages), `324,077 B` of raw JSONLs compact to `41,871 B` pre-compact (`v5`: `HCAT\x01` + `CZPK\x04`) and **`7,510 B`** after `hugi compact --keep-hot 0` (**97.7% smaller**), while a single latest-Odin snapshot exports to `12,604 B` in Parquet or `22,514 B` in Arrow IPC.
 
+*(Note: `.hugidb` also retains `.hugidb`-only metadata omitted from the 35-column Parquet/Arrow exports, including custom `Metric` values, `median_cycles`, `resizes_per_op`, OS/arch/compiler flags, and `@zero_alloc` / error flags.)*
+
 ### Reproducing Size Benchmarks on Your Own Suite
 
-You can audit exact byte sizes on your own benchmark history at any time by exporting all unpooled runs (`--all-runs`, which preserves 100% of runs and sample arrays) and comparing against the compacted `.hugidb` file:
+You can audit exact byte sizes on your own benchmark history at any time by exporting all unpooled runs (`--all-runs`, which preserves 100% of runs and sample arrays) and comparing against the compacted `.hugidb` file (pass `--lang all` on multi-language stores, or `--lang <lang>` for non-Odin stores, since `hugi export` defaults to `--lang odin`):
 
 ```bash
 # 1. Seal cold runs and reclaim dead xitdb pages
 hugi compact --db benchmarks/history.hugidb --keep-hot 0
 
 # 2. Export the exact same full-fidelity run history to Parquet, Arrow IPC, CSV, and JSONL
-hugi export --db benchmarks/history.hugidb --all-runs --out .tmp/all_runs.parquet
-hugi export --db benchmarks/history.hugidb --all-runs --out .tmp/all_runs.arrow
-hugi export --db benchmarks/history.hugidb --all-runs --out .tmp/all_runs.csv
-hugi export --db benchmarks/history.hugidb --all-runs --out .tmp/all_runs.jsonl
+hugi export --db benchmarks/history.hugidb --lang all --all-runs --out .tmp/all_runs.parquet
+hugi export --db benchmarks/history.hugidb --lang all --all-runs --out .tmp/all_runs.arrow
+hugi export --db benchmarks/history.hugidb --lang all --all-runs --out .tmp/all_runs.csv
+hugi export --db benchmarks/history.hugidb --lang all --all-runs --out .tmp/all_runs.jsonl
 
 # 3. Compare resulting file sizes
 wc -c benchmarks/history.hugidb .tmp/all_runs.parquet .tmp/all_runs.arrow .tmp/all_runs.csv .tmp/all_runs.jsonl
@@ -494,9 +525,9 @@ wc -c benchmarks/history.hugidb .tmp/all_runs.parquet .tmp/all_runs.arrow .tmp/a
 | `hugi ingest <file...>` | Ingest `.hpk`/`.bpk` binary packets, `obench` `.json` reports, or `.jsonl` benchmark logs (`--lang`, `--commit`). |
 | `hugi history` | List stored commits (`--commits`, default) or individual runs (`--runs`, `--limit <N>`). |
 | `hugi inspect [filter]` | Display Markdown summary and quantile/allocation breakdown (`--commit`, `--run`, `--lang`). |
-| `hugi compare` | Statistical comparison across `--commits <a..b>`, `--runs <a..b>`, or `--last` (`--threshold <pct>`, `--fail-on-regression`). |
-| `hugi compare-1v1` | Cross-language 1v1 comparison with Mann-Whitney U / Welch `t`-test and footprint checks (`--langs <a,b>`, `--commit`). |
-| `hugi export` | Export snapshot, `--all-commits`, or `--all-runs` to `arrow`, `parquet`, `json`, `jsonl`, `csv`, `tsv`, or `md`, or `--update-readme <path>`. |
+| `hugi compare` | Statistical comparison across `--commits <a..b>`, `--runs <a..b>`, or `--last` (`--threshold <pct>`, `--fail-on-regression`, `--format md|json|csv`, `--out <path|->`). |
+| `hugi compare-1v1` | Cross-language 1v1 comparison with Mann-Whitney U / Welch `t`-test and footprint checks (`--langs <a,b>`, `--commit`, `--format md|json|csv`, `--out <path|->`). |
+| `hugi export` | Export snapshot, `--all-commits`, or `--all-runs` (`--lang odin|<lang>|all`) to `arrow`, `parquet`, `json`, `jsonl`, `csv`, `tsv`, or `md` (including `--out -` stdout streaming) or `--update-readme <path>`. |
 | `hugi compact` | Seal cold runs into `CZCH\x02` columnar chunks and atomically compact dead `xitdb` pages (`--keep-hot <N>`). |
 
 ---
@@ -506,8 +537,9 @@ wc -c benchmarks/history.hugidb .tmp/all_runs.parquet .tmp/all_runs.arrow .tmp/a
 * [`hugi/`](hugi/) (`package hugi`) — Zero-store benchmark runner, `obench` micro-benchmark re-exports (`hugi.odin`), stateful `Pipeline` phases (`phase.odin`), Git SHA resolver (`git.odin`), `HPKT\x02` binary wire format (`packet.odin`), and JSON/JSONL importers (`importers.odin`).
 * [`store/`](store/) (`package hugi_store`) — `.hugidb` transactional store (`db.odin`, `query.odin`, `compact.odin`), `HCAT\x01` catalog (`catalog.odin`), `CZPK\x04`/`CZCH\x02` encoders (`format.odin`, `binary_io.odin`), `BU` racing integer codecs (`codec.odin`), multi-run sample pooling & statistical tests (`pool_and_compare.odin`), and Arrow/Parquet/JSON/CSV/Markdown exporters (`export_schema.odin`, `export_arrow.odin`, `parquet.odin`, `export_text.odin`).
 * [`cmd/hugi/`](cmd/hugi/) (`bin/hugi`) — Modular pure-Odin CLI (`main.odin`, `cli_args.odin`, `cmd_run.odin`, `cmd_ingest.odin`, `cmd_query.odin`, `cmd_export.odin`, `cli_test.odin`).
-* [`examples/micro_and_phases/`](examples/micro_and_phases/) — Runnable example combining parameterized micro-benchmarks and a multi-phase KV pipeline (`make example`).
+* [`examples/`](examples/) — Runnable suites and custom renderers: [`micro_and_phases/`](examples/micro_and_phases/) (`make example`), [`custom_markdown_odin/`](examples/custom_markdown_odin/) (pure-Odin grouped Markdown), and [`custom_reports/`](examples/custom_reports/) (DuckDB SQL + Python JSON renderers).
 * [`tests/`](tests/) (`package hugi_tests`) & [`specs/`](specs/) (`package hugi_specs`) — Leak-checked unit tests, property-based codec/stats invariants, and 4-layer ATDD executable specifications.
+* [`docs/`](docs/) — Technical guides covering [writing benchmarks & pipelines](docs/benchmarking-guide.md), [CLI & CI workflows](docs/cli-and-ci.md), [storage & compression architecture](docs/storage-and-compression.md), and [exports & analytics](docs/exports-and-analytics.md).
 
 ---
 

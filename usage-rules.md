@@ -19,7 +19,7 @@ Concise, high-density rules and patterns for developers and AI coding agents wri
 }
 ```
 
-Add `{ "name": "hugi_store", "path": "./deps/hugi/store" }` (plus `xitdb` and `skadi`) **only** when calling the database/export APIs programmatically from Odin.
+Add `{ "name": "hugi_store", "path": "./deps/hugi/store" }` (plus `xitdb` and `skadi`) **only** when calling the database/export APIs programmatically from Odin, and import with `import hugi "hugi:."` and `import store "hugi_store:."` (avoid mapping `hugi` to `./deps/hugi` if you rely on `HUGI_HOME`, because `hugi run` injects `-collection:hugi=<repo_root>/hugi`).
 
 ---
 
@@ -166,8 +166,11 @@ store.store_close(&st)
 before, after, comp_ok := store.store_compact("benchmarks/history.hugidb")
 
 // DO: Use `store_open_overlay` for non-destructive Copy-on-Write in-memory trial runs
+// (Note: `store_open_overlay` requires `path` to already exist on disk; use `":memory:"` with `store_open` otherwise)
 ov, ov_ok := store.store_open_overlay("benchmarks/history.hugidb")
-defer store.store_close(&ov) // Disk file remains byte-for-byte untouched
+if ov_ok {
+	defer store.store_close(&ov) // Disk file remains byte-for-byte untouched
+}
 ```
 
 ### Decoding `samples_blob` from Arrow IPC / Parquet Exports
@@ -180,20 +183,28 @@ When reading `samples_blob` back in Odin, always use `store.decompress_exported_
 
 ```sh
 # DO: Gate pull requests against a baseline commit with Mann-Whitney U + Welch t-test
-hugi run ./benchmarks --db benchmarks/history.hugidb --baseline-commit origin/main --fail-on-regression --threshold 5.0
+# (`--baseline-commit` and `--commits` prefix-match stored SHAs; expand symbolic refs via git rev-parse)
+hugi run ./benchmarks --db benchmarks/history.hugidb --baseline-commit "$(git rev-parse --short=12 origin/main)" --fail-on-regression --threshold 5.0
 
-# DO: Use --overlay locally to compare uncommitted experiments without writing to history.hugidb
-hugi run ./benchmarks --overlay --baseline-commit HEAD
+# DO: Use --overlay locally with a distinct --commit tag so the trial run does not pool into HEAD
+hugi run ./benchmarks --overlay --commit wip-trial --baseline-commit "$(git rev-parse --short=12 HEAD)"
 
 # DO: Choose ONE export scope (--all-commits, --all-runs, or --commit <sha>; never combine them)
 hugi export --db benchmarks/history.hugidb --out latest.md --update-readme README.md
 hugi export --db benchmarks/history.hugidb --all-commits --out series.parquet
 hugi export --db benchmarks/history.hugidb --all-runs --out raw_runs.jsonl
+
+# DO: Stream text exports or statistical comparisons cleanly to stdout (`--out -`) for custom client renderers
+hugi export --db benchmarks/history.hugidb --lang all --format jsonl --out -
+hugi compare --db benchmarks/history.hugidb --last --format json --out -
+hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig --format json --out -
 ```
 
 * **README Markers:** Ensure `<!-- BEGIN_BENCHMARK_TABLE -->` and `<!-- END_BENCHMARK_TABLE -->` exist in the target Markdown file before running `hugi export --update-readme <path>` (missing markers return exit code `1`).
-* **Selective Runs Are Safe:** Running `hugi run ./benchmarks -f lookup` marks the packet `selective = true` and updates *only* matching benchmarks in the language's latest snapshot while preserving untouched benchmarks from prior commits.
-* **Cross-Language 1v1 (`compare-1v1`):** Emit JSONL from non-Odin harnesses with matching `name` (`"group::bench"`), `lang`, `commit`, `run_id`, `ops`, `samples_batch_ns` (or `samples_ns`), and `bytes_used` (mapped to `footprint_bytes`). Ingest via `hugi ingest results.jsonl` and run `hugi compare-1v1 --langs odin,zig`—mismatched `footprint_bytes` between languages are flagged `[MISMATCH]`.
+* **Custom Client Rendering:** `hugi` intentionally emits a clean 9-column default Markdown table (`--update-readme`) plus machine-readable `parquet`, `arrow`, `json`, `jsonl`, `csv`, and `compare`/`compare-1v1 --format json|csv` streams. Write project-specific grouped/tiered/pivoted tables on the client side (via `hugi_store`, AOT `temple` templates over `--format json --out -`, DuckDB SQL over Parquet, or Python/shell scripts).
+* **`--lang` Defaults, Case Sensitivity & Empty Flags:** `hugi inspect`, `hugi compare`, and `hugi export` default to `--lang odin`—pass `--lang <lang>` for external languages or `--lang all` (or `*`) to export across all languages. Always pass lowercase `--lang` tags (compiled binaries lowercase `--lang`, whereas CLI queries are case-sensitive), and pass empty values as two tokens (`--lang ""`, never `--lang=""`, which consumes the next token). (`--out -` is only valid for text formats, never `arrow` or `parquet`.)
+* **Selective Runs Are Safe:** Running `hugi run ./benchmarks -f lookup` (or `--groups` other than `"all"`) marks the packet `selective = true` and updates *only* matching benchmarks in the language's latest snapshot while preserving untouched benchmarks from prior commits.
+* **Cross-Language 1v1 (`compare-1v1`):** Emit JSONL from non-Odin harnesses with matching exact `full_name` (`"group::bench"` or `"group::bench[param]/tN"`), `lang`, `commit`, `run_id`, `ops`, `samples_batch_ns` (or `samples_ns`), and `bytes_used` (mapped to `footprint_bytes`). Ingest via `hugi ingest results.jsonl` and run `hugi compare-1v1 --langs odin,zig`—mismatched `footprint_bytes` between languages are flagged `[MISMATCH]`.
 
 ---
 
@@ -207,3 +218,6 @@ hugi export --db benchmarks/history.hugidb --all-runs --out raw_runs.jsonl
 | Combining `--all-commits` with `--all-runs` or `--commit` in `hugi export` | Rejected by CLI validation (`exit 1`). Pick Snapshot (default / `--commit`), `--all-commits`, or `--all-runs`. |
 | Calling `store_compact(path)` while a `Store` is still open on `path` | Close the `Store` first (`store_close(&st)`); `store_compact` atomically replaces `path` on disk. |
 | Importing `hugi_store` just to write benchmarks | Benchmark binaries only import `hugi` (`-collection:hugi` + `-collection:obench`). |
+| Using bare `import "hugi"` in a benchmark package | In Odin, an import without `:` is a relative directory import (`./hugi`). Use `import hugi "hugi:."` when `-collection:hugi` points to `.../hugi` (as in `ols.json` and `hugi run`), or `import "hugi:hugi"` when `-collection:hugi` points to the `hugi` repo root. |
+| Passing `HEAD`, `main`, or `origin/main` directly to `--baseline-commit` / `--commits` | Both flags prefix-match stored 12-char hex SHAs without invoking `git`. Expand symbolic refs first (`$(git rev-parse --short=12 HEAD)`), and pass a distinct `--commit` tag on `--overlay` trial runs so they do not pool into `HEAD`. |
+| Expecting custom `Metric`s, `median_cycles`, or OS/arch strings in `EXPORT_COLUMNS` | Custom metrics (`report_metric`/`phase_metric`), `median_cycles`, `resizes_per_op`, and environment metadata live in `.hugidb` and `hugi.Record` (and live `suite_run` output), not in the 35-column CSV/Parquet/Arrow/JSON exports. |

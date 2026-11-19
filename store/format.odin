@@ -1056,23 +1056,11 @@ _finalize_record_stats_from_samples :: proc(r: ^hugi.Record, keep_existing_mbs: 
 	if len(r.samples_batch_ns) == 0 {
 		return
 	}
-	saved_mbs := r.mb_per_sec
-	hugi.recompute_record_stats_from_samples(r)
-	if r.p50_fs > 0 {
-		ops_sec := hugi.FS_PER_SEC_F64 / f64(r.p50_fs)
-		if r.items_per_op > 0 {
-			r.items_per_sec = f64(r.items_per_op) * ops_sec
-		} else {
-			r.items_per_sec = ops_sec
-		}
-		if r.bytes_per_op > 0 {
-			r.mb_per_sec = (f64(r.bytes_per_op) * ops_sec) / (1024.0 * 1024.0)
-		} else if keep_existing_mbs {
-			r.mb_per_sec = saved_mbs
-		}
-	} else if keep_existing_mbs {
-		r.mb_per_sec = saved_mbs
+	if !keep_existing_mbs {
+		r.mb_per_sec = 0
 	}
+	hugi.recompute_record_stats_from_samples(r)
+	hugi.refresh_record_throughput(r, overwrite = true)
 }
 
 // ── CZPK\x04 Hot Packet Encoding / Decoding ──────────────────────────────────

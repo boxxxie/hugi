@@ -394,15 +394,7 @@ _obench_result_to_record :: proc(
 		}
 		recompute_record_stats_from_samples(&rec)
 	}
-	if rec.p50_fs > 0 {
-		ops_sec := FS_PER_SEC_F64 / f64(rec.p50_fs)
-		if rec.items_per_sec <= 0 {
-			rec.items_per_sec = rec.items_per_op > 0 ? f64(rec.items_per_op) * ops_sec : ops_sec
-		}
-		if rec.bytes_per_op > 0 && rec.mb_per_sec <= 0 {
-			rec.mb_per_sec = (f64(rec.bytes_per_op) * ops_sec) / (1024.0 * 1024.0)
-		}
-	}
+	refresh_record_throughput(&rec, overwrite = false)
 	for i in 0 ..< st.custom_metrics_count {
 		rec.metrics[i] = Metric {
 			unit  = strings.clone(st.custom_metrics[i].unit, allocator),

@@ -467,13 +467,7 @@ _execute_pipeline :: proc(
 		}
 
 		recompute_record_stats_from_samples(&r)
-		if r.p50_fs > 0 {
-			ops_sec := FS_PER_SEC_F64 / f64(r.p50_fs)
-			r.items_per_sec = ops_sec
-			if r.bytes_per_op > 0 {
-				r.mb_per_sec = (f64(r.bytes_per_op) * ops_sec) / (1024.0 * 1024.0)
-			}
-		}
+		refresh_record_throughput(&r, overwrite = true)
 		if len(acc.samples_cycles) > 0 {
 			cyc := slice.clone(acc.samples_cycles[:], context.temp_allocator)
 			slice.sort(cyc)

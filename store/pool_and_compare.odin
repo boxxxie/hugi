@@ -3,7 +3,6 @@ package hugi_store
 import obench "../deps/obench/obench"
 import hugi "../hugi"
 import "core:math"
-import "core:slice"
 import "core:strings"
 
 Pooled_Record :: struct {
@@ -176,55 +175,27 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 	}
 
 	if len(pr.samples_fs) > 0 {
-		sorted := slice.clone(pr.samples_fs[:], context.temp_allocator)
-		slice.sort(sorted)
-		n := len(sorted)
-		pr.samples = n
-		pr.min_fs = sorted[0]
-		pr.max_fs = sorted[n - 1]
-		pr.p25_fs = hugi.percentile_sorted_fs(sorted, 25)
-		pr.p50_fs = hugi.percentile_sorted_fs(sorted, 50)
-		pr.p75_fs = hugi.percentile_sorted_fs(sorted, 75)
-		pr.p95_fs = hugi.percentile_sorted_fs(sorted, 95)
-		pr.p99_fs = hugi.percentile_sorted_fs(sorted, 99)
-		pr.iqr_fs = pr.p75_fs - pr.p25_fs
-
-		sum_fs: i128 = 0
-		for v in sorted {
-			sum_fs += i128(v)
-		}
-		pr.mean_fs = i64((sum_fs + i128(n / 2)) / i128(n))
-
-		var_sum := 0.0
-		for v in sorted {
-			d := f64(v - pr.mean_fs)
-			var_sum += d * d
-		}
-		if n > 1 {
-			std_f := math.sqrt(var_sum / f64(n - 1))
-			pr.std_dev_fs = i64(math.round(std_f))
-			pr.ci95_fs = i64(
-				math.round(obench.t_critical_975(f64(n - 1)) * (std_f / math.sqrt(f64(n)))),
-			)
-			if pr.mean_fs > 0 {
-				pr.cv_pct = (std_f / f64(pr.mean_fs)) * 100.0
-			}
-		}
-
-		abs_devs := make([]i64, n, context.temp_allocator)
-		for v, i in sorted {
-			abs_devs[i] = abs(v - pr.p50_fs)
-		}
-		slice.sort(abs_devs)
-		pr.mad_fs = hugi.percentile_sorted_fs(abs_devs, 50)
-
-		delete(abs_devs, context.temp_allocator)
-		delete(sorted, context.temp_allocator)
+		st := hugi.compute_stats_fs(pr.samples_fs[:], context.temp_allocator)
+		pr.samples = st.samples
+		pr.min_fs = st.min_fs
+		pr.p25_fs = st.p25_fs
+		pr.p50_fs = st.p50_fs
+		pr.p75_fs = st.p75_fs
+		pr.p95_fs = st.p95_fs
+		pr.p99_fs = st.p99_fs
+		pr.max_fs = st.max_fs
+		pr.mean_fs = st.mean_fs
+		pr.std_dev_fs = st.std_dev_fs
+		pr.ci95_fs = st.ci95_fs
+		pr.cv_pct = st.cv_pct
+		pr.iqr_fs = st.iqr_fs
+		pr.mad_fs = st.mad_fs
 
 		if pr.p50_fs > 0 {
-			pr.ops_per_sec = hugi.FS_PER_SEC_F64 / f64(pr.p50_fs)
+			ops_s, _, mb_s := hugi.compute_throughput_from_p50(pr.p50_fs, pr.bytes_per_op)
+			pr.ops_per_sec = ops_s
 			if pr.bytes_per_op > 0 {
-				pr.mb_per_sec = (f64(pr.bytes_per_op) * pr.ops_per_sec) / (1024.0 * 1024.0)
+				pr.mb_per_sec = mb_s
 			}
 		}
 	} else {
@@ -358,6 +329,52 @@ comparison_report_destroy :: proc(rep: ^Comparison_Report, allocator := context.
 	rep^ = {}
 }
 
+@(private)
+_Significance_Result :: struct {
+	welch_t:        f64,
+	welch_df:       f64,
+	p_value:        f64,
+	used_rank_test: bool,
+	stat_diff:      bool,
+}
+
+@(private, require_results)
+_compare_significance :: proc(
+	mean_a, std_a: i64,
+	n_a: int,
+	samples_a: []i64,
+	mean_b, std_b: i64,
+	n_b: int,
+	samples_b: []i64,
+) -> _Significance_Result {
+	wt, wdf := obench.welch_test(f64(mean_a), f64(std_a), n_a, f64(mean_b), f64(std_b), n_b)
+	welch_sig := wdf > 0 && abs(wt) >= obench.t_critical_975(wdf)
+
+	used_rank := len(samples_a) >= 2 && len(samples_b) >= 2
+	p_val := 1.0
+	stat_diff := welch_sig
+	if used_rank {
+		a_f64 := _samples_fs_as_f64(samples_a, context.temp_allocator)
+		b_f64 := _samples_fs_as_f64(samples_b, context.temp_allocator)
+		_, _, p_val = obench.mann_whitney_u(a_f64, b_f64, context.temp_allocator)
+		delete(a_f64, context.temp_allocator)
+		delete(b_f64, context.temp_allocator)
+		if len(samples_a) >= 5 && len(samples_b) >= 5 {
+			stat_diff = p_val < 0.05
+		} else {
+			stat_diff = p_val < 0.05 || welch_sig
+		}
+	}
+
+	return _Significance_Result {
+		welch_t = wt,
+		welch_df = wdf,
+		p_value = p_val,
+		used_rank_test = used_rank,
+		stat_diff = stat_diff,
+	}
+}
+
 /*
 Compares two pooled record sets using Mann-Whitney U (`p < 0.05` when both sides have >= 2
 samples) alongside Welch's `t`-test with Student's `t` critical values (never hardcoded normal `z`).
@@ -390,35 +407,18 @@ compare_records :: proc(
 
 		delta_pct := (f64(c.p50_fs - b.p50_fs) / f64(b.p50_fs)) * 100.0
 		speedup := f64(b.p50_fs) / f64(c.p50_fs)
-		wt, wdf := obench.welch_test(
-			f64(c.mean_fs),
-			f64(c.std_dev_fs),
+		sig := _compare_significance(
+			c.mean_fs,
+			c.std_dev_fs,
 			c.samples,
-			f64(b.mean_fs),
-			f64(b.std_dev_fs),
+			c.samples_fs[:],
+			b.mean_fs,
+			b.std_dev_fs,
 			b.samples,
+			b.samples_fs[:],
 		)
 
-		used_rank := len(b.samples_fs) >= 2 && len(c.samples_fs) >= 2
-		p_val := 1.0
-		stat_diff := false
-		if used_rank {
-			c_f64 := _samples_fs_as_f64(c.samples_fs[:], context.temp_allocator)
-			b_f64 := _samples_fs_as_f64(b.samples_fs[:], context.temp_allocator)
-			_, _, p_val = obench.mann_whitney_u(c_f64, b_f64, context.temp_allocator)
-			delete(c_f64, context.temp_allocator)
-			delete(b_f64, context.temp_allocator)
-			// With n >= 2 per side, check both rank separation and Welch t on small N.
-			if len(b.samples_fs) >= 5 && len(c.samples_fs) >= 5 {
-				stat_diff = p_val < 0.05
-			} else {
-				stat_diff = p_val < 0.05 || (wdf > 0 && abs(wt) >= obench.t_critical_975(wdf))
-			}
-		} else {
-			stat_diff = wdf > 0 && abs(wt) >= obench.t_critical_975(wdf)
-		}
-
-		is_sig := stat_diff && abs(delta_pct) >= threshold_pct
+		is_sig := sig.stat_diff && abs(delta_pct) >= threshold_pct
 		verdict := Verdict.Unchanged
 		if is_sig && delta_pct < 0 {
 			verdict = .Faster
@@ -448,10 +448,10 @@ compare_records :: proc(
 				cand_samples = c.samples,
 				delta_pct = delta_pct,
 				speedup = speedup,
-				welch_t = wt,
-				welch_df = wdf,
-				used_rank_test = used_rank,
-				p_value = p_val,
+				welch_t = sig.welch_t,
+				welch_df = sig.welch_df,
+				used_rank_test = sig.used_rank_test,
+				p_value = sig.p_value,
 				is_significant = is_sig,
 				verdict = verdict,
 				base_allocs = b.allocs_per_op,
@@ -565,36 +565,19 @@ compare_1v1_langs :: proc(
 
 		a_med := f64(max(a.p50_fs, 1))
 		b_med := f64(max(b.p50_fs, 1))
-		wt, wdf := obench.welch_test(
-			f64(a.mean_fs),
-			f64(a.std_dev_fs),
+		sig := _compare_significance(
+			a.mean_fs,
+			a.std_dev_fs,
 			a.samples,
-			f64(b.mean_fs),
-			f64(b.std_dev_fs),
+			a.samples_fs[:],
+			b.mean_fs,
+			b.std_dev_fs,
 			b.samples,
+			b.samples_fs[:],
 		)
-		p_val := 1.0
-		stat_diff := false
-		if len(a.samples_fs) >= 5 && len(b.samples_fs) >= 5 {
-			a_f64 := _samples_fs_as_f64(a.samples_fs[:], context.temp_allocator)
-			b_f64 := _samples_fs_as_f64(b.samples_fs[:], context.temp_allocator)
-			_, _, p_val = obench.mann_whitney_u(a_f64, b_f64, context.temp_allocator)
-			delete(a_f64, context.temp_allocator)
-			delete(b_f64, context.temp_allocator)
-			stat_diff = p_val < 0.05
-		} else {
-			if len(a.samples_fs) >= 2 && len(b.samples_fs) >= 2 {
-				a_f64 := _samples_fs_as_f64(a.samples_fs[:], context.temp_allocator)
-				b_f64 := _samples_fs_as_f64(b.samples_fs[:], context.temp_allocator)
-				_, _, p_val = obench.mann_whitney_u(a_f64, b_f64, context.temp_allocator)
-				delete(a_f64, context.temp_allocator)
-				delete(b_f64, context.temp_allocator)
-			}
-			stat_diff = wdf > 0 && abs(wt) >= obench.t_critical_975(wdf)
-		}
 
 		rel_diff := abs(a_med - b_med) / min(a_med, b_med) * 100.0
-		is_sig := stat_diff && rel_diff >= threshold_pct
+		is_sig := sig.stat_diff && rel_diff >= threshold_pct
 
 		faster := "tie"
 		ratio := 1.0
@@ -632,8 +615,8 @@ compare_1v1_langs :: proc(
 				faster_lang = strings.clone(faster, allocator),
 				speedup_ratio = ratio,
 				is_significant = is_sig,
-				p_value = p_val,
-				welch_t = wt,
+				p_value = sig.p_value,
+				welch_t = sig.welch_t,
 				a_footprint = a.footprint_bytes,
 				b_footprint = b.footprint_bytes,
 				footprint_mismatch = fp_mismatch,

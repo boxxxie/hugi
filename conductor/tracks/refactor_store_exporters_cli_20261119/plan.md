@@ -6,18 +6,18 @@ Follow [workflow.md](../../workflow.md): keep `hugi/` isolated from `xitdb`/`ska
 
 ## Phase 1: Core Math, Significance Parity, and `hugi/` Importer Split
 
-- [ ] Task: Add regression test for small-sample (`2 <= n < 5`) significance parity
-    - [ ] Add a `@(test)` case in `tests/hugi_test.odin` exercising `n = 3` or `n = 4` separated sample sets where `compare_records` and `compare_1v1_langs` must agree on `is_significant` (`MWU p < 0.05 || Welch`).
-- [ ] Task: Extract shared femtosecond stats and throughput math in `hugi/`
-    - [ ] Define `Stats_FS`, `compute_stats_fs`, and `compute_throughput_from_p50` (or `refresh_record_throughput`) in `hugi/packet.odin`.
-    - [ ] Refactor `hugi.recompute_record_stats_from_samples`, `_obench_result_to_record` (`hugi/hugi.odin`), `_execute_pipeline` (`hugi/phase.odin`), `read_obench_json_packets` (`hugi/packet.odin`), `_finalize_record_stats_from_samples` (`store/format.odin`), and `_pool_raw_group` (`store/pool_and_compare.odin`) to call the shared helpers.
-- [ ] Task: Unify statistical significance testing in `store/pool_and_compare.odin`
-    - [ ] Extract `@(private)` `_compare_significance` implementing the canonical `compare_records` rule (`n >= 5`: `p_val < 0.05`; `2 <= n < 5`: `p_val < 0.05 || welch_sig`; `n < 2`: `welch_sig`).
-    - [ ] Update both `compare_records` and `compare_1v1_langs` to call `_compare_significance`, eliminating duplicated `_samples_fs_as_f64` / `mann_whitney_u` / `welch_test` blocks.
-- [ ] Task: Split external JSON/JSONL importers out of `hugi/packet.odin`
-    - [ ] Move `read_obench_json_packets`, `_Jsonl_Row`, and `read_jsonl_packets` into `hugi/importers.odin` with zero functional change to external `.json` / `.jsonl` parsing.
-    - [ ] Verify `odin check hugi -no-entry-point -collection:obench=./deps/obench/obench -vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-errors -disallow-do` passes cleanly.
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Core Math, Significance Parity, and hugi/ Importer Split' (Protocol in workflow.md)
+- [x] Task: Add regression test for small-sample (`2 <= n < 5`) significance parity
+    - [x] Add a `@(test)` case in `tests/hugi_test.odin` exercising `n = 3` or `n = 4` separated sample sets where `compare_records` and `compare_1v1_langs` must agree on `is_significant` (`MWU p < 0.05 || Welch`).
+- [x] Task: Extract shared femtosecond stats and throughput math in `hugi/`
+    - [x] Define `Stats_FS`, `compute_stats_fs`, and `compute_throughput_from_p50` (or `refresh_record_throughput`) in `hugi/packet.odin`.
+    - [x] Refactor `hugi.recompute_record_stats_from_samples`, `_obench_result_to_record` (`hugi/hugi.odin`), `_execute_pipeline` (`hugi/phase.odin`), `read_obench_json_packets` (`hugi/packet.odin`), `_finalize_record_stats_from_samples` (`store/format.odin`), and `_pool_raw_group` (`store/pool_and_compare.odin`) to call the shared helpers.
+- [x] Task: Unify statistical significance testing in `store/pool_and_compare.odin`
+    - [x] Extract `@(private)` `_compare_significance` implementing the canonical `compare_records` rule (`n >= 5`: `p_val < 0.05`; `2 <= n < 5`: `p_val < 0.05 || welch_sig`; `n < 2`: `welch_sig`).
+    - [x] Update both `compare_records` and `compare_1v1_langs` to call `_compare_significance`, eliminating duplicated `_samples_fs_as_f64` / `mann_whitney_u` / `welch_test` blocks.
+- [x] Task: Split external JSON/JSONL importers out of `hugi/packet.odin`
+    - [x] Move `read_obench_json_packets`, `_Jsonl_Row`, and `read_jsonl_packets` into `hugi/importers.odin` with zero functional change to external `.json` / `.jsonl` parsing.
+    - [x] Verify `odin check hugi -no-entry-point -collection:obench=./deps/obench/obench -vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-errors -disallow-do` passes cleanly.
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Core Math, Significance Parity, and hugi/ Importer Split' (Protocol in workflow.md)
 
 ---
 

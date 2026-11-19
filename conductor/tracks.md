@@ -9,5 +9,5 @@ This file tracks all major features, refactors, and chores in `hugi`.
 
 ---
 
-- [ ] **Track: Refactor Store, Exporters, CLI, and Test Suite for Modularity and Schema Consistency (`refactor_store_exporters_cli_20261119`)**
+- [~] **Track: Refactor Store, Exporters, CLI, and Test Suite for Modularity and Schema Consistency (`refactor_store_exporters_cli_20261119`)**
   *Link: [./tracks/refactor_store_exporters_cli_20261119/](./tracks/refactor_store_exporters_cli_20261119/)*

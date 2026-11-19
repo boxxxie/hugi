@@ -32,6 +32,7 @@ check:
 test:
 	@mkdir -p .tmp
 	$(ODIN) test tests -out:.tmp/hugi_tests $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)
+	$(ODIN) test cmd/hugi -out:.tmp/hugi_cli_tests $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)
 
 example: build
 	@mkdir -p .tmp

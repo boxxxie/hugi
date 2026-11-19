@@ -73,19 +73,19 @@ Follow [workflow.md](../../workflow.md): keep `hugi/` isolated from `xitdb`/`ska
 
 ## Phase 5: Modularize `cmd/hugi/` CLI and Add CLI Unit Tests
 
-- [ ] Task: Extract shared CLI argument and store helpers (`cmd/hugi/cli_args.odin`)
-    - [ ] Move `_resolve_db_path`, `_parse_flag_kv`, `_consume_value`, `_split_range`, `_file_has_packet_magic`, plus extracted `_infer_export_format` and `_open_store_or_err` into `cmd/hugi/cli_args.odin`.
-    - [ ] Add reusable shared flag parsing helpers covering common flags (`--db`, `--lang`, `--commit`, `--filter`/`-f`, `--threshold`, `--help`/`-h`) across subcommands.
-- [ ] Task: Split subcommands out of `cmd/hugi/main.odin`
-    - [ ] Extract `cmd/hugi/cmd_run.odin`: unify upward parent-directory walk in `_resolve_hugi_repo_root`, keep `ols.json` discovery clean, and decompose the `320`-line `_cmd_run` into build, execute, ingest, and baseline-compare helpers.
-    - [ ] Extract `cmd/hugi/cmd_ingest.odin`: add `free_all(context.temp_allocator)` per ingested file so large batch ingests keep scratch memory bounded.
-    - [ ] Extract `cmd/hugi/cmd_query.odin`: move `_cmd_history`, `_cmd_inspect`, `_cmd_compare` (removing dead `_ = use_last` and consolidating the `4` repeated `store_load_pooled_records` branches), and `_cmd_compare_1v1`.
-    - [ ] Extract `cmd/hugi/cmd_export.odin`: move `_cmd_export` and `_cmd_compact`, using `_infer_export_format` and `_open_store_or_err`.
-    - [ ] Keep `cmd/hugi/main.odin` minimal (`VERSION`, `_print_help`, `main` dispatch).
-- [ ] Task: Add CLI unit tests (`cmd/hugi/cli_test.odin`) and update `Makefile`
-    - [ ] Add `@(test)` coverage in `cmd/hugi/cli_test.odin` for `_parse_flag_kv`, `_consume_value`, `_split_range`, `_infer_export_format`, `_resolve_db_path`, `_collection_name` / `_is_reserved_collection`, `ols.json` collection & build-flag discovery, and export flag validation (`--all-commits` + `--all-runs` / `--commit` rejection).
-    - [ ] Update `Makefile` `test` target to run `$(ODIN) test cmd/hugi -out:.tmp/hugi_cli_tests $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)` alongside `$(ODIN) test tests`.
-- [ ] Task: Conductor - User Manual Verification 'Phase 5: Modularize cmd/hugi/ CLI and Add CLI Unit Tests' (Protocol in workflow.md)
+- [x] Task: Extract shared CLI argument and store helpers (`cmd/hugi/cli_args.odin`)
+    - [x] Move `_resolve_db_path`, `_parse_flag_kv`, `_consume_value`, `_split_range`, `_file_has_packet_magic`, plus extracted `_infer_export_format` and `_open_store_or_err` into `cmd/hugi/cli_args.odin`.
+    - [x] Add reusable shared flag parsing helpers covering common flags (`--db`, `--lang`, `--commit`, `--filter`/`-f`, `--threshold`, `--help`/`-h`) across subcommands.
+- [x] Task: Split subcommands out of `cmd/hugi/main.odin`
+    - [x] Extract `cmd/hugi/cmd_run.odin`: unify upward parent-directory walk in `_resolve_hugi_repo_root`, keep `ols.json` discovery clean, and decompose the `320`-line `_cmd_run` into build, execute, ingest, and baseline-compare helpers.
+    - [x] Extract `cmd/hugi/cmd_ingest.odin`: add `free_all(context.temp_allocator)` per ingested file so large batch ingests keep scratch memory bounded.
+    - [x] Extract `cmd/hugi/cmd_query.odin`: move `_cmd_history`, `_cmd_inspect`, `_cmd_compare` (removing dead `_ = use_last` and consolidating the `4` repeated `store_load_pooled_records` branches), and `_cmd_compare_1v1`.
+    - [x] Extract `cmd/hugi/cmd_export.odin`: move `_cmd_export` and `_cmd_compact`, using `_infer_export_format` and `_open_store_or_err`.
+    - [x] Keep `cmd/hugi/main.odin` minimal (`VERSION`, `_print_help`, `main` dispatch).
+- [x] Task: Add CLI unit tests (`cmd/hugi/cli_test.odin`) and update `Makefile`
+    - [x] Add `@(test)` coverage in `cmd/hugi/cli_test.odin` for `_parse_flag_kv`, `_consume_value`, `_split_range`, `_infer_export_format`, `_resolve_db_path`, `_collection_name` / `_is_reserved_collection`, `ols.json` collection & build-flag discovery, and export flag validation (`--all-commits` + `--all-runs` / `--commit` rejection).
+    - [x] Update `Makefile` `test` target to run `$(ODIN) test cmd/hugi -out:.tmp/hugi_cli_tests $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)` alongside `$(ODIN) test tests`.
+- [x] Task: Conductor - User Manual Verification 'Phase 5: Modularize cmd/hugi/ CLI and Add CLI Unit Tests' (Protocol in workflow.md)
 
 ---
 

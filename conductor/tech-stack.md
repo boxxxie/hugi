@@ -17,5 +17,5 @@
 - **`deps/skadi`:** Columnar table engine (`feat/ipc-lz4-body-compression`) providing Arrow IPC / Feather v2 serialization with `LZ4_FRAME` body compression and native `Decimal64_Type` / `Decimal128_Type`.
 
 ## Vendor / Core Libraries & Verification Tooling
-- **Compression:** `vendor:zlib` (used for `HCAT\x01`, `CZPK\x04`, `CZCH\x02`, `BU` `U64_Codec` streams, and Parquet GZIP pages). Note: `vendor:compress/lz4` in `store/codec.odin` is slated for removal alongside `BF` float sample codecs; `skadi` handles Arrow IPC `LZ4_FRAME` internally.
+- **Compression:** `vendor:zlib` (used for `HCAT\x01`, `CZPK\x04`, `CZCH\x02`, `BU` `U64_Codec` streams, and Parquet GZIP pages). `skadi` handles Arrow IPC `LZ4_FRAME` internally.
 - **External Interop Verification:** DuckDB CLI (`duckdb`) for `.parquet` schema/query verification and Python `uv run --with pyarrow --with duckdb` for `.arrow` + `.parquet` `Decimal64(18, 6)` verification.

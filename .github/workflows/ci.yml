@@ -33,7 +33,7 @@ jobs:
       - name: Setup Odin compiler
         uses: laytan/setup-odin@v2
         with:
-          release: latest
+          release: dev-2026-10
           token: ${{ secrets.GITHUB_TOKEN }}
           cache: false
 
@@ -78,7 +78,7 @@ jobs:
       - name: Setup Odin compiler
         uses: laytan/setup-odin@v2
         with:
-          release: latest
+          release: dev-2026-10
           token: ${{ secrets.GITHUB_TOKEN }}
           cache: false
 

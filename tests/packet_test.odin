@@ -301,3 +301,172 @@ test_packet_env_trailer_roundtrip_and_compat :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, len(warns), 3)
 }
+
+@(test)
+test_suite_destroy_idempotent_and_config_survives_temp_reset :: proc(t: ^testing.T) {
+	cfg := hugi.default_suite_config()
+	cfg.quiet = true
+	cfg.runs = 2
+	cfg.warmup = 0
+	cfg.obench_cfg.sample_count = 3
+	cfg.obench_cfg.warmup_time = 0
+	cfg.obench_cfg.fixed_batch_size = 1
+
+	noise := make([]u8, 256, context.temp_allocator)
+	for &b in noise {
+		b = 0xAA
+	}
+	free_all(context.temp_allocator)
+	noise2 := make([]u8, 256, context.temp_allocator)
+	for &b in noise2 {
+		b = 0x55
+	}
+
+	s := hugi.suite_create("temp_and_destroy_test", cfg)
+	testing.expect(t, s.config.commit != "", "suite_create must resolve commit on s.allocator")
+	testing.expect(t, s.config.run_id != "", "suite_create must resolve run_id on s.allocator")
+
+	hugi.bench(&s, "noop", proc(b: ^hugi.Bencher) {
+		for hugi.step(b) {
+			_ = make([]u8, 64, context.temp_allocator)
+			free_all(context.temp_allocator)
+			_ = hugi.black_box(1)
+		}
+	})
+	hugi.group_pipeline(&s, "pipe", proc(p: ^hugi.Pipeline) {
+		ph := hugi.phase_begin(p, "work", ops = 1, zero_alloc = true)
+		_ = hugi.black_box(42)
+		hugi.phase_end(ph)
+	})
+
+	testing.expect(t, hugi.suite_execute(&s), "suite_execute should succeed")
+	testing.expect_value(t, len(s.last_packet.records), 2)
+
+	hugi.suite_destroy(&s)
+	hugi.suite_destroy(&s)
+}
+
+@(test)
+test_nested_pipeline_phases_alloc_check :: proc(t: ^testing.T) {
+	cfg := hugi.default_suite_config()
+	cfg.quiet = true
+	cfg.runs = 2
+	cfg.warmup = 0
+
+	s := hugi.suite_create("nested_phase_alloc_test", cfg)
+	defer hugi.suite_destroy(&s)
+
+	hugi.group_pipeline(&s, "nested", proc(p: ^hugi.Pipeline) {
+		outer := hugi.phase_begin(p, "outer_allocs", ops = 1, zero_alloc = true)
+		b1 := make([]u8, 64)
+		_ = hugi.black_box(b1[0])
+		delete(b1)
+
+		inner := hugi.phase_begin(p, "inner_clean", ops = 1, zero_alloc = true)
+		_ = hugi.black_box(7)
+		hugi.phase_end(inner)
+
+		b2 := make([]u8, 128)
+		_ = hugi.black_box(b2[0])
+		delete(b2)
+		hugi.phase_end(outer)
+
+		outer2 := hugi.phase_begin(p, "outer_propagates", ops = 1, zero_alloc = true)
+		inner2 := hugi.phase_begin(p, "inner_allocs", ops = 1, zero_alloc = true)
+		b3 := make([]u8, 96)
+		_ = hugi.black_box(b3[0])
+		delete(b3)
+		hugi.phase_end(inner2)
+		hugi.phase_end(outer2)
+	})
+
+	ok := hugi.suite_execute(&s)
+	testing.expect(t, !ok, "outer zero_alloc violations should fail suite")
+	testing.expect_value(t, len(s.last_packet.records), 4)
+	if len(s.last_packet.records) == 4 {
+		r_outer := s.last_packet.records[0]
+		r_inner := s.last_packet.records[1]
+		r_outer2 := s.last_packet.records[2]
+		r_inner2 := s.last_packet.records[3]
+
+		testing.expect_value(t, r_outer.name, "outer_allocs")
+		testing.expect(t, r_outer.zero_alloc_failed, "outer_allocs must detect pre/post allocs")
+		testing.expect_value(t, r_outer.allocs_per_op, 2.0)
+		testing.expect_value(t, r_outer.alloc_bytes_per_op, 192.0)
+
+		testing.expect_value(t, r_inner.name, "inner_clean")
+		testing.expect(t, !r_inner.zero_alloc_failed, "inner_clean must remain clean")
+		testing.expect_value(t, r_inner.allocs_per_op, 0.0)
+		testing.expect_value(t, r_inner.alloc_bytes_per_op, 0.0)
+
+		testing.expect_value(t, r_outer2.name, "outer_propagates")
+		testing.expect(t, r_outer2.zero_alloc_failed, "outer_propagates must observe inner alloc")
+		testing.expect_value(t, r_outer2.allocs_per_op, 1.0)
+		testing.expect_value(t, r_outer2.alloc_bytes_per_op, 96.0)
+
+		testing.expect_value(t, r_inner2.name, "inner_allocs")
+		testing.expect(t, r_inner2.zero_alloc_failed, "inner_allocs must fail zero_alloc")
+		testing.expect_value(t, r_inner2.allocs_per_op, 1.0)
+		testing.expect_value(t, r_inner2.alloc_bytes_per_op, 96.0)
+	}
+}
+
+@(test)
+test_decode_record_truncated_metric_no_leak :: proc(t: ^testing.T) {
+	rec := hugi.Record {
+		rank             = 1,
+		group_name       = "core",
+		name             = "m",
+		full_name        = "core::m",
+		ops_per_sample   = 1,
+		samples          = 1,
+		error            = "",
+		metrics          = make([dynamic]hugi.Metric, 0, 1, context.temp_allocator),
+		samples_batch_ns = make([dynamic]u64, 0, 1, context.temp_allocator),
+	}
+	append(&rec.metrics, hugi.Metric{unit = "hit%", value = 99.5})
+	append(&rec.samples_batch_ns, u64(100))
+
+	raw := hugi.encode_record_bytes(rec, true, context.temp_allocator)
+	trunc := raw[:len(raw) - 16]
+	dec, ok := hugi.decode_record_bytes(trunc, context.allocator)
+	defer hugi.record_destroy(&dec, context.allocator)
+	testing.expect(t, !ok, "truncated metric value must fail decode without leaking unit string")
+}
+
+@(test)
+test_jsonl_summary_only_preserves_stats :: proc(t: ^testing.T) {
+	tmp, mk_err := os.make_directory_temp("", "hugi-jsonl-sum-*", context.allocator)
+	testing.expectf(t, mk_err == nil && tmp != "", "create temp dir: %v", mk_err)
+	if mk_err != nil || tmp == "" {
+		return
+	}
+	defer {
+		_ = os.remove_all(tmp)
+		delete(tmp)
+	}
+
+	path := strings.concatenate({tmp, "/summary_only.jsonl"}, context.temp_allocator)
+	payload :=
+		`{"rank":1,"group":"kv","lang":"zig","commit":"sum001","run_id":"sum-z1","name":"kv::sum","runs":12,"warmup":2,"median_ns":42.345,"min_ns":40.0,"max_ns":50.0,"p95_ns":48.0,"p99_ns":49.0,"mean_ns":43.0,"stddev_ns":2.5,"cv_pct":5.8,"iqr_ns":3.0}` +
+		"\n"
+	testing.expect(t, os.write_entire_file(path, transmute([]u8)payload) == nil)
+
+	pkts, ok := hugi.read_jsonl_packets(path)
+	defer hugi.packets_destroy(pkts)
+	testing.expect(t, ok, "summary-only jsonl should parse")
+	if ok && len(pkts) == 1 && len(pkts[0].records) == 1 {
+		r := pkts[0].records[0]
+		testing.expect_value(t, len(r.samples_batch_ns), 0)
+		testing.expect_value(t, r.samples, 12)
+		testing.expect_value(t, r.p50_fs, i64(42_345_000))
+		testing.expect_value(t, r.min_fs, i64(40_000_000))
+		testing.expect_value(t, r.max_fs, i64(50_000_000))
+		testing.expect_value(t, r.p95_fs, i64(48_000_000))
+		testing.expect_value(t, r.p99_fs, i64(49_000_000))
+		testing.expect_value(t, r.mean_fs, i64(43_000_000))
+		testing.expect_value(t, r.std_dev_fs, i64(2_500_000))
+		testing.expect_value(t, r.cv_pct, 5.8)
+		testing.expect_value(t, r.iqr_fs, i64(3_000_000))
+	}
+}

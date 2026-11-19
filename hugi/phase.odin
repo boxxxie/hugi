@@ -29,6 +29,54 @@ _Phase_Pass_Mode :: enum u8 {
 
 MAX_PHASE_DEPTH :: 8
 
+@(private = "file")
+_Alloc_Counter_Snap :: struct {
+	alloc_count:          u64,
+	resize_count:         u64,
+	bytes_allocated:      u64,
+	current_bytes:        i64,
+	peak_bytes:           i64,
+	zero_alloc_violated:  bool,
+	first_violation_loc:  runtime.Source_Code_Location,
+	first_violation_size: int,
+}
+
+@(private = "file")
+_snap_merge_snap :: proc "contextless" (dst: ^_Alloc_Counter_Snap, src: _Alloc_Counter_Snap) {
+	dst.peak_bytes = max(dst.peak_bytes, dst.current_bytes + src.peak_bytes)
+	dst.current_bytes += src.current_bytes
+	dst.peak_bytes = max(dst.peak_bytes, dst.current_bytes)
+	dst.alloc_count += src.alloc_count
+	dst.resize_count += src.resize_count
+	dst.bytes_allocated += src.bytes_allocated
+	if !dst.zero_alloc_violated && src.zero_alloc_violated {
+		dst.zero_alloc_violated = true
+		dst.first_violation_loc = src.first_violation_loc
+		dst.first_violation_size = src.first_violation_size
+	}
+}
+
+@(private = "file")
+_snap_merge_counter :: proc "contextless" (
+	dst: ^_Alloc_Counter_Snap,
+	c: ^obench.Counting_Allocator,
+) {
+	if c == nil {
+		return
+	}
+	snap := _Alloc_Counter_Snap {
+		alloc_count          = intrinsics.atomic_load_explicit(&c.alloc_count, .Relaxed),
+		resize_count         = intrinsics.atomic_load_explicit(&c.resize_count, .Relaxed),
+		bytes_allocated      = intrinsics.atomic_load_explicit(&c.bytes_allocated, .Relaxed),
+		current_bytes        = intrinsics.atomic_load_explicit(&c.current_bytes, .Relaxed),
+		peak_bytes           = intrinsics.atomic_load_explicit(&c.peak_bytes, .Relaxed),
+		zero_alloc_violated  = intrinsics.atomic_load_explicit(&c.zero_alloc_violated, .Relaxed),
+		first_violation_loc  = c.first_violation_loc,
+		first_violation_size = c.first_violation_size,
+	}
+	_snap_merge_snap(dst, snap)
+}
+
 Phase :: struct {
 	pipeline:        ^Pipeline,
 	slot_idx:        int,
@@ -41,6 +89,8 @@ Phase :: struct {
 	metrics:         [MAX_METRICS]Metric,
 	metrics_count:   int,
 	_metric_buf:     [MAX_METRICS][obench.MAX_METRIC_UNIT_LEN]u8,
+	_heap_acc:       _Alloc_Counter_Snap,
+	_temp_acc:       _Alloc_Counter_Snap,
 	active:          bool,
 }
 
@@ -133,7 +183,8 @@ phase_begin :: proc(
 		acc.zero_alloc = acc.zero_alloc || eff_zero
 	}
 
-	ph := &p._phase_stack[p._stack_depth]
+	parent_depth := p._stack_depth
+	ph := &p._phase_stack[parent_depth]
 	p._stack_depth += 1
 	ph^ = Phase {
 		pipeline     = p,
@@ -148,6 +199,13 @@ phase_begin :: proc(
 	switch p._mode {
 	case .Warmup:
 	case .Alloc_Check:
+		if parent_depth > 0 {
+			obench.counting_allocator_set_paused(p._heap_counter, true)
+			obench.counting_allocator_set_paused(p._temp_counter, true)
+			parent := &p._phase_stack[parent_depth - 1]
+			_snap_merge_counter(&parent._heap_acc, p._heap_counter)
+			_snap_merge_counter(&parent._temp_acc, p._temp_counter)
+		}
 		obench.counting_allocator_reset(p._heap_counter)
 		obench.counting_allocator_reset(p._temp_counter)
 		p._heap_counter.enforce_zero_allocs = true
@@ -199,28 +257,33 @@ phase_end :: proc(ph: ^Phase) {
 		append(&acc.samples_batch_ns, adj_batch_ns)
 		append(&acc.samples_cycles, max(f64(cyc) - p.clock_overhead_cycles, 0.0) / f64(ph.ops))
 	case .Alloc_Check:
+		_snap_merge_counter(&ph._heap_acc, p._heap_counter)
+		_snap_merge_counter(&ph._temp_acc, p._temp_counter)
+
 		ops_f := f64(max(ph.ops, 1))
-		hc := p._heap_counter
-		tc := p._temp_counter
-		ac := intrinsics.atomic_load_explicit(&hc.alloc_count, .Relaxed)
-		rc := intrinsics.atomic_load_explicit(&hc.resize_count, .Relaxed)
-		ab := intrinsics.atomic_load_explicit(&hc.bytes_allocated, .Relaxed)
-		pk := intrinsics.atomic_load_explicit(&hc.peak_bytes, .Relaxed)
-		acc.allocs_per_op = f64(ac + rc) / ops_f
-		acc.resizes_per_op = f64(rc) / ops_f
-		acc.alloc_bytes_per_op = f64(ab) / ops_f
-		acc.peak_heap_bytes = pk
+		acc.allocs_per_op = f64(ph._heap_acc.alloc_count + ph._heap_acc.resize_count) / ops_f
+		acc.resizes_per_op = f64(ph._heap_acc.resize_count) / ops_f
+		acc.alloc_bytes_per_op = f64(ph._heap_acc.bytes_allocated) / ops_f
+		acc.peak_heap_bytes = ph._heap_acc.peak_bytes
 
-		t_ac := intrinsics.atomic_load_explicit(&tc.alloc_count, .Relaxed)
-		t_rc := intrinsics.atomic_load_explicit(&tc.resize_count, .Relaxed)
-		t_ab := intrinsics.atomic_load_explicit(&tc.bytes_allocated, .Relaxed)
-		acc.temp_allocs_per_op = f64(t_ac + t_rc) / ops_f
-		acc.temp_bytes_per_op = f64(t_ab) / ops_f
+		acc.temp_allocs_per_op = f64(ph._temp_acc.alloc_count + ph._temp_acc.resize_count) / ops_f
+		acc.temp_bytes_per_op = f64(ph._temp_acc.bytes_allocated) / ops_f
 
-		if ph.zero_alloc && intrinsics.atomic_load_explicit(&hc.zero_alloc_violated, .Relaxed) {
+		if ph.zero_alloc && ph._heap_acc.zero_alloc_violated {
 			acc.zero_alloc_failed = true
-			acc.violation_loc = hc.first_violation_loc
-			acc.violation_size = hc.first_violation_size
+			acc.violation_loc = ph._heap_acc.first_violation_loc
+			acc.violation_size = ph._heap_acc.first_violation_size
+		}
+
+		if p._stack_depth > 0 {
+			parent := &p._phase_stack[p._stack_depth - 1]
+			_snap_merge_snap(&parent._heap_acc, ph._heap_acc)
+			_snap_merge_snap(&parent._temp_acc, ph._temp_acc)
+			obench.counting_allocator_reset(p._heap_counter)
+			obench.counting_allocator_reset(p._temp_counter)
+			p._heap_counter.enforce_zero_allocs = true
+			obench.counting_allocator_set_paused(p._heap_counter, false)
+			obench.counting_allocator_set_paused(p._temp_counter, false)
 		}
 	}
 }

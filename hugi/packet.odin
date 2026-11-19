@@ -435,7 +435,11 @@ _read_record_body :: proc(rd: ^_Reader, allocator: runtime.Allocator) -> (rec: R
 	reserve(&tmp.metrics, m_count)
 	for _ in 0 ..< m_count {
 		unit := _read_str(rd, allocator) or_return
-		val := _read_f64(rd) or_return
+		val, val_ok := _read_f64(rd)
+		if !val_ok {
+			delete(unit, allocator)
+			return {}, false
+		}
 		append(&tmp.metrics, Metric{unit = unit, value = val})
 	}
 

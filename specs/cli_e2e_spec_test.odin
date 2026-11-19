@@ -496,7 +496,7 @@ spec_cli_compare_1v1_reports_winner_mismatch_and_unmatched :: proc(t: ^testing.T
 		shows_exit_code(&w, out, 0)
 	}
 
-	upon_running_cli(&w, "compare-1v1", "--db", "@db", "--langs", "odin,zig", "--commit", "cmp99")
+	upon_running_cli(&w, "compare-1v1", "--db", "@db", "--langs", "Odin,ZIG", "--commit", "cmp99")
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
 		shows_stdout_contains(&w, out, "Cross-Language 1v1: odin vs zig")

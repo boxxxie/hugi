@@ -207,6 +207,11 @@ suite_create :: proc(
 			cfg.run_id = default_run_id(context.temp_allocator)
 		}
 	}
+	if cfg.name_filter != "" &&
+	   cfg.obench_cfg.filter == "" &&
+	   !strings.contains_any(cfg.name_filter, "|,") {
+		cfg.obench_cfg.filter = cfg.name_filter
+	}
 	_clone_suite_config_strings(&cfg, allocator)
 	ob_suite := obench.suite_create(name, cfg.obench_cfg, allocator, loc)
 	return Suite {

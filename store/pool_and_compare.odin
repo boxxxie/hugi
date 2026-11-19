@@ -401,12 +401,14 @@ compare_records :: proc(
 
 	for b in base {
 		c, matched := cand_by_name[b.full_name]
-		if !matched || b.p50_fs <= 0 || c.p50_fs <= 0 {
+		if !matched || b.p50_fs < 0 || c.p50_fs < 0 {
 			continue
 		}
 
-		delta_pct := (f64(c.p50_fs - b.p50_fs) / f64(b.p50_fs)) * 100.0
-		speedup := f64(b.p50_fs) / f64(c.p50_fs)
+		b_med := f64(max(b.p50_fs, 1))
+		c_med := f64(max(c.p50_fs, 1))
+		delta_pct := (f64(c.p50_fs - b.p50_fs) / b_med) * 100.0
+		speedup := b_med / c_med
 		sig := _compare_significance(
 			c.mean_fs,
 			c.std_dev_fs,
@@ -430,7 +432,7 @@ compare_records :: proc(
 			rep.unchanged += 1
 		}
 
-		ratio := f64(c.p50_fs) / f64(b.p50_fs)
+		ratio := c_med / b_med
 		if ratio > 0 {
 			log_sum += math.ln(ratio)
 			log_cnt += 1

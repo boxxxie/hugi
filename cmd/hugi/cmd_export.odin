@@ -97,6 +97,9 @@ _cmd_export :: proc(args: []string) -> int {
 		return 1
 	}
 
+	lang, lang_owned := _normalize_lang(opts.common.lang)
+	defer if lang_owned {delete(lang)}
+
 	st, _, open_ok := _open_store_or_err("export", opts.common.db_flag)
 	if !open_ok {
 		return 1
@@ -107,21 +110,21 @@ _cmd_export :: proc(args: []string) -> int {
 	if opts.all_commits {
 		records = store.store_load_commit_series_records(
 			&st,
-			opts.common.lang,
+			lang,
 			opts.common.filter,
 			context.allocator,
 		)
 	} else if opts.all_runs {
 		records = store.store_load_all_run_records(
 			&st,
-			opts.common.lang,
+			lang,
 			opts.common.filter,
 			context.allocator,
 		)
 	} else {
 		records = store.store_load_pooled_records(
 			&st,
-			opts.common.lang,
+			lang,
 			opts.common.commit,
 			"",
 			opts.common.filter,
@@ -132,7 +135,7 @@ _cmd_export :: proc(args: []string) -> int {
 	if len(records) == 0 {
 		fmt.eprintfln(
 			"hugi export: no matching records (lang=%s, commit=%q)",
-			opts.common.lang,
+			lang,
 			opts.common.commit,
 		)
 		return 1

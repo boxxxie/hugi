@@ -282,4 +282,18 @@ test_cli_ols_discovery_and_export_validation :: proc(t: ^testing.T) {
 		testing.expect_value(t, toks[2], `-define:MSG=a "b"`)
 		testing.expect_value(t, toks[3], "plain arg")
 	}
+
+	l1, o1 := _normalize_lang("odin")
+	testing.expect_value(t, l1, "odin")
+	testing.expect(t, !o1, "already-lowercase lang must not allocate")
+
+	l2, o2 := _normalize_lang("Zig")
+	defer if o2 {delete(l2)}
+	testing.expect_value(t, l2, "zig")
+	testing.expect(t, o2, "mixed-case lang must allocate normalized string")
+
+	l3, o3 := _normalize_lang("ODIN")
+	defer if o3 {delete(l3)}
+	testing.expect_value(t, l3, "odin")
+	testing.expect(t, o3, "uppercase lang must allocate normalized string")
 }

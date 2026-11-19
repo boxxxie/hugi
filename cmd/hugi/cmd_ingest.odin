@@ -49,7 +49,8 @@ _cmd_ingest :: proc(args: []string) -> int {
 	}
 	defer store.store_close(&st)
 
-	lang_override := common.lang
+	lang_override, lang_owned := _normalize_lang(common.lang)
+	defer if lang_owned {delete(lang_override)}
 	commit_override := common.commit
 	total_pkts := 0
 	total_recs := 0

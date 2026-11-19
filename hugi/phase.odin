@@ -119,6 +119,13 @@ phase_begin :: proc(
 		)
 	} else {
 		acc := &p._accums[slot]
+		fmt.assertf(
+			acc.name == name,
+			"hugi: phase_begin slot %d expected phase %q, got %q (Pipeline_Proc must open phases in a deterministic sequence across all passes)",
+			slot,
+			acc.name,
+			name,
+		)
 		acc.ops = eff_ops
 		if bytes_per_op > 0 {
 			acc.bytes_per_op = bytes_per_op

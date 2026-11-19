@@ -246,3 +246,51 @@ test_v5_xitdb_root_moment_slot_layout_and_full_seal :: proc(t: ^testing.T) {
 		testing.expect(t, runs_slot == nil, "empty 'runs' omitted when 0 hot runs remain")
 	}
 }
+
+@(test)
+test_commit_prefix_matching_ignores_short_tag_false_positives :: proc(t: ^testing.T) {
+	st, ok := store.store_open(":memory:", context.allocator)
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	pkt_v1 := _make_store_test_packet("r-v1", "v1", 25.0)
+	defer hugi.packet_destroy(&pkt_v1)
+	testing.expect(t, store.store_ingest_packet(&st, pkt_v1), "ingest v1 tag")
+
+	pkt_v10 := _make_store_test_packet("r-v10", "v10", 50.0)
+	defer hugi.packet_destroy(&pkt_v10)
+	testing.expect(t, store.store_ingest_packet(&st, pkt_v10), "ingest v10 tag")
+
+	pkt_sha := _make_store_test_packet("r-sha", "deadbeef1234", 75.0)
+	defer hugi.packet_destroy(&pkt_sha)
+	testing.expect(t, store.store_ingest_packet(&st, pkt_sha), "ingest 12-char SHA")
+
+	q_v10 := store.store_load_pooled_records(&st, "odin", "v10")
+	defer store.pooled_records_destroy(q_v10)
+	testing.expect_value(t, len(q_v10), 3)
+	if len(q_v10) == 3 {
+		testing.expect_value(t, q_v10[0].commit, "v10")
+		testing.expect_value(t, q_v10[0].run_count, 1)
+	}
+
+	q_full_sha := store.store_load_pooled_records(
+		&st,
+		"odin",
+		"deadbeef1234567890abcdef1234567890abcdef",
+	)
+	defer store.pooled_records_destroy(q_full_sha)
+	testing.expect_value(t, len(q_full_sha), 3)
+	if len(q_full_sha) == 3 {
+		testing.expect_value(t, q_full_sha[0].commit, "deadbeef1234")
+	}
+
+	q_short_sha := store.store_load_pooled_records(&st, "odin", "deadbee")
+	defer store.pooled_records_destroy(q_short_sha)
+	testing.expect_value(t, len(q_short_sha), 3)
+	if len(q_short_sha) == 3 {
+		testing.expect_value(t, q_short_sha[0].commit, "deadbeef1234")
+	}
+}

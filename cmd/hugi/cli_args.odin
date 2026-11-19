@@ -37,6 +37,22 @@ _Flag_Parse_Status :: enum u8 {
 }
 
 @(private, require_results)
+_normalize_lang :: proc(
+	lang: string,
+	allocator := context.allocator,
+) -> (
+	res: string,
+	owned: bool,
+) {
+	for i := 0; i < len(lang); i += 1 {
+		if lang[i] >= 'A' && lang[i] <= 'Z' {
+			return strings.to_lower(lang, allocator), true
+		}
+	}
+	return lang, false
+}
+
+@(private, require_results)
 _resolve_db_path :: proc(explicit: string) -> string {
 	if explicit != "" {
 		return explicit

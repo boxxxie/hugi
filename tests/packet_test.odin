@@ -172,3 +172,22 @@ test_jsonl_and_obench_json_wire_importers :: proc(t: ^testing.T) {
 	}
 	hugi.packets_destroy(opkts)
 }
+
+@(test)
+test_suite_create_syncs_programmatic_name_filter_to_obench :: proc(t: ^testing.T) {
+	cfg := hugi.default_suite_config()
+	cfg.name_filter = "fnv1a"
+	cfg.quiet = true
+
+	s := hugi.suite_create("filter_sync", cfg)
+	defer hugi.suite_destroy(&s)
+	testing.expect_value(t, s.obench_suite.config.filter, "fnv1a")
+
+	cfg_multi := hugi.default_suite_config()
+	cfg_multi.name_filter = "fnv1a|crc32"
+	cfg_multi.quiet = true
+
+	s_multi := hugi.suite_create("filter_multi", cfg_multi)
+	defer hugi.suite_destroy(&s_multi)
+	testing.expect_value(t, s_multi.obench_suite.config.filter, "")
+}

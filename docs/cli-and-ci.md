@@ -70,9 +70,9 @@ hugi run ./benchmarks \
 | `--warmup <N>` | `1` | Warmup passes for `Pipeline` groups; when explicitly passed, also sets micro-benchmark warmup to `<N> ms`. |
 | `--groups <list>` | All | Comma or `\|` separated group filter. Marks packet `selective = true` when non-empty and not `"all"`. |
 | `--filter <pat>`, `-f` | All | Substring filter on benchmark `full_name` (`,` or `\|` alternation). Marks packet `selective = true`. |
-| `--lang <lang>` | `odin` | Language identifier tag (always pass lowercase: compiled binaries lowercase `--lang`, whereas CLI queries are case-sensitive). |
-| `--commit <sha>` | Git HEAD | Override commit identifier. |
-| `--baseline-commit <c>` | None | Immediately run statistical comparison against commit `<c>` (literal prefix-matched against stored SHAs; expand symbolic refs like `HEAD` or `main` with `git rev-parse --short=12`). |
+| `--lang <lang>` | `odin` | Language identifier tag (lowercased automatically by both CLI subcommands and compiled binaries). |
+| `--commit <sha>` | Git HEAD | Override commit identifier (stored verbatim; pass 12-char SHAs like `${GITHUB_SHA:0:12}` to pool with auto-detected Git commits). |
+| `--baseline-commit <c>` | None | Immediately run statistical comparison against commit `<c>` (prefix-matched against stored SHAs, including 40-char hex SHAs against stored 12-char SHAs; expand symbolic refs like `HEAD` or `main` with `git rev-parse --short=12`). |
 | `--threshold <pct>` | `5.0` | Minimum relative median delta percentage required to flag a regression/improvement. |
 | `--fail-on-regression` | `false` | Exit with code `1` if any statistically significant regression is detected. |
 | `--extra-build-flags <s>` | `""` | Extra flags appended to `odin build` with quote-aware splitting (e.g., `'-extra-linker-flags:"-L/usr/local/lib -Wl,-rpath,/usr/local/lib"'`). |

@@ -72,6 +72,8 @@ suite := hugi.suite_create("storage_engine", cfg)
 defer hugi.suite_destroy(&suite)
 ```
 
+> **Programmatic `cfg.name_filter` vs. `obench_cfg.filter`:** `suite_create` automatically copies a single-pattern `cfg.name_filter` into `cfg.obench_cfg.filter` when `cfg.obench_cfg.filter` is empty. For multi-token `,` or `|` filters (e.g., `"fnv1a|crc32"`), `suite_run` temporarily clears `obench`'s single-substring filter during `obench.suite_execute`—so `obench` runs and prints all micro-benchmarks in the suite before `hugi` filters the emitted `pkt.records` (while `Pipeline` phases are filtered before emitting records).
+
 ### Binary CLI Flags Parsed by `default_suite_config()`
 
 When running a compiled benchmark binary directly, `default_suite_config()` recognizes all flags below (`hugi run` forwards `--runs`, `--warmup`, `--groups`, `--filter`, `--lang`, `--commit`, and `--quiet`, while managing `--packet-out` internally—passing `--run-id` or `--packet-out` to `hugi run` is rejected as an unknown flag):
@@ -216,7 +218,7 @@ Phases can nest up to `hugi.MAX_PHASE_DEPTH :: 8` levels deep using explicit `ph
 }
 ```
 
-Each phase slot is emitted as its own `Record` (e.g., `compiler::compile_unit`, `compiler::tokenize`, `compiler::parse_ast`) while preserving deterministic rank order across filtered runs.
+Each phase slot is emitted as its own `Record` (e.g., `compiler::compile_unit`, `compiler::tokenize`, `compiler::parse_ast`) while preserving deterministic rank order across filtered runs. Every pass of a `Pipeline_Proc` (warmup, timed, and alloc-check) must open `phase_begin`..`phase_end` in the exact same deterministic sequence—do not skip a phase conditionally or open phases inside unordered `map` iteration (`phase_begin` asserts slot name parity on repeat passes).
 
 > **Nested Allocation Tracking Note:** Wall-clock `start_ts` timestamps live on `_phase_stack` and nest cleanly up to `MAX_PHASE_DEPTH`, whereas the untimed `.Alloc_Check` pass shares a single `_heap_counter` / `_temp_counter`: an inner `phase_begin` calls `counting_allocator_reset` (wiping earlier outer-phase counts) and an inner `phase_end` pauses the counter for the remainder of the outer phase (leaving the outer phase with only residual allocations after its last child phase). Use nested phases strictly for wall-clock timing, and place `zero_alloc = true` and allocation auditing on non-overlapping leaf phases. (Note that `zero_alloc = true` checks `context.allocator` only; `context.temp_allocator` usage is permitted and reported separately.)
 

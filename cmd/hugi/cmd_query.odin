@@ -173,6 +173,9 @@ _cmd_inspect :: proc(args: []string) -> int {
 		}
 	}
 
+	lang, lang_owned := _normalize_lang(common.lang)
+	defer if lang_owned {delete(lang)}
+
 	st, _, open_ok := _open_store_or_err("inspect", common.db_flag)
 	if !open_ok {
 		return 1
@@ -181,7 +184,7 @@ _cmd_inspect :: proc(args: []string) -> int {
 
 	records := store.store_load_pooled_records(
 		&st,
-		common.lang,
+		lang,
 		common.commit,
 		run_id,
 		common.filter,
@@ -191,14 +194,14 @@ _cmd_inspect :: proc(args: []string) -> int {
 	if len(records) == 0 {
 		fmt.printfln(
 			"No matching records found (lang=%s, commit=%q, filter=%q)",
-			common.lang,
+			lang,
 			common.commit,
 			common.filter,
 		)
 		return 0
 	}
 
-	fmt.printfln("Inspect (%s, %d benchmarks):\n", common.lang, len(records))
+	fmt.printfln("Inspect (%s, %d benchmarks):\n", lang, len(records))
 	fmt.print(store.format_markdown_table(records, context.temp_allocator))
 	if len(records) <= 25 {
 		fmt.println("\nQuantile Breakdown:")
@@ -286,6 +289,9 @@ _cmd_compare :: proc(args: []string) -> int {
 		return 1
 	}
 
+	lang, lang_owned := _normalize_lang(common.lang)
+	defer if lang_owned {delete(lang)}
+
 	st, db_path, open_ok := _open_store_or_err("compare", common.db_flag)
 	if !open_ok {
 		return 1
@@ -319,7 +325,7 @@ _cmd_compare :: proc(args: []string) -> int {
 		for cs in commits {
 			has_lang := false
 			for l in cs.langs {
-				if l == common.lang {
+				if l == lang {
 					has_lang = true
 					break
 				}
@@ -344,14 +350,14 @@ _cmd_compare :: proc(args: []string) -> int {
 			defer store.run_summaries_destroy(runs)
 			matching_runs := make([dynamic]string, context.temp_allocator)
 			for rs in runs {
-				if rs.lang == common.lang {
+				if rs.lang == lang {
 					append(&matching_runs, rs.run_id)
 				}
 			}
 			if len(matching_runs) < 2 {
 				fmt.eprintfln(
 					"hugi compare: need at least 2 commits or runs for lang=%s in %s",
-					common.lang,
+					lang,
 					db_path,
 				)
 				return 1
@@ -365,7 +371,7 @@ _cmd_compare :: proc(args: []string) -> int {
 
 	base_records := store.store_load_pooled_records(
 		&st,
-		common.lang,
+		lang,
 		base_commit,
 		base_run,
 		common.filter,
@@ -374,7 +380,7 @@ _cmd_compare :: proc(args: []string) -> int {
 	defer store.pooled_records_destroy(base_records)
 	cand_records := store.store_load_pooled_records(
 		&st,
-		common.lang,
+		lang,
 		cand_commit,
 		cand_run,
 		common.filter,
@@ -480,8 +486,10 @@ _cmd_compare_1v1 :: proc(args: []string) -> int {
 		)
 		return 1
 	}
-	lang_a := strings.trim_space(parts[0])
-	lang_b := strings.trim_space(parts[1])
+	lang_a, lang_a_owned := _normalize_lang(strings.trim_space(parts[0]))
+	defer if lang_a_owned {delete(lang_a)}
+	lang_b, lang_b_owned := _normalize_lang(strings.trim_space(parts[1]))
+	defer if lang_b_owned {delete(lang_b)}
 
 	st, _, open_ok := _open_store_or_err("compare-1v1", common.db_flag)
 	if !open_ok {

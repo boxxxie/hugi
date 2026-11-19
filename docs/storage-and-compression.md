@@ -76,7 +76,7 @@ Newly ingested runs land in `"runs"` as `CZPK\x04` blobs split into two independ
 ### Auto-Sealing & `O(hot_runs)` Fast Compaction
 
 * **Mid-Ingest Auto-Sealing:** By default (`cold_chunk_runs = 32`, `keep_hot_runs = 0`), whenever 32 unsealed hot runs accumulate, `hugi` automatically seals them into a `CZCH\x02` cold chunk and removes their keys from `"runs"`.
-* **Fast Compaction (`_try_fast_catalog_compact`):** When `hugi compact` runs, already-sealed `CZCH\x02` chunks are copied **verbatim** without decompression; only the remaining hot runs (`O(hot_runs)`) are decoded and sealed into a new chunk before `xitdb.database_compact` strips dead CoW pages.
+* **Fast Compaction (`_try_fast_catalog_compact`):** When `hugi compact` runs, already-sealed `CZCH\x02` chunks are copied **verbatim** without decompression; only the remaining hot runs (`O(hot_runs)`) are decoded and sealed into a new chunk before `xitdb.database_compact` strips dead CoW pages. Sealing the *first* cold chunk requires at least `2` unsealed runs (`rem >= 2`, so a 1-run `.hugidb` stays as a `CZPK\x04` hot packet), and fast compaction falls back to a full unpack-and-reingest rewrite whenever `has_cold_override` is set or `--keep-hot <N>` exceeds the current unsealed hot-run count (unsealing cold runs).
 * **Hot Overrides:** Re-ingesting an existing `(lang, run_id)` that was previously sealed into a cold chunk sets `has_cold_override` and shadows the cold entry cleanly from `"runs"` until the next full rewrite.
 
 ### Inside a `CZCH\x02` Chunk

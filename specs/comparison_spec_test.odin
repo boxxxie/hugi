@@ -207,3 +207,43 @@ spec_cross_lang_1v1_detects_winners_ties_footprint_mismatch_and_unmatched :: pro
 		shows_footprint_mismatch(&w, r3, true)
 	}
 }
+
+@(test)
+spec_clamped_zero_fs_baseline_regression_is_detected :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_in_memory_store(&w)
+	given_recorded_run(
+		&w,
+		commit = "zf01",
+		lang = "odin",
+		run_id = "zf-base",
+		bench = Bench_Observation {
+			name = "simd::clamped_zero",
+			ops_per_sample = 100_000,
+			exact_batch_ns = []u64{0, 0, 0, 0, 0, 0, 0, 0},
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "zf02",
+		lang = "odin",
+		run_id = "zf-cand",
+		bench = Bench_Observation {
+			name = "simd::clamped_zero",
+			ops_per_sample = 100_000,
+			median_ns = 50.0,
+			spread_ns = 0.2,
+			samples = 8,
+		},
+	)
+
+	upon_comparing_commits(&w, "zf01", "zf02", lang = "odin", threshold_pct = 5.0)
+	then_comparison_summary(&w, improvements = 0, regressions = 1, unchanged = 0)
+	if row, ok := viewing_comparison_row(&w, "simd::clamped_zero"); ok {
+		shows_verdict(&w, row, .Regression)
+		shows_significance(&w, row, true, max_p_value = 0.01)
+	}
+}

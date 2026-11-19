@@ -88,3 +88,57 @@ test_small_sample_significance_parity :: proc(t: ^testing.T) {
 		)
 	}
 }
+
+@(test)
+test_compare_records_handles_zero_fs_baselines :: proc(t: ^testing.T) {
+	base_arr := make([]store.Pooled_Record, 1)
+	base_arr[0] = store.Pooled_Record {
+		full_name  = strings.clone("simd::clamped_zero"),
+		samples    = 8,
+		p50_fs     = 0,
+		mean_fs    = 0,
+		samples_fs = make([dynamic]i64, 8),
+	}
+	defer store.pooled_records_destroy(base_arr)
+
+	cand_reg := make([]store.Pooled_Record, 1)
+	cand_reg[0] = store.Pooled_Record {
+		full_name  = strings.clone("simd::clamped_zero"),
+		samples    = 8,
+		p50_fs     = 50_000_000,
+		mean_fs    = 50_000_000,
+		samples_fs = make([dynamic]i64, 8),
+	}
+	for i in 0 ..< 8 {
+		cand_reg[0].samples_fs[i] = 50_000_000 + i64(i) * 1_000
+	}
+	defer store.pooled_records_destroy(cand_reg)
+
+	rep_reg := store.compare_records(base_arr, cand_reg, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_reg)
+	testing.expect_value(t, len(rep_reg.rows), 1)
+	testing.expect_value(t, rep_reg.regressions, 1)
+	if len(rep_reg.rows) == 1 {
+		testing.expect_value(t, rep_reg.rows[0].verdict, store.Verdict.Regression)
+		testing.expect(t, rep_reg.rows[0].is_significant, "0 fs -> 50 ns must be significant")
+	}
+
+	cand_same := make([]store.Pooled_Record, 1)
+	cand_same[0] = store.Pooled_Record {
+		full_name  = strings.clone("simd::clamped_zero"),
+		samples    = 8,
+		p50_fs     = 0,
+		mean_fs    = 0,
+		samples_fs = make([dynamic]i64, 8),
+	}
+	defer store.pooled_records_destroy(cand_same)
+
+	rep_same := store.compare_records(base_arr, cand_same, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_same)
+	testing.expect_value(t, len(rep_same.rows), 1)
+	testing.expect_value(t, rep_same.unchanged, 1)
+	if len(rep_same.rows) == 1 {
+		testing.expect_value(t, rep_same.rows[0].verdict, store.Verdict.Unchanged)
+		testing.expect_value(t, rep_same.rows[0].delta_pct, 0.0)
+	}
+}

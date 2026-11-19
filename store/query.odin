@@ -89,12 +89,34 @@ _raw_groups_destroy :: proc(groups: []_Raw_Group, allocator := context.allocator
 	delete(groups, allocator)
 }
 
+@(private = "file")
+_is_hex_sha :: proc "contextless" (s: string) -> bool {
+	if len(s) < 7 {
+		return false
+	}
+	for i := 0; i < len(s); i += 1 {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 @(private)
 _match_commit_prefix :: proc(candidate, query: string) -> bool {
 	if query == "" {
 		return true
 	}
-	return strings.has_prefix(candidate, query) || strings.has_prefix(query, candidate)
+	if strings.has_prefix(candidate, query) {
+		return true
+	}
+	// Allow a longer hex SHA query (e.g., 40-char GITHUB_SHA) to match a stored 12-char Git SHA
+	// without allowing arbitrary short tags like "v1" to match "--commit v10".
+	if _is_hex_sha(candidate) && _is_hex_sha(query) && len(query) > len(candidate) {
+		return strings.has_prefix(query, candidate)
+	}
+	return false
 }
 
 @(private, require_results)

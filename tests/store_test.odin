@@ -407,3 +407,164 @@ test_store_env_provenance_hot_cold_and_compact :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+test_summary_only_record_survives_cold_chunk_pooling_and_welch_compare :: proc(t: ^testing.T) {
+	make_summary_pkt :: proc(
+		run_id, commit: string,
+		med_fs, mean_fs, std_fs, min_fs, max_fs: i64,
+	) -> hugi.Run_Packet {
+		pkt := hugi.Run_Packet {
+			suite_name     = strings.clone("sum_suite"),
+			lang           = strings.clone("zig"),
+			commit         = strings.clone(commit),
+			run_id         = strings.clone(run_id),
+			os             = strings.clone("linux"),
+			arch           = strings.clone("amd64"),
+			optimization   = strings.clone("ReleaseFast"),
+			odin_version   = strings.clone("0.14.0"),
+			timestamp_unix = 1770000100,
+			records        = make([dynamic]hugi.Record, 0, 1),
+		}
+		r := hugi.Record {
+			rank             = 1,
+			group_name       = strings.clone("kv"),
+			name             = strings.clone("get"),
+			full_name        = strings.clone("kv::get"),
+			ops_per_sample   = 1,
+			samples          = 12,
+			min_fs           = min_fs,
+			p25_fs           = med_fs - 100_000,
+			p50_fs           = med_fs,
+			p75_fs           = med_fs + 100_000,
+			p95_fs           = max_fs - 100_000,
+			p99_fs           = max_fs,
+			max_fs           = max_fs,
+			mean_fs          = mean_fs,
+			std_dev_fs       = std_fs,
+			iqr_fs           = 200_000,
+			error            = strings.clone(""),
+			metrics          = make([dynamic]hugi.Metric),
+			samples_batch_ns = make([dynamic]u64),
+		}
+		hugi.refresh_record_throughput(&r, overwrite = true)
+		append(&pkt.records, r)
+		return pkt
+	}
+
+	tmp, mk_err := os.make_directory_temp("", "hugi-sum-cold-*", context.allocator)
+	testing.expectf(t, mk_err == nil && tmp != "", "create temp dir: %v", mk_err)
+	if mk_err != nil || tmp == "" {
+		return
+	}
+	defer {
+		_ = os.remove_all(tmp)
+		delete(tmp)
+	}
+	db_path, _ := filepath.join({tmp, "summary_cold.hugidb"}, context.temp_allocator)
+
+	{
+		st, open_ok := store.store_open(db_path, context.allocator)
+		testing.expect(t, open_ok, "open summary store")
+		if !open_ok {
+			return
+		}
+		defer store.store_close(&st)
+
+		p1 := make_summary_pkt(
+			"run-sum-1",
+			"sumc1",
+			50_000_000,
+			50_000_000,
+			500_000,
+			49_000_000,
+			51_000_000,
+		)
+		defer hugi.packet_destroy(&p1)
+		p2 := make_summary_pkt(
+			"run-sum-2",
+			"sumc2",
+			100_000_000,
+			100_000_000,
+			500_000,
+			99_000_000,
+			101_000_000,
+		)
+		defer hugi.packet_destroy(&p2)
+
+		testing.expect(t, store.store_ingest_packet(&st, p1), "ingest summary p1")
+		testing.expect(t, store.store_ingest_packet(&st, p2), "ingest summary p2")
+	}
+
+	_, _, comp_ok := store.store_compact_with_options(
+		db_path,
+		store.Store_Write_Options{keep_hot_runs = 0, cold_chunk_runs = 2},
+	)
+	testing.expect(t, comp_ok, "compact summary packets into CZCH v2 cold chunk")
+
+	st2, open_ok2 := store.store_open(db_path, context.allocator)
+	testing.expect(t, open_ok2, "reopen compacted summary store")
+	if !open_ok2 {
+		return
+	}
+	defer store.store_close(&st2)
+
+	pkts := store.store_load_all_packets(&st2)
+	defer hugi.packets_destroy(pkts)
+	testing.expect_value(t, len(pkts), 2)
+	if len(pkts) == 2 && len(pkts[0].records) == 1 && len(pkts[1].records) == 1 {
+		testing.expect_value(t, pkts[0].records[0].samples, 12)
+		testing.expect_value(t, pkts[0].records[0].std_dev_fs, i64(500_000))
+		testing.expect_value(t, pkts[1].records[0].samples, 12)
+		testing.expect_value(t, pkts[1].records[0].min_fs, i64(99_000_000))
+		testing.expect_value(t, pkts[1].records[0].max_fs, i64(101_000_000))
+	}
+
+	base := store.store_load_pooled_records(&st2, "zig", "sumc1")
+	defer store.pooled_records_destroy(base)
+	cand := store.store_load_pooled_records(&st2, "zig", "sumc2")
+	defer store.pooled_records_destroy(cand)
+	testing.expect_value(t, len(base), 1)
+	testing.expect_value(t, len(cand), 1)
+	if len(base) == 1 && len(cand) == 1 {
+		testing.expect_value(t, base[0].samples, 12)
+		testing.expect_value(t, base[0].std_dev_fs, i64(500_000))
+		testing.expect_value(t, cand[0].samples, 12)
+		testing.expect_value(t, cand[0].std_dev_fs, i64(500_000))
+	}
+
+	rep := store.compare_records(base, cand, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep)
+	testing.expect_value(t, len(rep.rows), 1)
+	testing.expect_value(t, rep.regressions, 1)
+	if len(rep.rows) == 1 {
+		testing.expect(
+			t,
+			rep.rows[0].is_significant,
+			"Welch t-test must detect summary regression",
+		)
+		testing.expect_value(t, rep.rows[0].verdict, store.Verdict.Regression)
+	}
+}
+
+@(test)
+test_latest_snapshot_includes_empty_commit_runs :: proc(t: ^testing.T) {
+	st, ok := store.store_open(":memory:", context.allocator)
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	pkt := _make_store_test_packet("empty-commit-run", "", 30.0)
+	defer hugi.packet_destroy(&pkt)
+	testing.expect(t, store.store_ingest_packet(&st, pkt), "ingest packet with empty commit")
+
+	odin_latest := store.store_load_pooled_records(&st, "odin")
+	defer store.pooled_records_destroy(odin_latest)
+	testing.expect_value(t, len(odin_latest), 3)
+
+	all_latest := store.store_load_pooled_records(&st, "all")
+	defer store.pooled_records_destroy(all_latest)
+	testing.expect_value(t, len(all_latest), 3)
+}

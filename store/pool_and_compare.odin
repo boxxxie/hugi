@@ -118,7 +118,7 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 			if same_ops {
 				append(&pooled_batches, ..rec.samples_batch_ns[:])
 			}
-		} else if rec.p50_fs > 0 {
+		} else if len(g.records) > 1 && rec.p50_fs > 0 {
 			append(&pooled_fs, rec.p50_fs)
 			same_ops = false
 		}
@@ -221,6 +221,13 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 		pr.iqr_fs = last.iqr_fs
 		pr.mad_fs = last.mad_fs
 		pr.ops_per_sec = last.items_per_sec
+		if pr.ops_per_sec <= 0 && pr.p50_fs > 0 {
+			ops_s, _, mb_s := hugi.compute_throughput_from_p50(pr.p50_fs, pr.bytes_per_op)
+			pr.ops_per_sec = ops_s
+			if pr.bytes_per_op > 0 && pr.mb_per_sec <= 0 {
+				pr.mb_per_sec = mb_s
+			}
+		}
 	}
 
 	return pr

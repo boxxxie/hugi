@@ -27,6 +27,8 @@ _PKT_FLAG_SELECTIVE :: u8(1 << 2)
 _PKT_FLAG_ENV :: u8(1 << 3)
 @(private)
 _COLD_EXT_ENV :: u8(0xE1)
+@(private)
+_COLD_EXT_SAMPLES :: u8(0xE2)
 
 @(private)
 _REC_FLAG_CUSTOM_RANK :: u32(1 << 0)
@@ -339,7 +341,7 @@ _decode_hot_packet :: proc(
 		tmp.env.boost_state = i8(raw_boost)
 	}
 
-	rec_count := int(_fmt_read_varint_u64(&rd) or_return)
+	rec_count := _fmt_read_varint_nonneg_int(&rd) or_return
 	if rec_count < 0 || rec_count > 100_000 {
 		return {}, false
 	}
@@ -347,7 +349,7 @@ _decode_hot_packet :: proc(
 	defer delete(sample_counts, context.temp_allocator)
 	expected_total := 0
 	for i in 0 ..< rec_count {
-		cnt := int(_fmt_read_varint_u64(&rd) or_return)
+		cnt := _fmt_read_varint_nonneg_int(&rd) or_return
 		if cnt < 0 || cnt > 10_000_000 || expected_total > 100_000_000 - cnt {
 			return {}, false
 		}
@@ -361,11 +363,11 @@ _decode_hot_packet :: proc(
 	reserve(&tmp.records, rec_count)
 	s_off := 0
 	for ri in 0 ..< rec_count {
-		desc_id := u32(_fmt_read_varint_u64(&rd) or_return)
-		rflags := u32(_fmt_read_varint_u64(&rd) or_return)
+		desc_id := _fmt_read_varint_u32(&rd) or_return
+		rflags := _fmt_read_varint_u32(&rd) or_return
 		ops := _fmt_read_varint_u64(&rd) or_return
-		samples := int(_fmt_read_varint_u64(&rd) or_return)
-		warmup := int(_fmt_read_varint_u64(&rd) or_return)
+		samples := _fmt_read_varint_nonneg_int(&rd) or_return
+		warmup := _fmt_read_varint_nonneg_int(&rd) or_return
 
 		desc, g_name, b_name, f_name := _desc_materialize_strings(
 			descs,
@@ -410,14 +412,18 @@ _decode_hot_packet :: proc(
 			rp.error = strings.clone("", allocator)
 		}
 		if (rflags & _REC_FLAG_METRICS) != 0 {
-			mc := int(_fmt_read_varint_u64(&rd) or_return)
+			mc := _fmt_read_varint_nonneg_int(&rd) or_return
 			if mc < 0 || mc > 1024 {
 				return {}, false
 			}
 			reserve(&rp.metrics, mc)
 			for _ in 0 ..< mc {
 				u := _read_sym_clone(&rd, syms, allocator) or_return
-				v := _fmt_read_f64_le(&rd) or_return
+				v, v_ok := _fmt_read_f64_le(&rd)
+				if !v_ok {
+					delete(u, allocator)
+					return {}, false
+				}
 				append(&rp.metrics, hugi.Metric{unit = u, value = v})
 			}
 		}
@@ -682,6 +688,23 @@ _encode_cold_chunk :: proc(
 		}
 	}
 
+	sample_override_cnt := 0
+	for r in flat_recs {
+		if len(r.samples_batch_ns) == 0 && r.samples > 0 {
+			sample_override_cnt += 1
+		}
+	}
+	if sample_override_cnt > 0 {
+		append(&meta_raw, _COLD_EXT_SAMPLES)
+		_fmt_append_varint_u64(&meta_raw, u64(sample_override_cnt))
+		for r, i in flat_recs {
+			if len(r.samples_batch_ns) == 0 && r.samples > 0 {
+				_fmt_append_varint_u64(&meta_raw, u64(i))
+				_fmt_append_varint_u64(&meta_raw, u64(r.samples))
+			}
+		}
+	}
+
 	meta_comp := compress_bytes_zlib(meta_raw[:], context.temp_allocator, 9) or_return
 	defer delete(meta_comp, context.temp_allocator)
 
@@ -751,7 +774,7 @@ _decode_cold_chunk :: proc(
 	rd := _Format_Reader {
 		data = meta_raw,
 	}
-	n_runs := int(_fmt_read_varint_u64(&rd) or_return)
+	n_runs := _fmt_read_varint_nonneg_int(&rd) or_return
 	if n_runs < 0 || n_runs > 100_000 {
 		return nil, false
 	}
@@ -805,7 +828,7 @@ _decode_cold_chunk :: proc(
 	rec_counts := make([]int, n_runs, context.temp_allocator)
 	defer delete(rec_counts, context.temp_allocator)
 	for i in 0 ..< n_runs {
-		rc := int(_fmt_read_varint_u64(&rd) or_return)
+		rc := _fmt_read_varint_nonneg_int(&rd) or_return
 		if rc < 0 || rc > 100_000 || total_recs > 10_000_000 - rc {
 			return nil, false
 		}
@@ -828,13 +851,13 @@ _decode_cold_chunk :: proc(
 	for i in 0 ..< total_recs {
 		d := _fmt_read_zigzag_i64(&rd) or_return
 		prev_did += d
-		if prev_did < 0 {
+		if prev_did < 0 || prev_did > i64(max(u32)) {
 			return nil, false
 		}
 		desc_ids[i] = u32(prev_did)
 	}
 	for i in 0 ..< total_recs {
-		rflags[i] = u32(_fmt_read_varint_u64(&rd) or_return)
+		rflags[i] = _fmt_read_varint_u32(&rd) or_return
 	}
 	prev_ops: i64 = 0
 	for i in 0 ..< total_recs {
@@ -948,20 +971,25 @@ _decode_cold_chunk :: proc(
 	}
 	for rp, i in flat_recs {
 		if (rflags[i] & _REC_FLAG_ERROR) != 0 {
+			err_s := _read_sym_clone(&rd, syms, allocator) or_return
 			delete(rp.error, allocator)
-			rp.error = _read_sym_clone(&rd, syms, allocator) or_return
+			rp.error = err_s
 		}
 	}
 	for rp, i in flat_recs {
 		if (rflags[i] & _REC_FLAG_METRICS) != 0 {
-			mc := int(_fmt_read_varint_u64(&rd) or_return)
+			mc := _fmt_read_varint_nonneg_int(&rd) or_return
 			if mc < 0 || mc > 1024 {
 				return nil, false
 			}
 			reserve(&rp.metrics, mc)
 			for _ in 0 ..< mc {
 				u := _read_sym_clone(&rd, syms, allocator) or_return
-				v := _fmt_read_f64_le(&rd) or_return
+				v, v_ok := _fmt_read_f64_le(&rd)
+				if !v_ok {
+					delete(u, allocator)
+					return nil, false
+				}
 				append(&rp.metrics, hugi.Metric{unit = u, value = v})
 			}
 		}
@@ -999,44 +1027,69 @@ _decode_cold_chunk :: proc(
 		}
 	}
 
-	if rd.pos < len(rd.data) {
+	seen_env := false
+	seen_samples := false
+	for rd.pos < len(rd.data) {
 		ext_tag := _fmt_read_u8(&rd) or_return
-		if ext_tag != _COLD_EXT_ENV {
+		switch ext_tag {
+		case _COLD_EXT_ENV:
+			if seen_env {
+				return nil, false
+			}
+			seen_env = true
+			for i in 0 ..< n_runs {
+				out[i].env.cpu_model = _read_sym_clone(&rd, syms, allocator) or_return
+			}
+			for i in 0 ..< n_runs {
+				out[i].env.governor = _read_sym_clone(&rd, syms, allocator) or_return
+			}
+			for i in 0 ..< n_runs {
+				out[i].env.build_flags = _read_sym_clone(&rd, syms, allocator) or_return
+			}
+			for i in 0 ..< n_runs {
+				out[i].env.runtime_version = _read_sym_clone(&rd, syms, allocator) or_return
+			}
+			prev_smax: i64 = 0
+			for i in 0 ..< n_runs {
+				d := _fmt_read_zigzag_i64(&rd) or_return
+				prev_smax += d
+				if prev_smax < 0 {
+					return nil, false
+				}
+				out[i].env.scaling_max_khz = u64(prev_smax)
+			}
+			prev_cmax: i64 = 0
+			for i in 0 ..< n_runs {
+				d := _fmt_read_zigzag_i64(&rd) or_return
+				prev_cmax += d
+				if prev_cmax < 0 {
+					return nil, false
+				}
+				out[i].env.cpuinfo_max_khz = u64(prev_cmax)
+			}
+			for i in 0 ..< n_runs {
+				raw_b := _fmt_read_u8(&rd) or_return
+				out[i].env.boost_state = i8(raw_b)
+			}
+		case _COLD_EXT_SAMPLES:
+			if seen_samples {
+				return nil, false
+			}
+			seen_samples = true
+			ov_cnt := _fmt_read_varint_nonneg_int(&rd) or_return
+			if ov_cnt > total_recs {
+				return nil, false
+			}
+			for _ in 0 ..< ov_cnt {
+				fi := _fmt_read_varint_nonneg_int(&rd) or_return
+				if fi >= total_recs {
+					return nil, false
+				}
+				sv := _fmt_read_varint_nonneg_int(&rd) or_return
+				flat_recs[fi].samples = sv
+			}
+		case:
 			return nil, false
-		}
-		for i in 0 ..< n_runs {
-			out[i].env.cpu_model = _read_sym_clone(&rd, syms, allocator) or_return
-		}
-		for i in 0 ..< n_runs {
-			out[i].env.governor = _read_sym_clone(&rd, syms, allocator) or_return
-		}
-		for i in 0 ..< n_runs {
-			out[i].env.build_flags = _read_sym_clone(&rd, syms, allocator) or_return
-		}
-		for i in 0 ..< n_runs {
-			out[i].env.runtime_version = _read_sym_clone(&rd, syms, allocator) or_return
-		}
-		prev_smax: i64 = 0
-		for i in 0 ..< n_runs {
-			d := _fmt_read_zigzag_i64(&rd) or_return
-			prev_smax += d
-			if prev_smax < 0 {
-				return nil, false
-			}
-			out[i].env.scaling_max_khz = u64(prev_smax)
-		}
-		prev_cmax: i64 = 0
-		for i in 0 ..< n_runs {
-			d := _fmt_read_zigzag_i64(&rd) or_return
-			prev_cmax += d
-			if prev_cmax < 0 {
-				return nil, false
-			}
-			out[i].env.cpuinfo_max_khz = u64(prev_cmax)
-		}
-		for i in 0 ..< n_runs {
-			raw_b := _fmt_read_u8(&rd) or_return
-			out[i].env.boost_state = i8(raw_b)
 		}
 	}
 

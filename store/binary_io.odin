@@ -123,6 +123,24 @@ _fmt_read_varint_u64 :: proc(r: ^_Format_Reader) -> (val: u64, ok: bool) {
 }
 
 @(private, require_results)
+_fmt_read_varint_u32 :: proc(r: ^_Format_Reader) -> (val: u32, ok: bool) {
+	v := _fmt_read_varint_u64(r) or_return
+	if v > u64(max(u32)) {
+		return 0, false
+	}
+	return u32(v), true
+}
+
+@(private, require_results)
+_fmt_read_varint_nonneg_int :: proc(r: ^_Format_Reader) -> (val: int, ok: bool) {
+	v := _fmt_read_varint_u64(r) or_return
+	if v > u64(max(int)) {
+		return 0, false
+	}
+	return int(v), true
+}
+
+@(private, require_results)
 _fmt_read_zigzag_i64 :: proc(r: ^_Format_Reader) -> (val: i64, ok: bool) {
 	uv := _fmt_read_varint_u64(r) or_return
 	return i64((uv >> 1) ~ u64(-i64(uv & 1))), true

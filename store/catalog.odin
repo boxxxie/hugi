@@ -81,7 +81,7 @@ _read_sym_clone :: proc(
 	s: string,
 	ok: bool,
 ) {
-	id := u32(_fmt_read_varint_u64(r) or_return)
+	id := _fmt_read_varint_u32(r) or_return
 	raw := _sym_get(syms, id) or_return
 	return strings.clone(raw, alloc), true
 }
@@ -603,7 +603,7 @@ _decode_catalog_blob :: proc(blob: []u8, cat: ^_Moment_Catalog) -> bool {
 	cat.has_cold_override = (flags & _CAT_FLAG_COLD_OVERRIDE) != 0
 
 	// 1. Symbols section.
-	sym_cnt := int(_fmt_read_varint_u64(&rd) or_return)
+	sym_cnt := _fmt_read_varint_nonneg_int(&rd) or_return
 	if sym_cnt < 0 || sym_cnt > 10_000_000 {
 		return false
 	}
@@ -619,17 +619,17 @@ _decode_catalog_blob :: proc(blob: []u8, cat: ^_Moment_Catalog) -> bool {
 	}
 
 	// 2. Descriptors section.
-	d_cnt := int(_fmt_read_varint_u64(&rd) or_return)
+	d_cnt := _fmt_read_varint_nonneg_int(&rd) or_return
 	if d_cnt < 0 || d_cnt > 10_000_000 {
 		return false
 	}
 	for _ in 0 ..< d_cnt {
 		dflags := _fmt_read_u8(&rd) or_return
-		gs := u32(_fmt_read_varint_u64(&rd) or_return)
-		ns := u32(_fmt_read_varint_u64(&rd) or_return)
+		gs := _fmt_read_varint_u32(&rd) or_return
+		ns := _fmt_read_varint_u32(&rd) or_return
 		cs := u32(0)
 		if (dflags & _DESC_FLAG_CUSTOM_FULL) != 0 {
-			cs = u32(_fmt_read_varint_u64(&rd) or_return)
+			cs = _fmt_read_varint_u32(&rd) or_return
 		}
 		param := i64(0)
 		if (dflags & _DESC_FLAG_HAS_PARAM) != 0 {
@@ -658,7 +658,7 @@ _decode_catalog_blob :: proc(blob: []u8, cat: ^_Moment_Catalog) -> bool {
 	}
 
 	// 3. Runs section.
-	run_cnt := int(_fmt_read_varint_u64(&rd) or_return)
+	run_cnt := _fmt_read_varint_nonneg_int(&rd) or_return
 	if run_cnt < 0 || run_cnt > 10_000_000 {
 		return false
 	}
@@ -671,40 +671,37 @@ _decode_catalog_blob :: proc(blob: []u8, cat: ^_Moment_Catalog) -> bool {
 		rflags := _fmt_read_u8(&rd) or_return
 		ls := prev_ls
 		if (rflags & _CAT_RUN_SAME_LANG) == 0 {
-			ls = u32(_fmt_read_varint_u64(&rd) or_return)
+			ls = _fmt_read_varint_u32(&rd) or_return
 		}
 		run_id := _fmt_read_str(&rd, cat.allocator) or_return
+		run_id_owned := true
+		defer if run_id_owned {
+			delete(run_id, cat.allocator)
+		}
 		cs := prev_cs
 		if (rflags & _CAT_RUN_SAME_COMMIT) == 0 {
-			cs = u32(_fmt_read_varint_u64(&rd) or_return)
+			cs = _fmt_read_varint_u32(&rd) or_return
 		}
 		ss := prev_ss
 		if (rflags & _CAT_RUN_SAME_SUITE) == 0 {
-			ss = u32(_fmt_read_varint_u64(&rd) or_return)
+			ss = _fmt_read_varint_u32(&rd) or_return
 		}
 		ts_delta := _fmt_read_zigzag_i64(&rd) or_return
 		ts := prev_ts + ts_delta
-		rec_cnt := int(_fmt_read_varint_u64(&rd) or_return)
-		tot_samples := int(_fmt_read_varint_u64(&rd) or_return)
+		rec_cnt := _fmt_read_varint_nonneg_int(&rd) or_return
+		tot_samples := _fmt_read_varint_nonneg_int(&rd) or_return
 
-		raw_lang, l_ok := _sym_get(cat.syms, ls)
-		if !l_ok {
-			delete(run_id, cat.allocator)
-			return false
-		}
-		raw_commit, c_ok := _sym_get(cat.syms, cs)
-		if !c_ok {
-			delete(run_id, cat.allocator)
-			return false
-		}
-		raw_suite, s_ok := _sym_get(cat.syms, ss)
-		if !s_ok {
-			delete(run_id, cat.allocator)
-			return false
-		}
+		raw_lang := _sym_get(cat.syms, ls) or_return
+		raw_commit := _sym_get(cat.syms, cs) or_return
+		raw_suite := _sym_get(cat.syms, ss) or_return
 
 		rk := _run_key(raw_lang, run_id, cat.allocator)
+		if rk in cat.run_ord_by_key {
+			delete(rk, cat.allocator)
+			return false
+		}
 		cat.run_ord_by_key[rk] = i
+		run_id_owned = false
 		append(
 			&cat.runs,
 			_Catalog_Run_Entry {
@@ -736,12 +733,12 @@ _decode_catalog_blob :: proc(blob: []u8, cat: ^_Moment_Catalog) -> bool {
 		delete(desc_full_cache, context.temp_allocator)
 	}
 
-	n_langs := int(_fmt_read_varint_u64(&rd) or_return)
+	n_langs := _fmt_read_varint_nonneg_int(&rd) or_return
 	if n_langs < 0 || n_langs > 10_000 {
 		return false
 	}
 	for _ in 0 ..< n_langs {
-		lsid := u32(_fmt_read_varint_u64(&rd) or_return)
+		lsid := _fmt_read_varint_u32(&rd) or_return
 		raw_lk := _sym_get(cat.syms, lsid) or_return
 		if raw_lk in cat.snaps {
 			return false
@@ -750,7 +747,7 @@ _decode_catalog_blob :: proc(blob: []u8, cat: ^_Moment_Catalog) -> bool {
 		cat.snaps[strings.clone(raw_lk, cat.allocator)] = snap_m
 		m_ptr := &cat.snaps[raw_lk]
 
-		n_bkeys := int(_fmt_read_varint_u64(&rd) or_return)
+		n_bkeys := _fmt_read_varint_nonneg_int(&rd) or_return
 		if n_bkeys < 0 || n_bkeys > 10_000_000 {
 			return false
 		}
@@ -759,48 +756,52 @@ _decode_catalog_blob :: proc(blob: []u8, cat: ^_Moment_Catalog) -> bool {
 			all_same := (sflags & 1) != 0
 			common_ord := u32(0)
 			if all_same {
-				common_ord = u32(_fmt_read_varint_u64(&rd) or_return)
+				common_ord = _fmt_read_varint_u32(&rd) or_return
 			}
 			for _ in 0 ..< n_bkeys {
 				tag := _fmt_read_varint_u64(&rd) or_return
-				bkey: string
+				raw_bkey: string
 				if (tag & 1) != 0 {
-					sid := u32(tag >> 1)
-					raw_bk := _sym_get(cat.syms, sid) or_return
-					bkey = strings.clone(raw_bk, cat.allocator)
-				} else {
-					did := int(tag >> 1)
-					if did < 0 || did >= len(cat.descs.items) {
+					sid_u := tag >> 1
+					if sid_u > u64(max(u32)) {
 						return false
 					}
+					raw_bkey = _sym_get(cat.syms, u32(sid_u)) or_return
+				} else {
+					did_u := tag >> 1
+					if did_u >= u64(len(cat.descs.items)) {
+						return false
+					}
+					did := int(did_u)
 					if desc_full_cache[did] == "" {
-						_, _, _, df, d_ok := _desc_materialize_strings(
+						_, g_tmp, n_tmp, df, d_ok := _desc_materialize_strings(
 							cat.descs,
 							cat.syms,
 							u32(did),
 							context.temp_allocator,
 						)
+						delete(g_tmp, context.temp_allocator)
+						delete(n_tmp, context.temp_allocator)
 						if !d_ok {
 							return false
 						}
 						desc_full_cache[did] = df
 					}
-					bkey = strings.clone(desc_full_cache[did], cat.allocator)
+					raw_bkey = desc_full_cache[did]
 				}
 				ro := common_ord
 				if !all_same {
-					ro = u32(_fmt_read_varint_u64(&rd) or_return)
+					ro = _fmt_read_varint_u32(&rd) or_return
 				}
-				ri := u32(_fmt_read_varint_u64(&rd) or_return)
+				ri := _fmt_read_varint_u32(&rd) or_return
 				ref := _Snap_Ref {
 					run_ord = ro,
 					rec_idx = ri,
 				}
-				if bkey in m_ptr {
-					m_ptr[bkey] = ref
-					delete(bkey, cat.allocator)
+				if raw_bkey in m_ptr {
+					m_ptr[raw_bkey] = ref
 				} else {
-					m_ptr[bkey] = ref
+					m_ptr[strings.clone(raw_bkey, cat.allocator)] = ref
 				}
 			}
 		}

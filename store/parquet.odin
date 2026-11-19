@@ -526,7 +526,7 @@ export_parquet :: proc(
 	compress_pages := true,
 	allocator := context.allocator,
 ) -> bool {
-	_ensure_export_parent_dir(path)
+	_ensure_parent_dir(path)
 
 	file_buf := make([dynamic]u8, 0, 16384, allocator)
 	defer delete(file_buf)

@@ -1996,3 +1996,103 @@ test_v5_gcd_bss_catalog_autoseal_and_longitudinal_series :: proc(t: ^testing.T) 
 		}
 	}
 }
+
+@(test)
+test_store_multilang_empty_lang_queries :: proc(t: ^testing.T) {
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "in-memory store should open")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	inputs := [5]struct {
+		commit, lang, run_id: string,
+		ns:                   f64,
+	} {
+		{"ml01", "odin", "r-o1", 50.0},
+		{"ml01", "odin", "r-o2", 50.0},
+		{"ml01", "zig", "r-z1", 120.0},
+		{"ml02", "odin", "r-o3", 45.0},
+		{"ml02", "zig", "r-z2", 115.0},
+	}
+	for item in inputs {
+		pkt := _make_packet(
+			item.commit,
+			item.lang,
+			item.run_id,
+			"ml",
+			[]string{"op_a"},
+			[]f64{item.ns},
+			[]u64{1024},
+		)
+		testing.expect(t, store.store_ingest_packet(&st, pkt), "ingest multilang packet")
+		hugi.packet_destroy(&pkt)
+	}
+
+	// 1. Commit query with lang == "" must preserve distinct "odin" and "zig" pooled rows.
+	ml01 := store.store_load_pooled_records(&st, lang = "", commit = "ml01")
+	defer store.pooled_records_destroy(ml01)
+	testing.expect_value(t, len(ml01), 2)
+	if len(ml01) == 2 {
+		testing.expect_value(t, ml01[0].lang, "odin")
+		testing.expect_value(t, ml01[0].run_count, 2)
+		testing.expect(
+			t,
+			math.abs(hugi.fs_to_ns_f64(ml01[0].p50_fs) - 50.0) < 2.0,
+			"odin ml01 median ~50ns",
+		)
+		testing.expect_value(t, ml01[1].lang, "zig")
+		testing.expect_value(t, ml01[1].run_count, 1)
+		testing.expect(
+			t,
+			math.abs(hugi.fs_to_ns_f64(ml01[1].p50_fs) - 120.0) < 2.0,
+			"zig ml01 median ~120ns",
+		)
+	}
+
+	// 2. Commit series with lang == "" must preserve (commit, lang) buckets without cross-lang merge.
+	series := store.store_load_commit_series_records(&st, lang = "")
+	defer store.pooled_records_destroy(series)
+	testing.expect_value(t, len(series), 4)
+	if len(series) == 4 {
+		expected := [4]struct {
+			commit, lang: string,
+			run_count:    int,
+			ns:           f64,
+		} {
+			{"ml01", "odin", 2, 50.0},
+			{"ml01", "zig", 1, 120.0},
+			{"ml02", "odin", 1, 45.0},
+			{"ml02", "zig", 1, 115.0},
+		}
+		for exp, i in expected {
+			testing.expect_value(t, series[i].commit, exp.commit)
+			testing.expect_value(t, series[i].lang, exp.lang)
+			testing.expect_value(t, series[i].run_count, exp.run_count)
+			testing.expect(
+				t,
+				math.abs(hugi.fs_to_ns_f64(series[i].p50_fs) - exp.ns) < 2.0,
+				"commit series median matches expected language",
+			)
+		}
+	}
+
+	// 3. All-run series with lang == "" must preserve all 5 runs with their true languages.
+	all_runs := store.store_load_all_run_records(&st, lang = "")
+	defer store.pooled_records_destroy(all_runs)
+	testing.expect_value(t, len(all_runs), 5)
+	if len(all_runs) == 5 {
+		odin_cnt := 0
+		zig_cnt := 0
+		for r in all_runs {
+			if r.lang == "odin" {
+				odin_cnt += 1
+			} else if r.lang == "zig" {
+				zig_cnt += 1
+			}
+		}
+		testing.expect_value(t, odin_cnt, 3)
+		testing.expect_value(t, zig_cnt, 2)
+	}
+}

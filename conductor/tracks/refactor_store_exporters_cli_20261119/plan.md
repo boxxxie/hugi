@@ -37,18 +37,18 @@ Follow [workflow.md](../../workflow.md): keep `hugi/` isolated from `xitdb`/`ska
 
 ## Phase 3: Unify `store/` Queries, Compaction, and Modularize `store/db.odin`
 
-- [ ] Task: Add regression tests for `lang == ""` multi-language queries
-    - [ ] Add `@(test)` assertions in `tests/hugi_test.odin` verifying `store_load_raw_groups(..., lang = "", commit = ...)` and `store_load_commit_series_records(..., lang = "")` preserve distinct `"odin"` and `"zig"` rows rather than coercing to `"odin"` or merging across languages.
-- [ ] Task: Extract query and raw-group loaders (`store/query.odin`)
-    - [ ] Move `store_list_runs`, `store_list_commits`, `store_load_all_packets`, `_Raw_Group`, `_raw_groups_destroy`, `_raw_groups_add_record`, `store_load_raw_groups`, `_store_load_commit_series_raw_groups`, and `_store_load_all_run_raw_groups` into `store/query.odin`.
-    - [ ] Factor shared moment-open / catalog run iteration helpers and fix `lang == ""` keying (`(lang, full_name)` for commit queries and `(commit, lang)` for commit-series queries).
-- [ ] Task: Extract cold-chunk sealing and compaction (`store/compact.odin`)
-    - [ ] Extract shared `@(private)` `_seal_packets_to_cold_chunks` and `_compact_db_to_path_atomic` helpers.
-    - [ ] Move `_Fast_Compact_Ctx`, `_fast_compact_moment_cb`, `_try_fast_catalog_compact`, `store_compact_with_options`, and `store_compact` into `store/compact.odin`, reusing the shared sealing/atomic-write helpers from `_ingest_batch_cb` and compaction paths.
-- [ ] Task: Clean up `store/db.odin` and deduplicate `_ensure_parent_dir`
-    - [ ] Mark `_ensure_parent_dir` `@(private = "package")` in `store/db.odin` and remove duplicate `_ensure_export_parent_dir` from `store/export.odin` (updating `store/parquet.odin` and export files).
-    - [ ] Confirm `store/db.odin` focuses strictly on `Store` open/overlay/close, ingestion, and `_Moment_Reader`.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Unify store/ Queries, Compaction, and Modularize store/db.odin' (Protocol in workflow.md)
+- [x] Task: Add regression tests for `lang == ""` multi-language queries
+    - [x] Add `@(test)` assertions in `tests/hugi_test.odin` verifying `store_load_raw_groups(..., lang = "", commit = ...)` and `store_load_commit_series_records(..., lang = "")` preserve distinct `"odin"` and `"zig"` rows rather than coercing to `"odin"` or merging across languages.
+- [x] Task: Extract query and raw-group loaders (`store/query.odin`)
+    - [x] Move `store_list_runs`, `store_list_commits`, `store_load_all_packets`, `_Raw_Group`, `_raw_groups_destroy`, `_raw_groups_add_record`, `store_load_raw_groups`, `_store_load_commit_series_raw_groups`, and `_store_load_all_run_raw_groups` into `store/query.odin`.
+    - [x] Factor shared moment-open / catalog run iteration helpers and fix `lang == ""` keying (`(lang, full_name)` for commit queries and `(commit, lang)` for commit-series queries).
+- [x] Task: Extract cold-chunk sealing and compaction (`store/compact.odin`)
+    - [x] Extract shared `@(private)` `_seal_packets_to_cold_chunks` and `_compact_db_to_path_atomic` helpers.
+    - [x] Move `_Fast_Compact_Ctx`, `_fast_compact_moment_cb`, `_try_fast_catalog_compact`, `store_compact_with_options`, and `store_compact` into `store/compact.odin`, reusing the shared sealing/atomic-write helpers from `_ingest_batch_cb` and compaction paths.
+- [x] Task: Clean up `store/db.odin` and deduplicate `_ensure_parent_dir`
+    - [x] Mark `_ensure_parent_dir` `@(private = "package")` in `store/db.odin` and remove duplicate `_ensure_export_parent_dir` from `store/export.odin` (updating `store/parquet.odin` and export files).
+    - [x] Confirm `store/db.odin` focuses strictly on `Store` open/overlay/close, ingestion, and `_Moment_Reader`.
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Unify store/ Queries, Compaction, and Modularize store/db.odin' (Protocol in workflow.md)
 
 ---
 

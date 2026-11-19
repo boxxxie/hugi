@@ -6,18 +6,7 @@ import hugi "../hugi"
 import "core:fmt"
 import "core:mem"
 import "core:os"
-import "core:path/filepath"
 import "core:strings"
-
-@(private = "package")
-_ensure_export_parent_dir :: proc(path: string) {
-	dir := filepath.dir(path)
-	if dir == "" || dir == "." || dir == "/" || os.exists(dir) {
-		return
-	}
-	_ensure_export_parent_dir(dir)
-	_ = os.make_directory(dir)
-}
 
 @(private = "file")
 _write_json_str :: proc(sb: ^strings.Builder, s: string) {
@@ -86,7 +75,7 @@ export_arrow_ipc :: proc(
 	ipc_compression := skadi.IPC_Compression.LZ4_Frame,
 	allocator := context.allocator,
 ) -> bool {
-	_ensure_export_parent_dir(path)
+	_ensure_parent_dir(path)
 
 	dec_ns := skadi.Decimal64_Type {
 		precision = 18,
@@ -593,7 +582,7 @@ Exports pooled benchmark records to a formatted JSON array document.
 */
 @(require_results)
 export_json :: proc(path: string, records: []Pooled_Record) -> bool {
-	_ensure_export_parent_dir(path)
+	_ensure_parent_dir(path)
 
 	if len(records) == 0 {
 		return os.write_entire_file(path, transmute([]u8)string("[]\n")) == nil
@@ -617,7 +606,7 @@ Exports pooled benchmark records to JSON Lines compatible with legacy `history.j
 */
 @(require_results)
 export_jsonl :: proc(path: string, records: []Pooled_Record) -> bool {
-	_ensure_export_parent_dir(path)
+	_ensure_parent_dir(path)
 
 	sb := strings.builder_make(context.temp_allocator)
 	for r in records {
@@ -630,7 +619,7 @@ export_jsonl :: proc(path: string, records: []Pooled_Record) -> bool {
 
 @(private = "file")
 _export_delimited :: proc(path: string, records: []Pooled_Record, delim: byte) -> bool {
-	_ensure_export_parent_dir(path)
+	_ensure_parent_dir(path)
 
 	cols := [?]string {
 		"commit",
@@ -805,7 +794,7 @@ Exports pooled benchmark records as a GitHub-Flavored Markdown report file.
 */
 @(require_results)
 export_markdown :: proc(path: string, records: []Pooled_Record) -> bool {
-	_ensure_export_parent_dir(path)
+	_ensure_parent_dir(path)
 	md := format_markdown_table(records, context.temp_allocator)
 	return os.write_entire_file(path, transmute([]u8)md) == nil
 }

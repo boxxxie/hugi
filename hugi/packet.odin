@@ -10,6 +10,8 @@ import "core:strings"
 
 PACKET_MAGIC :: "HPKT\x02\x00\x00\x00"
 RECORD_MAGIC :: "OBRC\x02\x00\x00\x00"
+PACKET_ENV_TRAILER_MAGIC :: "HENV"
+PACKET_ENV_TRAILER_VERSION :: u8(1)
 MAX_METRICS :: 8
 
 FS_PER_NS :: i64(1_000_000)
@@ -154,6 +156,7 @@ Run_Packet :: struct {
 	odin_version:   string,
 	timestamp_unix: i64,
 	selective:      bool,
+	env:            Run_Env,
 	records:        [dynamic]Record,
 }
 
@@ -204,6 +207,7 @@ packet_destroy :: proc(pkt: ^Run_Packet, allocator := context.allocator) {
 	delete(pkt.arch, allocator)
 	delete(pkt.optimization, allocator)
 	delete(pkt.odin_version, allocator)
+	run_env_destroy(&pkt.env, allocator)
 	for &r in pkt.records {
 		record_destroy(&r, allocator)
 	}
@@ -375,76 +379,77 @@ _write_record_body :: proc(buf: ^[dynamic]u8, r: Record, include_samples: bool) 
 
 @(private = "file", require_results)
 _read_record_body :: proc(rd: ^_Reader, allocator: runtime.Allocator) -> (rec: Record, ok: bool) {
+	tmp: Record
 	defer if !ok {
-		record_destroy(&rec, allocator)
+		record_destroy(&tmp, allocator)
 	}
-	rec.metrics = make([dynamic]Metric, allocator)
-	rec.samples_batch_ns = make([dynamic]u64, allocator)
+	tmp.metrics = make([dynamic]Metric, allocator)
+	tmp.samples_batch_ns = make([dynamic]u64, allocator)
 
 	rank_i := _read_i64(rd) or_return
-	rec.rank = int(rank_i)
-	rec.group_name = _read_str(rd, allocator) or_return
-	rec.name = _read_str(rd, allocator) or_return
-	rec.full_name = _read_str(rd, allocator) or_return
+	tmp.rank = int(rank_i)
+	tmp.group_name = _read_str(rd, allocator) or_return
+	tmp.name = _read_str(rd, allocator) or_return
+	tmp.full_name = _read_str(rd, allocator) or_return
 	param_i := _read_i64(rd) or_return
-	rec.param = int(param_i)
-	rec.has_param = (_read_u8(rd) or_return) != 0
+	tmp.param = int(param_i)
+	tmp.has_param = (_read_u8(rd) or_return) != 0
 	threads_i := _read_i64(rd) or_return
-	rec.threads = int(threads_i)
-	rec.has_threads = (_read_u8(rd) or_return) != 0
-	rec.ops_per_sample = _read_u64(rd) or_return
-	rec.samples = int(_read_u32(rd) or_return)
-	rec.warmup = int(_read_u32(rd) or_return)
-	rec.min_fs = _read_i64(rd) or_return
-	rec.p25_fs = _read_i64(rd) or_return
-	rec.p50_fs = _read_i64(rd) or_return
-	rec.p75_fs = _read_i64(rd) or_return
-	rec.p95_fs = _read_i64(rd) or_return
-	rec.p99_fs = _read_i64(rd) or_return
-	rec.max_fs = _read_i64(rd) or_return
-	rec.mean_fs = _read_i64(rd) or_return
-	rec.std_dev_fs = _read_i64(rd) or_return
-	rec.ci95_fs = _read_i64(rd) or_return
-	rec.cv_pct = _read_f64(rd) or_return
-	rec.iqr_fs = _read_i64(rd) or_return
-	rec.mad_fs = _read_i64(rd) or_return
-	rec.median_cycles = _read_f64(rd) or_return
-	rec.bytes_per_op = _read_u64(rd) or_return
-	rec.items_per_op = _read_u64(rd) or_return
-	rec.mb_per_sec = _read_f64(rd) or_return
-	rec.items_per_sec = _read_f64(rd) or_return
-	rec.footprint_bytes = _read_u64(rd) or_return
-	rec.allocs_per_op = _read_f64(rd) or_return
-	rec.resizes_per_op = _read_f64(rd) or_return
-	rec.alloc_bytes_per_op = _read_f64(rd) or_return
-	rec.temp_allocs_per_op = _read_f64(rd) or_return
-	rec.temp_bytes_per_op = _read_f64(rd) or_return
-	rec.peak_heap_bytes = _read_i64(rd) or_return
-	rec.zero_alloc_failed = (_read_u8(rd) or_return) != 0
-	rec.error = _read_str(rd, allocator) or_return
+	tmp.threads = int(threads_i)
+	tmp.has_threads = (_read_u8(rd) or_return) != 0
+	tmp.ops_per_sample = _read_u64(rd) or_return
+	tmp.samples = int(_read_u32(rd) or_return)
+	tmp.warmup = int(_read_u32(rd) or_return)
+	tmp.min_fs = _read_i64(rd) or_return
+	tmp.p25_fs = _read_i64(rd) or_return
+	tmp.p50_fs = _read_i64(rd) or_return
+	tmp.p75_fs = _read_i64(rd) or_return
+	tmp.p95_fs = _read_i64(rd) or_return
+	tmp.p99_fs = _read_i64(rd) or_return
+	tmp.max_fs = _read_i64(rd) or_return
+	tmp.mean_fs = _read_i64(rd) or_return
+	tmp.std_dev_fs = _read_i64(rd) or_return
+	tmp.ci95_fs = _read_i64(rd) or_return
+	tmp.cv_pct = _read_f64(rd) or_return
+	tmp.iqr_fs = _read_i64(rd) or_return
+	tmp.mad_fs = _read_i64(rd) or_return
+	tmp.median_cycles = _read_f64(rd) or_return
+	tmp.bytes_per_op = _read_u64(rd) or_return
+	tmp.items_per_op = _read_u64(rd) or_return
+	tmp.mb_per_sec = _read_f64(rd) or_return
+	tmp.items_per_sec = _read_f64(rd) or_return
+	tmp.footprint_bytes = _read_u64(rd) or_return
+	tmp.allocs_per_op = _read_f64(rd) or_return
+	tmp.resizes_per_op = _read_f64(rd) or_return
+	tmp.alloc_bytes_per_op = _read_f64(rd) or_return
+	tmp.temp_allocs_per_op = _read_f64(rd) or_return
+	tmp.temp_bytes_per_op = _read_f64(rd) or_return
+	tmp.peak_heap_bytes = _read_i64(rd) or_return
+	tmp.zero_alloc_failed = (_read_u8(rd) or_return) != 0
+	tmp.error = _read_str(rd, allocator) or_return
 
 	m_count := int(_read_u32(rd) or_return)
 	if m_count < 0 || m_count > 1024 {
-		return rec, false
+		return {}, false
 	}
-	reserve(&rec.metrics, m_count)
+	reserve(&tmp.metrics, m_count)
 	for _ in 0 ..< m_count {
 		unit := _read_str(rd, allocator) or_return
 		val := _read_f64(rd) or_return
-		append(&rec.metrics, Metric{unit = unit, value = val})
+		append(&tmp.metrics, Metric{unit = unit, value = val})
 	}
 
 	s_count := int(_read_u32(rd) or_return)
 	if s_count < 0 || rd.pos + s_count * 8 > len(rd.data) {
-		return rec, false
+		return {}, false
 	}
-	reserve(&rec.samples_batch_ns, s_count)
+	reserve(&tmp.samples_batch_ns, s_count)
 	for _ in 0 ..< s_count {
 		s := _read_u64(rd) or_return
-		append(&rec.samples_batch_ns, s)
+		append(&tmp.samples_batch_ns, s)
 	}
 
-	return rec, true
+	return tmp, true
 }
 
 /*
@@ -509,6 +514,17 @@ encode_packet_bytes :: proc(
 	for r in pkt.records {
 		_write_record_body(&buf, r, include_samples)
 	}
+	if !run_env_is_empty(pkt.env) {
+		append(&buf, ..transmute([]u8)string(PACKET_ENV_TRAILER_MAGIC))
+		_append_u8(&buf, PACKET_ENV_TRAILER_VERSION)
+		_append_str(&buf, pkt.env.cpu_model)
+		_append_str(&buf, pkt.env.governor)
+		_append_u64(&buf, pkt.env.scaling_max_khz)
+		_append_u64(&buf, pkt.env.cpuinfo_max_khz)
+		_append_u8(&buf, u8(pkt.env.boost_state))
+		_append_str(&buf, pkt.env.build_flags)
+		_append_str(&buf, pkt.env.runtime_version)
+	}
 	return buf[:]
 }
 
@@ -526,36 +542,62 @@ decode_packet_bytes :: proc(
 	if len(data) < len(PACKET_MAGIC) || string(data[:len(PACKET_MAGIC)]) != PACKET_MAGIC {
 		return {}, false
 	}
+	tmp: Run_Packet
 	defer if !ok {
-		packet_destroy(&pkt, allocator)
+		packet_destroy(&tmp, allocator)
 	}
 	rd := _Reader {
 		data = data,
 		pos  = len(PACKET_MAGIC),
 	}
-	pkt.records = make([dynamic]Record, allocator)
+	tmp.records = make([dynamic]Record, allocator)
 
-	pkt.suite_name = _read_str(&rd, allocator) or_return
-	pkt.lang = _read_str(&rd, allocator) or_return
-	pkt.commit = _read_str(&rd, allocator) or_return
-	pkt.run_id = _read_str(&rd, allocator) or_return
-	pkt.os = _read_str(&rd, allocator) or_return
-	pkt.arch = _read_str(&rd, allocator) or_return
-	pkt.optimization = _read_str(&rd, allocator) or_return
-	pkt.odin_version = _read_str(&rd, allocator) or_return
-	pkt.timestamp_unix = _read_i64(&rd) or_return
-	pkt.selective = (_read_u8(&rd) or_return) != 0
+	tmp.suite_name = _read_str(&rd, allocator) or_return
+	tmp.lang = _read_str(&rd, allocator) or_return
+	tmp.commit = _read_str(&rd, allocator) or_return
+	tmp.run_id = _read_str(&rd, allocator) or_return
+	tmp.os = _read_str(&rd, allocator) or_return
+	tmp.arch = _read_str(&rd, allocator) or_return
+	tmp.optimization = _read_str(&rd, allocator) or_return
+	tmp.odin_version = _read_str(&rd, allocator) or_return
+	tmp.timestamp_unix = _read_i64(&rd) or_return
+	tmp.selective = (_read_u8(&rd) or_return) != 0
 
 	rec_count := int(_read_u32(&rd) or_return)
 	if rec_count < 0 || rec_count > 100_000 {
-		return pkt, false
+		return {}, false
 	}
-	reserve(&pkt.records, rec_count)
+	reserve(&tmp.records, rec_count)
 	for _ in 0 ..< rec_count {
 		r := _read_record_body(&rd, allocator) or_return
-		append(&pkt.records, r)
+		append(&tmp.records, r)
 	}
-	return pkt, true
+	if rd.pos < len(rd.data) {
+		magic_len := len(PACKET_ENV_TRAILER_MAGIC)
+		if rd.pos + magic_len + 1 > len(rd.data) {
+			return {}, false
+		}
+		if string(rd.data[rd.pos:rd.pos + magic_len]) != PACKET_ENV_TRAILER_MAGIC {
+			return {}, false
+		}
+		rd.pos += magic_len
+		ver := _read_u8(&rd) or_return
+		if ver != PACKET_ENV_TRAILER_VERSION {
+			return {}, false
+		}
+		tmp.env.cpu_model = _read_str(&rd, allocator) or_return
+		tmp.env.governor = _read_str(&rd, allocator) or_return
+		tmp.env.scaling_max_khz = _read_u64(&rd) or_return
+		tmp.env.cpuinfo_max_khz = _read_u64(&rd) or_return
+		raw_boost := _read_u8(&rd) or_return
+		tmp.env.boost_state = i8(raw_boost)
+		tmp.env.build_flags = _read_str(&rd, allocator) or_return
+		tmp.env.runtime_version = _read_str(&rd, allocator) or_return
+		if rd.pos != len(rd.data) {
+			return {}, false
+		}
+	}
+	return tmp, true
 }
 
 @(require_results)

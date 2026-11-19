@@ -57,6 +57,9 @@ _resolve_db_path :: proc(explicit: string) -> string {
 	if explicit != "" {
 		return explicit
 	}
+	if cfg_dir, _, cfg, cfg_ok := _read_nearest_project_config("."); cfg_ok && cfg.db != "" {
+		return _resolve_config_path(cfg_dir, cfg.db, context.temp_allocator)
+	}
 	if os.is_dir("benchmarks") {
 		if !os.exists("benchmarks/history.hugidb") && os.exists("benchmarks/history.benchdb") {
 			return "benchmarks/history.benchdb"

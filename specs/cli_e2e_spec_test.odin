@@ -738,3 +738,79 @@ spec_cli_invalid_invocations_return_nonzero_and_diagnostics_matrix :: proc(t: ^t
 		}
 	}
 }
+
+@(test)
+spec_cli_doctor_hugi_json_and_ingest_provenance :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 60)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_cli_bench_package(&w, "cfg-pkg", work_iters = 16)
+	given_project_config(
+		&w,
+		`{
+	"db": "cfg.hugidb",
+	"pkg_dir": "cfg-pkg",
+	"runs": 3,
+	"warmup": 0,
+	"extra_build_flags": "-o:none"
+}
+`,
+	)
+
+	upon_running_cli(&w, "doctor", "--format", "json")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, `"cpu_model":`)
+		shows_stdout_contains(&w, out, `"scaling_max_khz":`)
+		shows_stdout_contains(&w, out, `"pkg_dir": "cfg-pkg"`)
+	}
+
+	upon_running_cli(&w, "run", "--commit", "cfg001", "--quiet")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "samples=3")
+		shows_stdout_contains(&w, out, "cfg.hugidb")
+	}
+
+	upon_running_cli(&w, "inspect", "--commit", "cfg001")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Environment:")
+		shows_stdout_contains(&w, out, "-o:none")
+	}
+
+	given_packet_file(
+		&w,
+		"pkt-ext",
+		commit = "ext001",
+		lang = "cpp",
+		run_id = "r-ext",
+		benches = []Bench_Observation{{name = "scan", median_ns = 40.0, samples = 7}},
+	)
+	upon_running_cli(
+		&w,
+		"ingest",
+		"--db",
+		"@ing.hugidb",
+		"@pkt-ext",
+		"--capture-host-env",
+		"--build-flags",
+		"-O3",
+		"--runtime-version",
+		"GCC 14",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+
+	upon_running_cli(&w, "inspect", "--db", "@ing.hugidb", "--lang", "cpp")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Environment:")
+		shows_stdout_contains(&w, out, "-O3")
+		shows_stdout_contains(&w, out, "GCC 14")
+	}
+}

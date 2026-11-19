@@ -191,3 +191,94 @@ test_suite_create_syncs_programmatic_name_filter_to_obench :: proc(t: ^testing.T
 	defer hugi.suite_destroy(&s_multi)
 	testing.expect_value(t, s_multi.obench_suite.config.filter, "")
 }
+
+@(test)
+test_packet_env_trailer_roundtrip_and_compat :: proc(t: ^testing.T) {
+	// 1. Packet with full Run_Env round-trips via HENV trailer.
+	pkt := _make_packet(
+		"env001",
+		"odin",
+		"run-env-1",
+		"env_suite",
+		[]string{"op"},
+		[]f64{50.0},
+		[]u64{1024},
+	)
+	defer hugi.packet_destroy(&pkt)
+	pkt.env = hugi.Run_Env {
+		cpu_model       = strings.clone("AMD Ryzen 7 7735U"),
+		governor        = strings.clone("performance"),
+		scaling_max_khz = 2_701_000,
+		cpuinfo_max_khz = 4_821_140,
+		boost_state     = 1,
+		build_flags     = strings.clone("-o:speed -microarch:native"),
+		runtime_version = strings.clone("dev-2026-09"),
+	}
+
+	enc := hugi.encode_packet_bytes(pkt, true)
+	defer delete(enc)
+
+	dec, ok := hugi.decode_packet_bytes(enc)
+	defer hugi.packet_destroy(&dec)
+	testing.expect(t, ok, "packet with HENV trailer should decode")
+	testing.expect_value(t, dec.env.cpu_model, "AMD Ryzen 7 7735U")
+	testing.expect_value(t, dec.env.governor, "performance")
+	testing.expect_value(t, dec.env.scaling_max_khz, u64(2_701_000))
+	testing.expect_value(t, dec.env.cpuinfo_max_khz, u64(4_821_140))
+	testing.expect_value(t, dec.env.boost_state, i8(1))
+	testing.expect_value(t, dec.env.build_flags, "-o:speed -microarch:native")
+	testing.expect_value(t, dec.env.runtime_version, "dev-2026-09")
+
+	// 2. Packet without env emits no HENV trailer and decodes with empty env.
+	pkt_plain := _make_packet(
+		"env002",
+		"odin",
+		"run-plain-1",
+		"env_suite",
+		[]string{"op"},
+		[]f64{50.0},
+		[]u64{1024},
+	)
+	defer hugi.packet_destroy(&pkt_plain)
+	enc_plain := hugi.encode_packet_bytes(pkt_plain, true)
+	defer delete(enc_plain)
+	testing.expect(
+		t,
+		!strings.contains(string(enc_plain), hugi.PACKET_ENV_TRAILER_MAGIC),
+		"empty env must not emit HENV trailer",
+	)
+	dec_plain, ok_plain := hugi.decode_packet_bytes(enc_plain)
+	defer hugi.packet_destroy(&dec_plain)
+	testing.expect(t, ok_plain, "plain HPKT v2 without HENV must decode")
+	testing.expect(t, hugi.run_env_is_empty(dec_plain.env), "plain env should remain empty")
+
+	// 3. Truncated or malformed HENV trailer must be rejected without leaks.
+	trunc := enc[:len(enc) - 3]
+	bad_trunc, ok_trunc := hugi.decode_packet_bytes(trunc)
+	defer hugi.packet_destroy(&bad_trunc)
+	testing.expect(t, !ok_trunc, "truncated HENV trailer must be rejected")
+
+	bad_magic := make([]u8, len(enc_plain) + 5)
+	defer delete(bad_magic)
+	copy(bad_magic, enc_plain)
+	copy(bad_magic[len(enc_plain):], transmute([]u8)string("BAD!\x01"))
+	bad_m, ok_m := hugi.decode_packet_bytes(bad_magic)
+	defer hugi.packet_destroy(&bad_m)
+	testing.expect(t, !ok_m, "unknown trailing bytes must be rejected")
+
+	// 4. check_host_env reports clamped clock, non-performance governor, and boost disabled.
+	bad_env := hugi.Run_Env {
+		governor        = "powersave",
+		scaling_max_khz = 2_701_000,
+		cpuinfo_max_khz = 4_821_140,
+		boost_state     = -1,
+	}
+	warns := hugi.check_host_env(bad_env)
+	defer {
+		for w in warns {
+			delete(w)
+		}
+		delete(warns)
+	}
+	testing.expect_value(t, len(warns), 3)
+}

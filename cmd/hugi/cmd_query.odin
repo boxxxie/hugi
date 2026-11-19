@@ -201,7 +201,14 @@ _cmd_inspect :: proc(args: []string) -> int {
 		return 0
 	}
 
-	fmt.printfln("Inspect (%s, %d benchmarks):\n", lang, len(records))
+	fmt.printfln("Inspect (%s, %d benchmarks):", lang, len(records))
+	if !hugi.run_env_is_empty(records[0].env) {
+		fmt.printfln(
+			"Environment: %s",
+			hugi.format_env_brief(records[0].env, context.temp_allocator),
+		)
+	}
+	fmt.println()
 	fmt.print(store.format_markdown_table(records, context.temp_allocator))
 	if len(records) <= 25 {
 		fmt.println("\nQuantile Breakdown:")

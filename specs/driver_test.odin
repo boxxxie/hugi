@@ -44,6 +44,7 @@ _driver_build_packet :: proc(
 	benches: []Bench_Observation,
 	selective := false,
 	timestamp_unix: i64 = 1770000000,
+	env := hugi.Run_Env{},
 	allocator := context.allocator,
 ) -> hugi.Run_Packet {
 	pkt := hugi.Run_Packet {
@@ -57,6 +58,7 @@ _driver_build_packet :: proc(
 		odin_version   = strings.clone("spec", allocator),
 		timestamp_unix = timestamp_unix,
 		selective      = selective,
+		env            = hugi.run_env_clone(env, allocator),
 		records        = make([dynamic]hugi.Record, 0, len(benches), allocator),
 	}
 

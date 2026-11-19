@@ -7,11 +7,40 @@ import "core:os"
 import "core:strings"
 
 @(private)
+_apply_ingest_env :: proc(
+	pkt: ^hugi.Run_Packet,
+	capture_host_env: bool,
+	build_flags: string,
+	runtime_version: string,
+) {
+	if capture_host_env {
+		hugi.populate_packet_env(
+			pkt,
+			build_flags = build_flags,
+			runtime_version = runtime_version,
+			allocator = context.allocator,
+		)
+		return
+	}
+	if build_flags != "" {
+		delete(pkt.env.build_flags, context.allocator)
+		pkt.env.build_flags = strings.clone(build_flags, context.allocator)
+	}
+	if runtime_version != "" {
+		delete(pkt.env.runtime_version, context.allocator)
+		pkt.env.runtime_version = strings.clone(runtime_version, context.allocator)
+	}
+}
+
+@(private)
 _cmd_ingest :: proc(args: []string) -> int {
 	// Keep `files` on context.allocator so per-file temp_allocator flushes stay safe.
 	files := make([dynamic]string, context.allocator)
 	defer delete(files)
 	common := _Common_Opts{}
+	capture_host_env := false
+	build_flags := ""
+	runtime_version := ""
 
 	allowed := _Common_Flag_Set{.DB, .Lang, .Commit}
 	i := 0
@@ -31,6 +60,23 @@ _cmd_ingest :: proc(args: []string) -> int {
 		case .Matched:
 			continue
 		case .Not_Matched:
+		}
+		switch key {
+		case "capture-host-env":
+			capture_host_env = true
+		case "build-flags":
+			v, ok := _consume_value(args, &i, inline_val, key)
+			if !ok {
+				return 1
+			}
+			build_flags = v
+		case "runtime-version":
+			v, ok := _consume_value(args, &i, inline_val, key)
+			if !ok {
+				return 1
+			}
+			runtime_version = v
+		case:
 			fmt.eprintfln("hugi ingest: unknown flag '--%s'", key)
 			return 1
 		}
@@ -78,6 +124,7 @@ _cmd_ingest :: proc(args: []string) -> int {
 				delete(pkt.commit)
 				pkt.commit = strings.clone(commit_override)
 			}
+			_apply_ingest_env(&pkt, capture_host_env, build_flags, runtime_version)
 			if !store.store_ingest_packet(&st, pkt) {
 				fmt.eprintfln("hugi ingest: failed to write packet '%s' to store", path)
 				return 1
@@ -125,6 +172,7 @@ _cmd_ingest :: proc(args: []string) -> int {
 		defer hugi.packets_destroy(pkts)
 
 		for &pkt in pkts {
+			_apply_ingest_env(&pkt, capture_host_env, build_flags, runtime_version)
 			if !store.store_ingest_packet(&st, pkt) {
 				fmt.eprintfln("hugi ingest: failed to store packet from '%s'", path)
 				return 1

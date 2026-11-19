@@ -486,6 +486,7 @@ given_recorded_run_batch :: proc(
 	selective := false,
 	timestamp_unix: i64 = 1770000000,
 	suite_name := "spec_suite",
+	env := hugi.Run_Env{},
 	loc := #caller_location,
 ) {
 	st, ok := _world_active_store(w, loc)
@@ -500,6 +501,7 @@ given_recorded_run_batch :: proc(
 		benches,
 		selective,
 		timestamp_unix,
+		env,
 	)
 	defer hugi.packet_destroy(&pkt)
 	ing_ok := _driver_store_ingest_packet(st, pkt)
@@ -514,6 +516,7 @@ given_recorded_run_single :: proc(
 	selective := false,
 	timestamp_unix: i64 = 1770000000,
 	suite_name := "spec_suite",
+	env := hugi.Run_Env{},
 	loc := #caller_location,
 ) {
 	arr := [1]Bench_Observation{bench}
@@ -526,6 +529,7 @@ given_recorded_run_single :: proc(
 		selective,
 		timestamp_unix,
 		suite_name,
+		env,
 		loc,
 	)
 }
@@ -635,6 +639,7 @@ given_packet_file :: proc(
 	selective := false,
 	timestamp_unix: i64 = 1770000000,
 	suite_name := "spec_suite",
+	env := hugi.Run_Env{},
 	loc := #caller_location,
 ) {
 	path, p_ok := _world_resolve_label_path(w, label, ".hpk", loc)
@@ -649,6 +654,7 @@ given_packet_file :: proc(
 		benches,
 		selective,
 		timestamp_unix,
+		env,
 	)
 	defer hugi.packet_destroy(&pkt)
 	ok := _driver_write_packet_file(path, pkt)
@@ -733,6 +739,15 @@ given_cli_workspace :: proc(w: ^World, loc := #caller_location) {
 	w.db_path = db_path
 }
 
+given_project_config :: proc(w: ^World, content: string, loc := #caller_location) {
+	path, p_ok := _world_resolve_label_path(w, "hugi.json", ".json", loc)
+	if !p_ok {
+		return
+	}
+	ok := _driver_write_file_bytes(path, transmute([]u8)content)
+	testing.expect(w.t, ok, "write hugi.json fixture", loc = loc)
+}
+
 given_cli_bench_package :: proc(
 	w: ^World,
 	label: string,
@@ -781,6 +796,7 @@ upon_ingesting_run_batch :: proc(
 	selective := false,
 	timestamp_unix: i64 = 1770000000,
 	suite_name := "spec_suite",
+	env := hugi.Run_Env{},
 	loc := #caller_location,
 ) {
 	st, ok := _world_active_store(w, loc)
@@ -795,6 +811,7 @@ upon_ingesting_run_batch :: proc(
 		benches,
 		selective,
 		timestamp_unix,
+		env,
 	)
 	defer hugi.packet_destroy(&pkt)
 	w.last_ingest_ok = _driver_store_ingest_packet(st, pkt)
@@ -808,6 +825,7 @@ upon_ingesting_run_single :: proc(
 	selective := false,
 	timestamp_unix: i64 = 1770000000,
 	suite_name := "spec_suite",
+	env := hugi.Run_Env{},
 	loc := #caller_location,
 ) {
 	arr := [1]Bench_Observation{bench}
@@ -820,6 +838,7 @@ upon_ingesting_run_single :: proc(
 		selective,
 		timestamp_unix,
 		suite_name,
+		env,
 		loc,
 	)
 }
@@ -1856,6 +1875,44 @@ then_comparison_geomean_between :: proc(
 		min_pct,
 		max_pct,
 		g,
+		loc = loc,
+	)
+}
+
+then_comparison_warns_containing :: proc(w: ^World, substr: string, loc := #caller_location) {
+	if !testing.expect(w.t, w.has_comparison, "no comparison report in World", loc = loc) {
+		return
+	}
+	for msg in w.last_comparison.warnings {
+		if strings.contains(msg, substr) {
+			return
+		}
+	}
+	testing.expectf(
+		w.t,
+		false,
+		"expected comparison warnings (%v) to contain %q",
+		w.last_comparison.warnings,
+		substr,
+		loc = loc,
+	)
+}
+
+then_1v1_warns_containing :: proc(w: ^World, substr: string, loc := #caller_location) {
+	if !testing.expect(w.t, w.has_1v1, "no 1v1 report in World", loc = loc) {
+		return
+	}
+	for msg in w.last_1v1.warnings {
+		if strings.contains(msg, substr) {
+			return
+		}
+	}
+	testing.expectf(
+		w.t,
+		false,
+		"expected 1v1 warnings (%v) to contain %q",
+		w.last_1v1.warnings,
+		substr,
 		loc = loc,
 	)
 }

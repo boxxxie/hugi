@@ -440,6 +440,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 			s.config.groups_filter != "all") || s.config.name_filter != "",
 		records        = make([dynamic]Record, s.allocator),
 	}
+	populate_packet_env(&pkt, allocator = s.allocator)
 
 	rank := 0
 

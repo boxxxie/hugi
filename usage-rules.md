@@ -4,10 +4,12 @@ Concise, high-density rules and patterns for developers and AI coding agents wri
 
 ---
 
-## 1. Collections & Build Setup
+## 1. Collections, `hugi.json` & Build Setup
 
 * **Benchmark packages only need `hugi` and `obench`:** The `hugi` runner package has zero dependency on `xitdb` or `skadi`.
 * **`ols.json` auto-discovery:** `hugi run <pkg_dir>` walks upward to `.git` and automatically passes non-reserved `collections` (`core`, `base`, `vendor` are skipped) and `-custom-attribute:*` / `-ignore-unknown-attributes` from `ols.json` to `odin build`, defaulting to `-o:speed` unless an `-o:*` flag is already present.
+* **`hugi.json` project defaults:** Place a `hugi.json` at your repo root (`db`, `pkg_dir`, `runs`, `warmup`, `extra_build_flags`) so `hugi run`, `hugi doctor`, and query commands resolve consistent flags (like `-microarch:native` and `--runs 7`) automatically without duplicating arguments.
+* **`hugi doctor` preflight:** Run `hugi doctor` (or `hugi doctor --strict`) before benchmarking to verify CPU `scaling_max_freq` vs `cpuinfo_max_freq`, `scaling_governor`, and boost/turbo status. Every `hugi run` also records host/build provenance (`Run_Env`), and `hugi compare` / `compare-1v1` warn on mismatched clocks, CPUs, build flags, cross-language commit drift, or underpowered (`n < 5`) samples.
 * If `hugi` is not in your `ols.json`, set `HUGI_HOME=/path/to/hugi` so `hugi run` injects `-collection:hugi` and `-collection:obench` automatically.
 
 ```json

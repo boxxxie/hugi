@@ -1,8 +1,10 @@
 package hugi_cli
 
+import hugi "../../hugi"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:strings"
 import "core:testing"
 
 @(test)
@@ -296,4 +298,67 @@ test_cli_ols_discovery_and_export_validation :: proc(t: ^testing.T) {
 	defer if o3 {delete(l3)}
 	testing.expect_value(t, l3, "odin")
 	testing.expect(t, o3, "uppercase lang must allocate normalized string")
+}
+
+@(test)
+test_cli_project_config_doctor_and_ingest_env :: proc(t: ^testing.T) {
+	if !os.exists(".tmp") {
+		_ = os.make_directory(".tmp")
+	}
+	base_dir := fmt.tprintf(".tmp/cli_cfg_test_%d", os.get_pid())
+	sub_dir, _ := filepath.join({base_dir, "benchmarks"}, context.temp_allocator)
+	iso_dir, _ := filepath.join({base_dir, "isolated"}, context.temp_allocator)
+	iso_sub, _ := filepath.join({iso_dir, "bench"}, context.temp_allocator)
+	iso_git, _ := filepath.join({iso_dir, ".git"}, context.temp_allocator)
+	cfg_path, _ := filepath.join({base_dir, "hugi.json"}, context.temp_allocator)
+	_ = os.remove_all(base_dir)
+	_ = os.make_directory_all(sub_dir)
+	_ = os.make_directory_all(iso_sub)
+	_ = os.make_directory_all(iso_git)
+	defer _ = os.remove_all(base_dir)
+
+	cfg_src := `{
+		"db": "benchmarks/history.hugidb",
+		"pkg_dir": "benchmarks",
+		"runs": 7,
+		"warmup": 0,
+		"extra_build_flags": "-microarch:native"
+	}`
+	testing.expect(t, os.write_entire_file(cfg_path, transmute([]u8)cfg_src) == nil)
+
+	cfg_dir, got_path, got_cfg, ok := _read_nearest_project_config(sub_dir)
+	testing.expect(t, ok, "nearest hugi.json should be discovered from subdirectory")
+	testing.expect(t, strings.has_suffix(got_path, "hugi.json"))
+	testing.expect_value(t, got_cfg.db, "benchmarks/history.hugidb")
+	testing.expect_value(t, got_cfg.pkg_dir, "benchmarks")
+	testing.expect_value(t, got_cfg.runs, 7)
+	testing.expect_value(t, got_cfg.warmup, 0)
+	testing.expect_value(t, got_cfg.extra_build_flags, "-microarch:native")
+	expected_db, _ := filepath.join(
+		{cfg_dir, "benchmarks", "history.hugidb"},
+		context.temp_allocator,
+	)
+	testing.expect_value(t, _resolve_config_path(cfg_dir, got_cfg.db), expected_db)
+
+	// Upward search must stop at .git boundary.
+	_, _, iso_cfg, iso_ok := _read_nearest_project_config(iso_sub)
+	testing.expect(t, !iso_ok)
+	testing.expect_value(t, iso_cfg.warmup, -1)
+
+	// Doctor JSON runs cleanly without leaks.
+	testing.expect_value(t, _cmd_doctor([]string{"--format", "json"}), 0)
+
+	// _apply_ingest_env attaches and replaces fields without leaks.
+	pkt := hugi.Run_Packet {
+		lang         = strings.clone("cpp"),
+		odin_version = strings.clone("ignored"),
+		records      = make([dynamic]hugi.Record),
+	}
+	defer hugi.packet_destroy(&pkt)
+	_apply_ingest_env(&pkt, false, "-O2", "v1")
+	testing.expect_value(t, pkt.env.build_flags, "-O2")
+	testing.expect_value(t, pkt.env.runtime_version, "v1")
+	_apply_ingest_env(&pkt, true, "-O3", "Apache Arrow C++ 25.0.1")
+	testing.expect_value(t, pkt.env.build_flags, "-O3")
+	testing.expect_value(t, pkt.env.runtime_version, "Apache Arrow C++ 25.0.1")
 }

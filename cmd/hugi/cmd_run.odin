@@ -33,6 +33,7 @@ _Run_Opts :: struct {
 	baseline_commit:   string,
 	fail_on_reg:       bool,
 	extra_build_flags: string,
+	has_extra_flags:   bool,
 	quiet:             bool,
 	overlay:           bool,
 }
@@ -252,6 +253,7 @@ _parse_run_args :: proc(args: []string) -> (opts: _Run_Opts, exit_code: int, don
 			v, ok := _consume_value(args, &i, inline_val, key)
 			if !ok {return opts, 1, true}
 			opts.extra_build_flags = v
+			opts.has_extra_flags = true
 		case:
 			fmt.eprintfln("hugi run: unknown flag '--%s'", key)
 			return opts, 1, true
@@ -261,15 +263,41 @@ _parse_run_args :: proc(args: []string) -> (opts: _Run_Opts, exit_code: int, don
 }
 
 @(private = "file")
-_build_run_binary :: proc(opts: _Run_Opts, bin_path: string) -> bool {
+_apply_project_config_to_run :: proc(opts: ^_Run_Opts) {
+	start_dir := opts.has_pkg ? opts.pkg_dir : "."
+	cfg_dir, _, cfg, ok := _read_nearest_project_config(start_dir)
+	if !ok {
+		return
+	}
+	if !opts.has_pkg && cfg.pkg_dir != "" {
+		opts.pkg_dir = _resolve_config_path(cfg_dir, cfg.pkg_dir, context.temp_allocator)
+	}
+	if opts.common.db_flag == "" && cfg.db != "" {
+		opts.common.db_flag = _resolve_config_path(cfg_dir, cfg.db, context.temp_allocator)
+	}
+	if opts.runs == "" && cfg.runs > 0 {
+		opts.runs = fmt.tprintf("%d", cfg.runs)
+	}
+	if opts.warmup == "" && cfg.warmup >= 0 {
+		opts.warmup = fmt.tprintf("%d", cfg.warmup)
+	}
+	if !opts.has_extra_flags && cfg.extra_build_flags != "" {
+		opts.extra_build_flags = cfg.extra_build_flags
+	}
+}
+
+@(private = "file")
+_build_run_binary :: proc(opts: _Run_Opts, bin_path: string) -> (ok: bool, flags_summary: string) {
 	ols_flags := _discover_ols_build_flags(opts.pkg_dir)
 	extra_flags :=
 		_split_shell_tokens(opts.extra_build_flags, context.temp_allocator) if opts.extra_build_flags != "" else nil
 
 	build_cmd := make([dynamic]string, context.temp_allocator)
+	flag_summary := make([dynamic]string, context.temp_allocator)
 	append(&build_cmd, _odin_executable(), "build", opts.pkg_dir, fmt.tprintf("-out:%s", bin_path))
 	if !_has_opt_flag(ols_flags[:]) && !_has_opt_flag(extra_flags) {
 		append(&build_cmd, "-o:speed")
+		append(&flag_summary, "-o:speed")
 	}
 
 	seen_cols := make(map[string]bool, context.temp_allocator)
@@ -299,25 +327,27 @@ _build_run_binary :: proc(opts: _Run_Opts, bin_path: string) -> bool {
 	for tok in ols_flags {
 		if tok != "" && tok not_in seen_flags {
 			append(&build_cmd, tok)
+			append(&flag_summary, tok)
 			seen_flags[tok] = true
 		}
 	}
 	for tok in extra_flags {
 		if tok != "" && tok not_in seen_flags {
 			append(&build_cmd, tok)
+			append(&flag_summary, tok)
 			seen_flags[tok] = true
 		}
 	}
 
 	if !_run_process(build_cmd[:]) {
 		fmt.eprintfln("hugi run: build failed for '%s'", opts.pkg_dir)
-		return false
+		return false, ""
 	}
 	if !os.exists(bin_path) {
 		fmt.eprintfln("hugi run: compiler did not emit '%s'", bin_path)
-		return false
+		return false, ""
 	}
-	return true
+	return true, strings.join(flag_summary[:], " ", context.temp_allocator)
 }
 
 @(private = "file")
@@ -465,10 +495,19 @@ _cmd_run :: proc(args: []string) -> int {
 	if done {
 		return exit_code
 	}
+	_apply_project_config_to_run(&opts)
 
 	if !os.exists(opts.pkg_dir) {
 		fmt.eprintfln("hugi run: package path does not exist: '%s'", opts.pkg_dir)
 		return 1
+	}
+
+	if !opts.quiet {
+		host_env := hugi.collect_host_env(context.temp_allocator)
+		issues := hugi.check_host_env(host_env, context.temp_allocator)
+		for w in issues {
+			fmt.eprintfln("hugi warning: %s", w)
+		}
 	}
 
 	tmp_dir, t_err := os.temp_directory(context.temp_allocator)
@@ -496,7 +535,8 @@ _cmd_run :: proc(args: []string) -> int {
 		}
 	}
 
-	if !_build_run_binary(opts, bin_path) {
+	build_ok, build_flags_summary := _build_run_binary(opts, bin_path)
+	if !build_ok {
 		return 1
 	}
 
@@ -511,6 +551,11 @@ _cmd_run :: proc(args: []string) -> int {
 		return 1
 	}
 	defer hugi.packet_destroy(&pkt)
+	hugi.populate_packet_env(
+		&pkt,
+		build_flags = build_flags_summary,
+		allocator = context.allocator,
+	)
 
 	if !opts.no_db {
 		if code := _ingest_and_compare_run_packet(opts, pkt); code != 0 {

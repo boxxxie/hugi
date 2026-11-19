@@ -23,6 +23,10 @@ _PKT_FLAG_SYMS :: u8(1 << 0)
 _PKT_FLAG_DESCS :: u8(1 << 1)
 @(private)
 _PKT_FLAG_SELECTIVE :: u8(1 << 2)
+@(private)
+_PKT_FLAG_ENV :: u8(1 << 3)
+@(private)
+_COLD_EXT_ENV :: u8(0xE1)
 
 @(private)
 _REC_FLAG_CUSTOM_RANK :: u32(1 << 0)
@@ -153,6 +157,10 @@ _encode_hot_packet :: proc(
 	if pkt.selective {
 		pkt_flags |= _PKT_FLAG_SELECTIVE
 	}
+	has_env := !hugi.run_env_is_empty(pkt.env)
+	if has_env {
+		pkt_flags |= _PKT_FLAG_ENV
+	}
 
 	_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, pkt.suite_name)))
 	_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, pkt.lang)))
@@ -163,6 +171,15 @@ _encode_hot_packet :: proc(
 	_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, pkt.optimization)))
 	_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, pkt.odin_version)))
 	_fmt_append_zigzag_i64(&meta_raw, pkt.timestamp_unix)
+	if has_env {
+		_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, pkt.env.cpu_model)))
+		_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, pkt.env.governor)))
+		_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, pkt.env.build_flags)))
+		_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, pkt.env.runtime_version)))
+		_fmt_append_varint_u64(&meta_raw, pkt.env.scaling_max_khz)
+		_fmt_append_varint_u64(&meta_raw, pkt.env.cpuinfo_max_khz)
+		append(&meta_raw, u8(pkt.env.boost_state))
+	}
 
 	_fmt_append_varint_u64(&meta_raw, u64(len(pkt.records)))
 	total_samples := 0
@@ -257,8 +274,9 @@ _decode_hot_packet :: proc(
 	if string(blob[:len(CZPK_V4_MAGIC)]) != CZPK_V4_MAGIC {
 		return {}, false
 	}
+	tmp: hugi.Run_Packet
 	defer if !ok {
-		hugi.packet_destroy(&pkt, allocator)
+		hugi.packet_destroy(&tmp, allocator)
 	}
 
 	pos := len(CZPK_V4_MAGIC)
@@ -298,22 +316,32 @@ _decode_hot_packet :: proc(
 	rd := _Format_Reader {
 		data = meta_raw,
 	}
-	pkt.records = make([dynamic]hugi.Record, allocator)
-	pkt.selective = selective
+	tmp.records = make([dynamic]hugi.Record, allocator)
+	tmp.selective = selective
 
-	pkt.suite_name = _read_sym_clone(&rd, syms, allocator) or_return
-	pkt.lang = _read_sym_clone(&rd, syms, allocator) or_return
-	pkt.commit = _read_sym_clone(&rd, syms, allocator) or_return
-	pkt.run_id = _fmt_read_str(&rd, allocator) or_return
-	pkt.os = _read_sym_clone(&rd, syms, allocator) or_return
-	pkt.arch = _read_sym_clone(&rd, syms, allocator) or_return
-	pkt.optimization = _read_sym_clone(&rd, syms, allocator) or_return
-	pkt.odin_version = _read_sym_clone(&rd, syms, allocator) or_return
-	pkt.timestamp_unix = _fmt_read_zigzag_i64(&rd) or_return
+	tmp.suite_name = _read_sym_clone(&rd, syms, allocator) or_return
+	tmp.lang = _read_sym_clone(&rd, syms, allocator) or_return
+	tmp.commit = _read_sym_clone(&rd, syms, allocator) or_return
+	tmp.run_id = _fmt_read_str(&rd, allocator) or_return
+	tmp.os = _read_sym_clone(&rd, syms, allocator) or_return
+	tmp.arch = _read_sym_clone(&rd, syms, allocator) or_return
+	tmp.optimization = _read_sym_clone(&rd, syms, allocator) or_return
+	tmp.odin_version = _read_sym_clone(&rd, syms, allocator) or_return
+	tmp.timestamp_unix = _fmt_read_zigzag_i64(&rd) or_return
+	if (pkt_flags & _PKT_FLAG_ENV) != 0 {
+		tmp.env.cpu_model = _read_sym_clone(&rd, syms, allocator) or_return
+		tmp.env.governor = _read_sym_clone(&rd, syms, allocator) or_return
+		tmp.env.build_flags = _read_sym_clone(&rd, syms, allocator) or_return
+		tmp.env.runtime_version = _read_sym_clone(&rd, syms, allocator) or_return
+		tmp.env.scaling_max_khz = _fmt_read_varint_u64(&rd) or_return
+		tmp.env.cpuinfo_max_khz = _fmt_read_varint_u64(&rd) or_return
+		raw_boost := _fmt_read_u8(&rd) or_return
+		tmp.env.boost_state = i8(raw_boost)
+	}
 
 	rec_count := int(_fmt_read_varint_u64(&rd) or_return)
 	if rec_count < 0 || rec_count > 100_000 {
-		return pkt, false
+		return {}, false
 	}
 	sample_counts := make([]int, rec_count, context.temp_allocator)
 	defer delete(sample_counts, context.temp_allocator)
@@ -321,16 +349,16 @@ _decode_hot_packet :: proc(
 	for i in 0 ..< rec_count {
 		cnt := int(_fmt_read_varint_u64(&rd) or_return)
 		if cnt < 0 || cnt > 10_000_000 || expected_total > 100_000_000 - cnt {
-			return pkt, false
+			return {}, false
 		}
 		sample_counts[i] = cnt
 		expected_total += cnt
 	}
 	if expected_total != len(all_u64) {
-		return pkt, false
+		return {}, false
 	}
 
-	reserve(&pkt.records, rec_count)
+	reserve(&tmp.records, rec_count)
 	s_off := 0
 	for ri in 0 ..< rec_count {
 		desc_id := u32(_fmt_read_varint_u64(&rd) or_return)
@@ -364,8 +392,8 @@ _decode_hot_packet :: proc(
 			metrics           = make([dynamic]hugi.Metric, allocator),
 			samples_batch_ns  = make([dynamic]u64, allocator),
 		}
-		append(&pkt.records, r)
-		rp := &pkt.records[len(pkt.records) - 1]
+		append(&tmp.records, r)
+		rp := &tmp.records[len(tmp.records) - 1]
 
 		if (rflags & _REC_FLAG_CUSTOM_RANK) != 0 {
 			rp.rank = int(_fmt_read_zigzag_i64(&rd) or_return)
@@ -384,7 +412,7 @@ _decode_hot_packet :: proc(
 		if (rflags & _REC_FLAG_METRICS) != 0 {
 			mc := int(_fmt_read_varint_u64(&rd) or_return)
 			if mc < 0 || mc > 1024 {
-				return pkt, false
+				return {}, false
 			}
 			reserve(&rp.metrics, mc)
 			for _ in 0 ..< mc {
@@ -423,7 +451,10 @@ _decode_hot_packet :: proc(
 		}
 	}
 
-	return pkt, rd.pos == len(rd.data)
+	if rd.pos != len(rd.data) {
+		return {}, false
+	}
+	return tmp, true
 }
 
 // ── Transposed Cold-History Columnar Rollup Chunk (CZCH\x02) ────────────────
@@ -610,6 +641,44 @@ _encode_cold_chunk :: proc(
 			_fmt_append_f64_le(&meta_raw, r.items_per_sec)
 		} else if (fl & _REC_FLAG_CUSTOM_MBS) != 0 {
 			_fmt_append_f64_le(&meta_raw, r.mb_per_sec)
+		}
+	}
+
+	has_any_env := false
+	for p in pkts {
+		if !hugi.run_env_is_empty(p.env) {
+			has_any_env = true
+			break
+		}
+	}
+	if has_any_env {
+		append(&meta_raw, _COLD_EXT_ENV)
+		for p in pkts {
+			_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, p.env.cpu_model)))
+		}
+		for p in pkts {
+			_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, p.env.governor)))
+		}
+		for p in pkts {
+			_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, p.env.build_flags)))
+		}
+		for p in pkts {
+			_fmt_append_varint_u64(&meta_raw, u64(_sym_intern(syms, p.env.runtime_version)))
+		}
+		prev_smax: i64 = 0
+		for p in pkts {
+			s_i := i64(p.env.scaling_max_khz)
+			_fmt_append_zigzag_i64(&meta_raw, s_i - prev_smax)
+			prev_smax = s_i
+		}
+		prev_cmax: i64 = 0
+		for p in pkts {
+			c_i := i64(p.env.cpuinfo_max_khz)
+			_fmt_append_zigzag_i64(&meta_raw, c_i - prev_cmax)
+			prev_cmax = c_i
+		}
+		for p in pkts {
+			append(&meta_raw, u8(p.env.boost_state))
 		}
 	}
 
@@ -927,6 +996,47 @@ _decode_cold_chunk :: proc(
 		} else if (fl & _REC_FLAG_CUSTOM_MBS) != 0 {
 			rp.mb_per_sec = _fmt_read_f64_le(&rd) or_return
 			keep_mbs_flags[i] = true
+		}
+	}
+
+	if rd.pos < len(rd.data) {
+		ext_tag := _fmt_read_u8(&rd) or_return
+		if ext_tag != _COLD_EXT_ENV {
+			return nil, false
+		}
+		for i in 0 ..< n_runs {
+			out[i].env.cpu_model = _read_sym_clone(&rd, syms, allocator) or_return
+		}
+		for i in 0 ..< n_runs {
+			out[i].env.governor = _read_sym_clone(&rd, syms, allocator) or_return
+		}
+		for i in 0 ..< n_runs {
+			out[i].env.build_flags = _read_sym_clone(&rd, syms, allocator) or_return
+		}
+		for i in 0 ..< n_runs {
+			out[i].env.runtime_version = _read_sym_clone(&rd, syms, allocator) or_return
+		}
+		prev_smax: i64 = 0
+		for i in 0 ..< n_runs {
+			d := _fmt_read_zigzag_i64(&rd) or_return
+			prev_smax += d
+			if prev_smax < 0 {
+				return nil, false
+			}
+			out[i].env.scaling_max_khz = u64(prev_smax)
+		}
+		prev_cmax: i64 = 0
+		for i in 0 ..< n_runs {
+			d := _fmt_read_zigzag_i64(&rd) or_return
+			prev_cmax += d
+			if prev_cmax < 0 {
+				return nil, false
+			}
+			out[i].env.cpuinfo_max_khz = u64(prev_cmax)
+		}
+		for i in 0 ..< n_runs {
+			raw_b := _fmt_read_u8(&rd) or_return
+			out[i].env.boost_state = i8(raw_b)
 		}
 	}
 

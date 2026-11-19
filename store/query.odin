@@ -66,6 +66,8 @@ _Raw_Group :: struct {
 	lang:           string,
 	suite_name:     string,
 	timestamp_unix: i64,
+	env:            hugi.Run_Env,
+	env_mixed:      bool,
 	run_ids:        [dynamic]string,
 	records:        [dynamic]hugi.Record,
 }
@@ -77,6 +79,7 @@ _raw_groups_destroy :: proc(groups: []_Raw_Group, allocator := context.allocator
 		delete(g.commit, allocator)
 		delete(g.lang, allocator)
 		delete(g.suite_name, allocator)
+		hugi.run_env_destroy(&g.env, allocator)
 		for r in g.run_ids {
 			delete(r, allocator)
 		}
@@ -264,6 +267,7 @@ _raw_groups_add_record :: proc(
 	by_name: ^map[string]int,
 	pkt_commit, pkt_run_id, pkt_lang, pkt_suite: string,
 	pkt_ts: i64,
+	pkt_env: hugi.Run_Env,
 	r: hugi.Record,
 	filter: string,
 	allocator: runtime.Allocator,
@@ -287,12 +291,25 @@ _raw_groups_add_record :: proc(
 				lang = strings.clone(eff_lang, allocator),
 				suite_name = strings.clone(pkt_suite, allocator),
 				timestamp_unix = pkt_ts,
+				env = hugi.run_env_clone(pkt_env, allocator),
 				run_ids = make([dynamic]string, allocator),
 				records = make([dynamic]hugi.Record, allocator),
 			},
 		)
 	}
 	g := &groups[g_idx]
+	if seen && !hugi.run_env_is_empty(pkt_env) {
+		if hugi.run_env_is_empty(g.env) {
+			hugi.run_env_destroy(&g.env, allocator)
+			g.env = hugi.run_env_clone(pkt_env, allocator)
+		} else if g.env.cpu_model != pkt_env.cpu_model ||
+		   g.env.scaling_max_khz != pkt_env.scaling_max_khz ||
+		   g.env.build_flags != pkt_env.build_flags {
+			g.env_mixed = true
+			hugi.run_env_destroy(&g.env, allocator)
+			g.env = hugi.run_env_clone(pkt_env, allocator)
+		}
+	}
 	if pkt_ts > g.timestamp_unix {
 		g.timestamp_unix = pkt_ts
 	}
@@ -356,6 +373,7 @@ store_load_raw_groups :: proc(
 				pkt_lang,
 				pkt.suite_name,
 				pkt.timestamp_unix,
+				pkt.env,
 				r,
 				filter,
 				allocator,
@@ -382,6 +400,7 @@ store_load_raw_groups :: proc(
 					pkt_lang,
 					pkt.suite_name,
 					pkt.timestamp_unix,
+					pkt.env,
 					r,
 					filter,
 					allocator,
@@ -443,6 +462,7 @@ store_load_raw_groups :: proc(
 						pkt_lang,
 						pkt.suite_name,
 						pkt.timestamp_unix,
+						pkt.env,
 						r,
 						filter,
 						allocator,
@@ -506,6 +526,7 @@ store_load_raw_groups :: proc(
 					pkt_lang,
 					pkt.suite_name,
 					pkt.timestamp_unix,
+					pkt.env,
 					r,
 					filter,
 					allocator,
@@ -577,6 +598,7 @@ _store_load_commit_series_raw_groups :: proc(
 				pkt_lang,
 				pkt.suite_name,
 				pkt.timestamp_unix,
+				pkt.env,
 				r,
 				filter,
 				allocator,
@@ -632,6 +654,7 @@ _store_load_all_run_raw_groups :: proc(
 					lang = strings.clone(pkt_lang, allocator),
 					suite_name = strings.clone(pkt.suite_name, allocator),
 					timestamp_unix = pkt.timestamp_unix,
+					env = hugi.run_env_clone(pkt.env, allocator),
 					run_ids = rids,
 					records = recs,
 				},

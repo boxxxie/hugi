@@ -6,6 +6,7 @@ import store "../store"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:strings"
 import "core:testing"
 
 @(test)
@@ -292,5 +293,99 @@ test_commit_prefix_matching_ignores_short_tag_false_positives :: proc(t: ^testin
 	testing.expect_value(t, len(q_short_sha), 3)
 	if len(q_short_sha) == 3 {
 		testing.expect_value(t, q_short_sha[0].commit, "deadbeef1234")
+	}
+}
+
+@(test)
+test_store_env_provenance_hot_cold_and_compact :: proc(t: ^testing.T) {
+	tmp, mk_err := os.make_directory_temp("", "hugi-store-env-*", context.allocator)
+	testing.expectf(t, mk_err == nil && tmp != "", "create temp store dir: %v", mk_err)
+	if mk_err != nil || tmp == "" {
+		return
+	}
+	defer {
+		_ = os.remove_all(tmp)
+		delete(tmp)
+	}
+	db_path, _ := filepath.join({tmp, "env_roundtrip.hugidb"}, context.temp_allocator)
+
+	{
+		st, ok := store.store_open(db_path, context.allocator)
+		testing.expect(t, ok, "open store for env provenance test")
+		if !ok {
+			return
+		}
+		defer store.store_close(&st)
+
+		p1 := _make_store_test_packet("run-o1", "c001", 40.0)
+		p1.env = hugi.Run_Env {
+			cpu_model       = strings.clone("AMD Ryzen 7 7735U"),
+			governor        = strings.clone("performance"),
+			scaling_max_khz = 4_821_140,
+			cpuinfo_max_khz = 4_821_140,
+			boost_state     = 1,
+			build_flags     = strings.clone("-o:speed -microarch:native"),
+			runtime_version = strings.clone("dev-2026-09"),
+		}
+		defer hugi.packet_destroy(&p1)
+		testing.expect(t, store.store_ingest_packet(&st, p1), "ingest odin env packet")
+
+		p2 := _make_store_test_packet("run-c1", "c001", 55.0)
+		delete(p2.lang)
+		p2.lang = strings.clone("cpp")
+		p2.env = hugi.Run_Env {
+			cpu_model       = strings.clone("AMD Ryzen 7 7735U"),
+			governor        = strings.clone("performance"),
+			scaling_max_khz = 4_821_140,
+			cpuinfo_max_khz = 4_821_140,
+			boost_state     = 1,
+			build_flags     = strings.clone("-O3"),
+			runtime_version = strings.clone("Apache Arrow C++ 25.0.1"),
+		}
+		defer hugi.packet_destroy(&p2)
+		testing.expect(t, store.store_ingest_packet(&st, p2), "ingest cpp env packet")
+
+		// Verify hot-packet provenance read before compaction.
+		hot_recs := store.store_load_pooled_records(&st, "cpp", "c001")
+		defer store.pooled_records_destroy(hot_recs)
+		testing.expect_value(t, len(hot_recs), 3)
+		if len(hot_recs) == 3 {
+			testing.expect_value(t, hot_recs[0].env.cpu_model, "AMD Ryzen 7 7735U")
+			testing.expect_value(t, hot_recs[0].env.scaling_max_khz, u64(4_821_140))
+			testing.expect_value(t, hot_recs[0].env.build_flags, "-O3")
+			testing.expect_value(t, hot_recs[0].env.runtime_version, "Apache Arrow C++ 25.0.1")
+		}
+	}
+
+	// Seal all hot runs into cold CZCH\x02 chunk via compact.
+	_, _, comp_ok := store.store_compact_with_options(
+		db_path,
+		store.Store_Write_Options{keep_hot_runs = 0, cold_chunk_runs = 32},
+	)
+	testing.expect(t, comp_ok, "compact with keep_hot_runs=0 should succeed")
+
+	{
+		st2, ok2 := store.store_open(db_path, context.allocator)
+		testing.expect(t, ok2, "reopen compacted env store")
+		if !ok2 {
+			return
+		}
+		defer store.store_close(&st2)
+
+		all_pkts := store.store_load_all_packets(&st2)
+		defer hugi.packets_destroy(all_pkts)
+		testing.expect_value(t, len(all_pkts), 2)
+		if len(all_pkts) == 2 {
+			testing.expect_value(t, all_pkts[0].env.cpu_model, "AMD Ryzen 7 7735U")
+			testing.expect_value(t, all_pkts[0].env.governor, "performance")
+			testing.expect_value(t, all_pkts[0].env.scaling_max_khz, u64(4_821_140))
+			testing.expect_value(t, all_pkts[0].env.cpuinfo_max_khz, u64(4_821_140))
+			testing.expect_value(t, all_pkts[0].env.boost_state, i8(1))
+			testing.expect_value(t, all_pkts[0].env.build_flags, "-o:speed -microarch:native")
+			testing.expect_value(t, all_pkts[0].env.runtime_version, "dev-2026-09")
+
+			testing.expect_value(t, all_pkts[1].env.build_flags, "-O3")
+			testing.expect_value(t, all_pkts[1].env.runtime_version, "Apache Arrow C++ 25.0.1")
+		}
 	}
 }

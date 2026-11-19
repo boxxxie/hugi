@@ -346,7 +346,7 @@ format_comparison_table :: proc(
 	sb := strings.builder_make(allocator)
 	fmt.sbprintf(
 		&sb,
-		"Comparison: %s -> %s  (geomean delta: %+.2f%%, improved: %d, regressed: %d, unchanged: %d)\n\n",
+		"Comparison: %s -> %s  (geomean delta: %+.2f%%, improved: %d, regressed: %d, unchanged: %d)\n",
 		base_label,
 		cand_label,
 		rep.geomean_delta,
@@ -354,6 +354,10 @@ format_comparison_table :: proc(
 		rep.regressions,
 		rep.unchanged,
 	)
+	for w in rep.warnings {
+		fmt.sbprintf(&sb, "WARNING: %s\n", w)
+	}
+	strings.write_byte(&sb, '\n')
 	strings.write_string(
 		&sb,
 		"| Benchmark | Baseline p50 | Candidate p50 | Delta | Speedup | Test / p-value | Verdict |\n",
@@ -364,7 +368,13 @@ format_comparison_table :: proc(
 		cand_str := hugi.format_duration_fs(r.cand_p50_fs, context.temp_allocator)
 		test_str := ""
 		if r.used_rank_test {
-			test_str = fmt.tprintf("MWU p=%.4f", r.p_value)
+			if min(r.base_samples, r.cand_samples) >= 4 {
+				test_str = fmt.tprintf("MWU p=%.4f", r.p_value)
+			} else if r.welch_df > 0 {
+				test_str = fmt.tprintf("Welch t=%.2f (n<4)", r.welch_t)
+			} else {
+				test_str = fmt.tprintf("MWU p=%.4f (n<4)", r.p_value)
+			}
 		} else {
 			test_str = fmt.tprintf("Welch t=%.2f", r.welch_t)
 		}
@@ -402,11 +412,15 @@ format_comparison_json :: proc(
 	_write_json_f64(&sb, "%.4f", rep.geomean_delta)
 	fmt.sbprintf(
 		&sb,
-		",\n  \"improvements\": %d,\n  \"regressions\": %d,\n  \"unchanged\": %d,\n  \"rows\": [",
+		",\n  \"improvements\": %d,\n  \"regressions\": %d,\n  \"unchanged\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"warnings\": ",
 		rep.improvements,
 		rep.regressions,
 		rep.unchanged,
+		rep.underpowered_rows,
+		rep.high_cv_rows,
 	)
+	_write_json_str_array(&sb, rep.warnings[:])
+	strings.write_string(&sb, ",\n  \"rows\": [")
 	for r, idx in rep.rows {
 		if idx > 0 {
 			strings.write_byte(&sb, ',')
@@ -532,7 +546,7 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 	sb := strings.builder_make(allocator)
 	fmt.sbprintf(
 		&sb,
-		"Cross-Language 1v1: %s vs %s  (%s wins: %d, %s wins: %d, ties: %d, footprint mismatches: %d)\n\n",
+		"Cross-Language 1v1: %s vs %s  (%s wins: %d, %s wins: %d, ties: %d, footprint mismatches: %d)\n",
 		rep.lang_a,
 		rep.lang_b,
 		rep.lang_a,
@@ -542,6 +556,10 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 		rep.ties,
 		rep.footprint_mismatches,
 	)
+	for w in rep.warnings {
+		fmt.sbprintf(&sb, "WARNING: %s\n", w)
+	}
+	strings.write_byte(&sb, '\n')
 	fmt.sbprintf(
 		&sb,
 		"| Benchmark | %s p50 (CV%%) | %s p50 (CV%%) | Winner | Speedup | p-value | Footprint |\n",
@@ -622,14 +640,22 @@ format_1v1_json :: proc(rep: Cross_Lang_Report, allocator := context.allocator) 
 	_write_json_str(&sb, rep.lang_a)
 	strings.write_string(&sb, ",\n  \"lang_b\": ")
 	_write_json_str(&sb, rep.lang_b)
+	strings.write_string(&sb, ",\n  \"a_commit\": ")
+	_write_json_str(&sb, rep.a_commit)
+	strings.write_string(&sb, ",\n  \"b_commit\": ")
+	_write_json_str(&sb, rep.b_commit)
 	fmt.sbprintf(
 		&sb,
-		",\n  \"a_wins\": %d,\n  \"b_wins\": %d,\n  \"ties\": %d,\n  \"footprint_mismatches\": %d,\n  \"only_in_a\": ",
+		",\n  \"a_wins\": %d,\n  \"b_wins\": %d,\n  \"ties\": %d,\n  \"footprint_mismatches\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"warnings\": ",
 		rep.a_wins,
 		rep.b_wins,
 		rep.ties,
 		rep.footprint_mismatches,
+		rep.underpowered_rows,
+		rep.high_cv_rows,
 	)
+	_write_json_str_array(&sb, rep.warnings[:])
+	strings.write_string(&sb, ",\n  \"only_in_a\": ")
 	_write_json_str_array(&sb, rep.only_in_a[:])
 	strings.write_string(&sb, ",\n  \"only_in_b\": ")
 	_write_json_str_array(&sb, rep.only_in_b[:])

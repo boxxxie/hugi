@@ -142,3 +142,153 @@ test_compare_records_handles_zero_fs_baselines :: proc(t: ^testing.T) {
 		testing.expect_value(t, rep_same.rows[0].delta_pct, 0.0)
 	}
 }
+
+@(test)
+test_compare_env_mismatch_underpowered_and_1v1_commit_warnings :: proc(t: ^testing.T) {
+	make_n3_pkt :: proc(
+		lang, commit, run_id, cpu, gov, flags: string,
+		smax, cmax: u64,
+		vals: [3]u64,
+	) -> hugi.Run_Packet {
+		pkt := hugi.Run_Packet {
+			suite_name = strings.clone("cmp_env"),
+			lang = strings.clone(lang),
+			commit = strings.clone(commit),
+			run_id = strings.clone(run_id),
+			os = strings.clone("linux"),
+			arch = strings.clone("amd64"),
+			optimization = strings.clone("Speed"),
+			odin_version = strings.clone("test"),
+			timestamp_unix = 1770000000,
+			env = hugi.Run_Env {
+				cpu_model = strings.clone(cpu),
+				governor = strings.clone(gov),
+				scaling_max_khz = smax,
+				cpuinfo_max_khz = cmax,
+				boost_state = 1,
+				build_flags = strings.clone(flags),
+				runtime_version = strings.clone("test"),
+			},
+			records = make([dynamic]hugi.Record, 0, 1),
+		}
+		samples := make([dynamic]u64, 3)
+		for v, i in vals {
+			samples[i] = v
+		}
+		r := hugi.Record {
+			rank             = 1,
+			group_name       = strings.clone("core"),
+			name             = strings.clone("op"),
+			full_name        = strings.clone("core::op"),
+			ops_per_sample   = 100,
+			samples          = 3,
+			samples_batch_ns = samples,
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		hugi.recompute_record_stats_from_samples(&r)
+		hugi.refresh_record_throughput(&r)
+		append(&pkt.records, r)
+		return pkt
+	}
+
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	// Base: Ryzen, 4.82 GHz, performance, -o:speed -microarch:native, n=3
+	p_base := make_n3_pkt(
+		"odin",
+		"c_base",
+		"r1",
+		"AMD Ryzen 7 7735U",
+		"performance",
+		"-o:speed -microarch:native",
+		4_821_140,
+		4_821_140,
+		[3]u64{10_000, 10_100, 10_200},
+	)
+	defer hugi.packet_destroy(&p_base)
+	// Cand: Intel/clamped/powersave/flags mismatch + high CV + n=3
+	p_cand := make_n3_pkt(
+		"odin",
+		"c_cand",
+		"r2",
+		"Intel Core i7-7700HQ",
+		"powersave",
+		"-o:speed",
+		2_701_000,
+		4_821_140,
+		[3]u64{10_000, 20_000, 40_000},
+	)
+	defer hugi.packet_destroy(&p_cand)
+	// Zig at older commit c_base while odin latest is c_cand
+	p_zig := make_n3_pkt(
+		"zig",
+		"c_base",
+		"rz1",
+		"AMD Ryzen 7 7735U",
+		"performance",
+		"-Doptimize=ReleaseFast",
+		4_821_140,
+		4_821_140,
+		[3]u64{25_000, 25_100, 25_200},
+	)
+	defer hugi.packet_destroy(&p_zig)
+
+	testing.expect(t, store.store_ingest_packet(&st, p_base))
+	testing.expect(t, store.store_ingest_packet(&st, p_cand))
+	testing.expect(t, store.store_ingest_packet(&st, p_zig))
+
+	base_recs := store.store_load_pooled_records(&st, "odin", "c_base")
+	defer store.pooled_records_destroy(base_recs)
+	cand_recs := store.store_load_pooled_records(&st, "odin", "c_cand")
+	defer store.pooled_records_destroy(cand_recs)
+
+	rep := store.compare_records(base_recs, cand_recs, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep)
+	testing.expect_value(t, rep.underpowered_rows, 1)
+	testing.expect_value(t, rep.high_cv_rows, 1)
+	testing.expect(t, len(rep.warnings) >= 6, "expected env, underpowered, and high CV warnings")
+
+	md := store.format_comparison_table(rep, "c_base", "c_cand", context.temp_allocator)
+	testing.expect(t, strings.contains(md, "WARNING: CPU model mismatch"), "CPU mismatch warning")
+	testing.expect(
+		t,
+		strings.contains(md, "WARNING: CPU scaling_max_freq mismatch"),
+		"freq mismatch warning",
+	)
+	testing.expect(
+		t,
+		strings.contains(md, "clamped CPU scaling_max_freq"),
+		"clamped clock warning",
+	)
+	testing.expect(t, strings.contains(md, "CPU scaling_governor mismatch"), "governor warning")
+	testing.expect(t, strings.contains(md, "Build flags mismatch"), "build flags warning")
+	testing.expect(t, strings.contains(md, "< 5 samples per side"), "underpowered warning")
+	testing.expect(t, strings.contains(md, "CV > 25%"), "high CV warning")
+	testing.expect(t, strings.contains(md, "(n<4)"), "n<4 Welch display in comparison table")
+
+	js := store.format_comparison_json(rep, "c_base", "c_cand", context.temp_allocator)
+	testing.expect(t, strings.contains(js, `"underpowered_rows": 1`))
+	testing.expect(t, strings.contains(js, `"high_cv_rows": 1`))
+	testing.expect(t, strings.contains(js, `"warnings": [`))
+
+	rep1v1 := store.compare_1v1_langs(&st, "odin", "zig", "", threshold_pct = 3.0)
+	defer store.cross_lang_report_destroy(&rep1v1)
+	md1v1 := store.format_1v1_table(rep1v1, context.temp_allocator)
+	testing.expect(
+		t,
+		strings.contains(
+			md1v1,
+			"WARNING: Cross-language commit mismatch: odin at c_cand vs zig at c_base",
+		),
+		"1v1 must warn when latest language snapshots come from different commits",
+	)
+	js1v1 := store.format_1v1_json(rep1v1, context.temp_allocator)
+	testing.expect(t, strings.contains(js1v1, `"a_commit": "c_cand"`))
+	testing.expect(t, strings.contains(js1v1, `"b_commit": "c_base"`))
+	testing.expect(t, strings.contains(js1v1, `"warnings": [`))
+}

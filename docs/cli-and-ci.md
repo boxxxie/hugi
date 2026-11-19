@@ -6,13 +6,16 @@ The `hugi` CLI manages building and running benchmark suites, ingesting external
 
 ## 1. Database Path Resolution & Environment Variables
 
-### Default Store Path (`--db`)
+### Default Store Path (`--db`) & `hugi.json`
 
 When `--db <path>` is omitted, `hugi` resolves the database path in this order:
-1. If a `./benchmarks` directory exists in the current working directory:
+1. If a `hugi.json` exists between `.` and the `.git` root with a non-empty `"db"` field, uses that path (resolved relative to the directory containing `hugi.json`).
+2. Else if a `./benchmarks` directory exists in the current working directory:
    * Uses `benchmarks/history.benchdb` only if that legacy file already exists and `benchmarks/history.hugidb` does not.
    * Otherwise defaults to `benchmarks/history.hugidb`.
-2. Otherwise defaults to `./history.hugidb`.
+3. Otherwise defaults to `./history.hugidb`.
+
+`hugi run` also walks upward for `hugi.json` (starting from `[pkg_dir]` if supplied, else `.`) to populate defaults for `pkg_dir`, `db`, `runs`, `warmup`, and `extra_build_flags` whenever the corresponding CLI flags are omitted.
 
 ### Flag Syntax
 
@@ -90,12 +93,25 @@ hugi run ./benchmarks \
 Ingests one or more external benchmark artifacts into `.hugidb`. File type is detected via magic bytes (`HPKT`) or file extension (`.hpk`, `.bpk`, `.jsonl`, `.json`).
 
 ```sh
-# Ingest binary packets, obench JSON exports, or external JSONL logs
-hugi ingest out/odin.hpk out/zig_bench.jsonl --db benchmarks/history.hugidb --commit a1b2c3d4e5f6
+# Ingest binary packets, obench JSON exports, or external JSONL logs with provenance
+hugi ingest out/odin.hpk out/zig_bench.jsonl --db benchmarks/history.hugidb --commit a1b2c3d4e5f6 \
+  --capture-host-env --build-flags "-O3" --runtime-version "Apache Arrow C++ 25.0.1"
 ```
 
-* Accepts `--db`, `--lang`, and `--commit` (rejects `--filter` / `-f`). `--lang <lang>` and `--commit <sha>` override the language or commit embedded in the input files.
+* Accepts `--db`, `--lang`, `--commit`, `--capture-host-env`, `--build-flags <str>`, and `--runtime-version <str>` (rejects `--filter` / `-f`). `--lang <lang>` and `--commit <sha>` override the language or commit embedded in the input files.
 * **Run ID collisions on batch ingest:** `hugi ingest` passes an empty `run_id_override` to `read_obench_json_packets` (which falls back to `run-<unix_seconds>`), so ingesting multiple `obench` `.json` files in one second assigns identical `(lang, run_id)` keys and the later file overwrites the earlier one. Similarly, `.jsonl` rows omitting `"run_id"` default to `jsonl-<commit>-<lang>`—set explicit `"run_id"` values in JSONL when ingesting multiple runs for the same `(commit, lang)`.
+
+---
+
+### `hugi doctor`
+
+Checks host CPU model, `scaling_governor`, `scaling_max_freq` vs. `cpuinfo_max_freq`, boost/turbo status, and the nearest `hugi.json` configuration.
+
+```sh
+hugi doctor           # Human-readable host & config summary
+hugi doctor --strict  # Exit 1 if clock clamping, non-performance governor, or boost-off warnings exist
+hugi doctor --format json
+```
 
 ---
 

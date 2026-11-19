@@ -1,5 +1,6 @@
 package hugi_specs
 
+import hugi "../hugi"
 import "core:testing"
 
 @(test)
@@ -246,4 +247,77 @@ spec_clamped_zero_fs_baseline_regression_is_detected :: proc(t: ^testing.T) {
 		shows_verdict(&w, row, .Regression)
 		shows_significance(&w, row, true, max_p_value = 0.01)
 	}
+}
+
+@(test)
+spec_compare_warns_on_env_mismatch_clamped_clock_and_underpowered_samples :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_in_memory_store(&w)
+	given_recorded_run(
+		&w,
+		commit = "env01",
+		lang = "odin",
+		run_id = "r-env01",
+		bench = Bench_Observation{name = "core::work", median_ns = 100.0, samples = 3},
+		env = hugi.Run_Env {
+			cpu_model = "AMD Ryzen 7 7735U",
+			governor = "performance",
+			scaling_max_khz = 4_821_140,
+			cpuinfo_max_khz = 4_821_140,
+			boost_state = 1,
+			build_flags = "-o:speed -microarch:native",
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "env02",
+		lang = "odin",
+		run_id = "r-env02",
+		bench = Bench_Observation{name = "core::work", median_ns = 145.0, samples = 3},
+		env = hugi.Run_Env {
+			cpu_model = "Intel Core i7-7700HQ",
+			governor = "powersave",
+			scaling_max_khz = 2_701_000,
+			cpuinfo_max_khz = 4_821_140,
+			boost_state = 1,
+			build_flags = "-o:speed",
+		},
+	)
+
+	upon_comparing_commits(&w, "env01", "env02", lang = "odin", threshold_pct = 5.0)
+	then_comparison_warns_containing(&w, "CPU model mismatch")
+	then_comparison_warns_containing(&w, "CPU scaling_max_freq mismatch")
+	then_comparison_warns_containing(&w, "clamped CPU scaling_max_freq")
+	then_comparison_warns_containing(&w, "CPU scaling_governor mismatch")
+	then_comparison_warns_containing(&w, "Build flags mismatch")
+	then_comparison_warns_containing(&w, "< 5 samples per side")
+}
+
+@(test)
+spec_compare_1v1_warns_on_cross_language_commit_drift :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_in_memory_store(&w)
+	given_recorded_run(
+		&w,
+		commit = "c_old",
+		lang = "zig",
+		run_id = "r-zig-old",
+		bench = Bench_Observation{name = "core::op", median_ns = 80.0, samples = 7},
+	)
+	given_recorded_run(
+		&w,
+		commit = "c_new",
+		lang = "odin",
+		run_id = "r-odin-new",
+		bench = Bench_Observation{name = "core::op", median_ns = 50.0, samples = 7},
+	)
+
+	upon_comparing_1v1(&w, "odin", "zig", commit = "", threshold_pct = 3.0)
+	then_1v1_warns_containing(&w, "Cross-language commit mismatch: odin at c_new vs zig at c_old")
 }

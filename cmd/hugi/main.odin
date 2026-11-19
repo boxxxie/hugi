@@ -22,25 +22,32 @@ COMMANDS:
   compare-1v1            Cross-language 1v1 comparison (e.g., odin vs zig) with footprint checks
   export                 Export pooled benchmarks to Arrow IPC, Parquet, JSON, JSONL, CSV, TSV, or Markdown
   compact                Compact the xitdb store and reclaim dead pages
+  doctor                 Inspect CPU scaling, governor, boost state, and nearest hugi.json
   help                   Show this help message
   version                Print version information
 
 COMMON OPTIONS:
-  --db <path>            Store path (default: benchmarks/history.hugidb or history.hugidb)
+  --db <path>            Store path (default: hugi.json 'db', benchmarks/history.hugidb, or history.hugidb)
   --lang <lang>          Language tag (default: odin; export also accepts 'all' or '*')
   --commit <sha>         Commit identifier override
   --filter <pat>         Benchmark name substring filter (supports ',' or '|' alternation)
 
 RUN OPTIONS:
   --no-db                Execute package without writing to a store
-  --runs <N>             Measured pipeline runs (default: 7)
-  --warmup <N>           Warmup iterations / milliseconds (default: 1)
+  --runs <N>             Measured pipeline runs (default: hugi.json 'runs' or 7)
+  --warmup <N>           Warmup iterations / milliseconds (default: hugi.json 'warmup' or 1)
   --groups <g1,g2>       Comma-separated group filter
   --baseline-commit <c>  Compare run immediately against baseline commit <c>
   --fail-on-regression   Exit non-zero if statistical regressions are detected
   --threshold <pct>      Regression threshold percentage (default: 5.0)
-  --extra-build-flags s  Extra flags passed to 'odin build' (supports quoted arguments)
+  --extra-build-flags s  Extra flags passed to 'odin build' (default: hugi.json 'extra_build_flags')
   --overlay              Ingest into an in-memory CoW Core_Overlay branch (no disk write)
+
+INGEST / DOCTOR OPTIONS:
+  --capture-host-env     Attach current host CPU/clock/governor provenance on 'ingest'
+  --build-flags <str>    Attach explicit build flags string on 'ingest'
+  --runtime-version <s>  Attach explicit compiler/runtime version string on 'ingest'
+  --strict               Exit non-zero from 'doctor' if any host warning is detected
 
 COMPARE / EXPORT / COMPACT OPTIONS:
   --commits <a..b>       Compare commit <a> against commit <b>
@@ -83,6 +90,8 @@ main :: proc() {
 		code = _cmd_export(args[1:])
 	case "compact":
 		code = _cmd_compact(args[1:])
+	case "doctor":
+		code = _cmd_doctor(args[1:])
 	case "help", "--help", "-h":
 		_print_help()
 	case "version", "--version", "-V":

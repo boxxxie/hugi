@@ -2,6 +2,8 @@ package hugi_store
 
 import obench "../deps/obench/obench"
 import hugi "../hugi"
+import "base:runtime"
+import "core:fmt"
 import "core:math"
 import "core:strings"
 
@@ -16,6 +18,8 @@ Pooled_Record :: struct {
 	run_count:          int,
 	run_ids:            [dynamic]string,
 	timestamp_unix:     i64,
+	env:                hugi.Run_Env,
+	env_mixed:          bool,
 	ops_per_sample:     u64,
 	samples:            int,
 	min_fs:             i64,
@@ -57,6 +61,7 @@ pooled_record_destroy :: proc(r: ^Pooled_Record, allocator := context.allocator)
 	delete(r.group_name, allocator)
 	delete(r.name, allocator)
 	delete(r.full_name, allocator)
+	hugi.run_env_destroy(&r.env, allocator)
 	for rid in r.run_ids {
 		delete(rid, allocator)
 	}
@@ -158,6 +163,8 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 		run_count          = len(g.run_ids),
 		run_ids            = run_ids,
 		timestamp_unix     = g.timestamp_unix,
+		env                = hugi.run_env_clone(g.env, allocator),
+		env_mixed          = g.env_mixed,
 		ops_per_sample     = last.ops_per_sample,
 		bytes_per_op       = last.bytes_per_op,
 		mb_per_sec         = last.mb_per_sec,
@@ -295,8 +302,11 @@ Comparison_Row :: struct {
 	cand_p50_fs:      i64,
 	base_std_fs:      i64,
 	cand_std_fs:      i64,
+	base_cv_pct:      f64,
+	cand_cv_pct:      f64,
 	base_samples:     int,
 	cand_samples:     int,
+	underpowered:     bool,
 	delta_pct:        f64,
 	speedup:          f64,
 	welch_t:          f64,
@@ -314,11 +324,16 @@ Comparison_Row :: struct {
 }
 
 Comparison_Report :: struct {
-	rows:          [dynamic]Comparison_Row,
-	improvements:  int,
-	regressions:   int,
-	unchanged:     int,
-	geomean_delta: f64,
+	rows:              [dynamic]Comparison_Row,
+	improvements:      int,
+	regressions:       int,
+	unchanged:         int,
+	geomean_delta:     f64,
+	underpowered_rows: int,
+	high_cv_rows:      int,
+	base_env:          hugi.Run_Env,
+	cand_env:          hugi.Run_Env,
+	warnings:          [dynamic]string,
 }
 
 comparison_report_destroy :: proc(rep: ^Comparison_Report, allocator := context.allocator) {
@@ -326,7 +341,204 @@ comparison_report_destroy :: proc(rep: ^Comparison_Report, allocator := context.
 		delete(r.full_name, allocator)
 	}
 	delete(rep.rows)
+	for w in rep.warnings {
+		delete(w, allocator)
+	}
+	delete(rep.warnings)
+	hugi.run_env_destroy(&rep.base_env, allocator)
+	hugi.run_env_destroy(&rep.cand_env, allocator)
 	rep^ = {}
+}
+
+@(private = "file")
+_env_differs_core :: proc "contextless" (a, b: hugi.Run_Env) -> bool {
+	if hugi.run_env_is_empty(a) || hugi.run_env_is_empty(b) {
+		return false
+	}
+	return(
+		a.cpu_model != b.cpu_model ||
+		a.scaling_max_khz != b.scaling_max_khz ||
+		a.build_flags != b.build_flags \
+	)
+}
+
+@(private = "file")
+_collect_comparison_warnings :: proc(
+	warnings: ^[dynamic]string,
+	label_a, label_b: string,
+	a_env, b_env: hugi.Run_Env,
+	a_mixed, b_mixed: bool,
+	a_commit, b_commit: string,
+	check_build_flags: bool,
+	total_rows, underpowered_rows, high_cv_rows: int,
+	allocator: runtime.Allocator,
+) {
+	if total_rows <= 0 {
+		return
+	}
+	a_empty := hugi.run_env_is_empty(a_env)
+	b_empty := hugi.run_env_is_empty(b_env)
+
+	if a_env.cpu_model != "" && b_env.cpu_model != "" && a_env.cpu_model != b_env.cpu_model {
+		append(
+			warnings,
+			fmt.aprintf(
+				"CPU model mismatch: %s (%q) vs %s (%q)",
+				label_a,
+				a_env.cpu_model,
+				label_b,
+				b_env.cpu_model,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if a_env.scaling_max_khz > 0 && b_env.scaling_max_khz > 0 {
+		hi := max(a_env.scaling_max_khz, b_env.scaling_max_khz)
+		lo := min(a_env.scaling_max_khz, b_env.scaling_max_khz)
+		if (hi - lo) * 100 > hi * 5 {
+			append(
+				warnings,
+				fmt.aprintf(
+					"CPU scaling_max_freq mismatch: %.2f GHz vs %.2f GHz (timings are not directly comparable)",
+					f64(a_env.scaling_max_khz) / 1_000_000.0,
+					f64(b_env.scaling_max_khz) / 1_000_000.0,
+					allocator = allocator,
+				),
+			)
+		}
+	}
+
+	if a_env.scaling_max_khz > 0 &&
+	   a_env.cpuinfo_max_khz > 0 &&
+	   a_env.scaling_max_khz * 100 < a_env.cpuinfo_max_khz * 95 {
+		append(
+			warnings,
+			fmt.aprintf(
+				"%s ran with clamped CPU scaling_max_freq (%.2f/%.2f GHz)",
+				label_a,
+				f64(a_env.scaling_max_khz) / 1_000_000.0,
+				f64(a_env.cpuinfo_max_khz) / 1_000_000.0,
+				allocator = allocator,
+			),
+		)
+	}
+	if b_env.scaling_max_khz > 0 &&
+	   b_env.cpuinfo_max_khz > 0 &&
+	   b_env.scaling_max_khz * 100 < b_env.cpuinfo_max_khz * 95 {
+		append(
+			warnings,
+			fmt.aprintf(
+				"%s ran with clamped CPU scaling_max_freq (%.2f/%.2f GHz)",
+				label_b,
+				f64(b_env.scaling_max_khz) / 1_000_000.0,
+				f64(b_env.cpuinfo_max_khz) / 1_000_000.0,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if a_env.governor != "" && b_env.governor != "" && a_env.governor != b_env.governor {
+		append(
+			warnings,
+			fmt.aprintf(
+				"CPU scaling_governor mismatch: %s (%s) vs %s (%s)",
+				label_a,
+				a_env.governor,
+				label_b,
+				b_env.governor,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if check_build_flags &&
+	   a_env.build_flags != "" &&
+	   b_env.build_flags != "" &&
+	   a_env.build_flags != b_env.build_flags {
+		append(
+			warnings,
+			fmt.aprintf(
+				"Build flags mismatch: %s (%s) vs %s (%s)",
+				label_a,
+				a_env.build_flags,
+				label_b,
+				b_env.build_flags,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if a_mixed {
+		append(
+			warnings,
+			fmt.aprintf(
+				"%s pooled runs with mixed CPU/clock/build environments",
+				label_a,
+				allocator = allocator,
+			),
+		)
+	}
+	if b_mixed {
+		append(
+			warnings,
+			fmt.aprintf(
+				"%s pooled runs with mixed CPU/clock/build environments",
+				label_b,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if a_empty != b_empty {
+		missing_label := a_empty ? label_a : label_b
+		append(
+			warnings,
+			fmt.aprintf(
+				"%s has no recorded host/build provenance (legacy run; clock/CPU comparability unverified)",
+				missing_label,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if a_commit != "" && b_commit != "" && a_commit != b_commit {
+		append(
+			warnings,
+			fmt.aprintf(
+				"Cross-language commit mismatch: %s at %s vs %s at %s",
+				label_a,
+				a_commit,
+				label_b,
+				b_commit,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if underpowered_rows > 0 {
+		append(
+			warnings,
+			fmt.aprintf(
+				"%d/%d benchmark(s) have < 5 samples per side (Mann-Whitney U cannot reach p < 0.05 below n=4; run with --runs 7+)",
+				underpowered_rows,
+				total_rows,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if high_cv_rows > 0 {
+		append(
+			warnings,
+			fmt.aprintf(
+				"%d/%d benchmark(s) have high variance (CV > 25%%); medians and verdicts may be noisy",
+				high_cv_rows,
+				total_rows,
+				allocator = allocator,
+			),
+		)
+	}
 }
 
 @(private)
@@ -387,7 +599,8 @@ compare_records :: proc(
 	allocator := context.allocator,
 ) -> Comparison_Report {
 	rep := Comparison_Report {
-		rows = make([dynamic]Comparison_Row, allocator),
+		rows     = make([dynamic]Comparison_Row, allocator),
+		warnings = make([dynamic]string, allocator),
 	}
 
 	cand_by_name := make(map[string]Pooled_Record, context.temp_allocator)
@@ -398,11 +611,30 @@ compare_records :: proc(
 
 	log_sum := 0.0
 	log_cnt := 0
+	base_mixed := false
+	cand_mixed := false
 
 	for b in base {
 		c, matched := cand_by_name[b.full_name]
 		if !matched || b.p50_fs < 0 || c.p50_fs < 0 {
 			continue
+		}
+
+		base_mixed ||= b.env_mixed
+		cand_mixed ||= c.env_mixed
+		if !hugi.run_env_is_empty(b.env) {
+			if hugi.run_env_is_empty(rep.base_env) {
+				rep.base_env = hugi.run_env_clone(b.env, allocator)
+			} else if _env_differs_core(rep.base_env, b.env) {
+				base_mixed = true
+			}
+		}
+		if !hugi.run_env_is_empty(c.env) {
+			if hugi.run_env_is_empty(rep.cand_env) {
+				rep.cand_env = hugi.run_env_clone(c.env, allocator)
+			} else if _env_differs_core(rep.cand_env, c.env) {
+				cand_mixed = true
+			}
 		}
 
 		b_med := f64(max(b.p50_fs, 1))
@@ -419,6 +651,14 @@ compare_records :: proc(
 			b.samples,
 			b.samples_fs[:],
 		)
+
+		underpowered := min(b.samples, c.samples) < 5
+		if underpowered {
+			rep.underpowered_rows += 1
+		}
+		if b.cv_pct > 25.0 || c.cv_pct > 25.0 {
+			rep.high_cv_rows += 1
+		}
 
 		is_sig := sig.stat_diff && abs(delta_pct) >= threshold_pct
 		verdict := Verdict.Unchanged
@@ -446,8 +686,11 @@ compare_records :: proc(
 				cand_p50_fs = c.p50_fs,
 				base_std_fs = b.std_dev_fs,
 				cand_std_fs = c.std_dev_fs,
+				base_cv_pct = b.cv_pct,
+				cand_cv_pct = c.cv_pct,
 				base_samples = b.samples,
 				cand_samples = c.samples,
+				underpowered = underpowered,
 				delta_pct = delta_pct,
 				speedup = speedup,
 				welch_t = sig.welch_t,
@@ -469,6 +712,22 @@ compare_records :: proc(
 	if log_cnt > 0 {
 		rep.geomean_delta = (math.exp(log_sum / f64(log_cnt)) - 1.0) * 100.0
 	}
+	_collect_comparison_warnings(
+		&rep.warnings,
+		"Baseline",
+		"Candidate",
+		rep.base_env,
+		rep.cand_env,
+		base_mixed,
+		cand_mixed,
+		"",
+		"",
+		check_build_flags = true,
+		total_rows = len(rep.rows),
+		underpowered_rows = rep.underpowered_rows,
+		high_cv_rows = rep.high_cv_rows,
+		allocator = allocator,
+	)
 	return rep
 }
 
@@ -496,11 +755,18 @@ Cross_Lang_Row :: struct {
 Cross_Lang_Report :: struct {
 	lang_a:               string,
 	lang_b:               string,
+	a_commit:             string,
+	b_commit:             string,
 	rows:                 [dynamic]Cross_Lang_Row,
 	a_wins:               int,
 	b_wins:               int,
 	ties:                 int,
 	footprint_mismatches: int,
+	underpowered_rows:    int,
+	high_cv_rows:         int,
+	a_env:                hugi.Run_Env,
+	b_env:                hugi.Run_Env,
+	warnings:             [dynamic]string,
 	only_in_a:            [dynamic]string,
 	only_in_b:            [dynamic]string,
 }
@@ -508,11 +774,19 @@ Cross_Lang_Report :: struct {
 cross_lang_report_destroy :: proc(rep: ^Cross_Lang_Report, allocator := context.allocator) {
 	delete(rep.lang_a, allocator)
 	delete(rep.lang_b, allocator)
+	delete(rep.a_commit, allocator)
+	delete(rep.b_commit, allocator)
 	for &r in rep.rows {
 		delete(r.full_name, allocator)
 		delete(r.faster_lang, allocator)
 	}
 	delete(rep.rows)
+	for w in rep.warnings {
+		delete(w, allocator)
+	}
+	delete(rep.warnings)
+	hugi.run_env_destroy(&rep.a_env, allocator)
+	hugi.run_env_destroy(&rep.b_env, allocator)
 	for s in rep.only_in_a {
 		delete(s, allocator)
 	}
@@ -540,6 +814,7 @@ compare_1v1_langs :: proc(
 		lang_a    = strings.clone(lang_a, allocator),
 		lang_b    = strings.clone(lang_b, allocator),
 		rows      = make([dynamic]Cross_Lang_Row, allocator),
+		warnings  = make([dynamic]string, allocator),
 		only_in_a = make([dynamic]string, allocator),
 		only_in_b = make([dynamic]string, allocator),
 	}
@@ -557,6 +832,10 @@ compare_1v1_langs :: proc(
 	seen_b := make(map[string]bool, context.temp_allocator)
 	defer delete(seen_b)
 
+	a_mixed := false
+	b_mixed := false
+	saw_commit_mismatch := false
+
 	for a in rows_a {
 		b, ok := map_b[a.full_name]
 		if !ok {
@@ -564,6 +843,45 @@ compare_1v1_langs :: proc(
 			continue
 		}
 		seen_b[a.full_name] = true
+
+		a_mixed ||= a.env_mixed
+		b_mixed ||= b.env_mixed
+		if !hugi.run_env_is_empty(a.env) {
+			if hugi.run_env_is_empty(rep.a_env) {
+				rep.a_env = hugi.run_env_clone(a.env, allocator)
+			} else if _env_differs_core(rep.a_env, a.env) {
+				a_mixed = true
+			}
+		}
+		if !hugi.run_env_is_empty(b.env) {
+			if hugi.run_env_is_empty(rep.b_env) {
+				rep.b_env = hugi.run_env_clone(b.env, allocator)
+			} else if _env_differs_core(rep.b_env, b.env) {
+				b_mixed = true
+			}
+		}
+
+		if a.commit != "" && b.commit != "" && a.commit != b.commit && !saw_commit_mismatch {
+			delete(rep.a_commit, allocator)
+			delete(rep.b_commit, allocator)
+			rep.a_commit = strings.clone(a.commit, allocator)
+			rep.b_commit = strings.clone(b.commit, allocator)
+			saw_commit_mismatch = true
+		} else {
+			if rep.a_commit == "" && a.commit != "" {
+				rep.a_commit = strings.clone(a.commit, allocator)
+			}
+			if rep.b_commit == "" && b.commit != "" {
+				rep.b_commit = strings.clone(b.commit, allocator)
+			}
+		}
+
+		if min(a.samples, b.samples) < 5 {
+			rep.underpowered_rows += 1
+		}
+		if a.cv_pct > 25.0 || b.cv_pct > 25.0 {
+			rep.high_cv_rows += 1
+		}
 
 		a_med := f64(max(a.p50_fs, 1))
 		b_med := f64(max(b.p50_fs, 1))
@@ -633,5 +951,22 @@ compare_1v1_langs :: proc(
 			append(&rep.only_in_b, strings.clone(b.full_name, allocator))
 		}
 	}
+
+	_collect_comparison_warnings(
+		&rep.warnings,
+		lang_a,
+		lang_b,
+		rep.a_env,
+		rep.b_env,
+		a_mixed,
+		b_mixed,
+		rep.a_commit,
+		rep.b_commit,
+		check_build_flags = false,
+		total_rows = len(rep.rows),
+		underpowered_rows = rep.underpowered_rows,
+		high_cv_rows = rep.high_cv_rows,
+		allocator = allocator,
+	)
 	return rep
 }

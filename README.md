@@ -10,7 +10,7 @@
 
 **Git-native longitudinal benchmark runner, ultra-compressed historical store, statistical auditor, and multi-format exporter.**
 
-`hugi` is a benchmark harness and historical performance database written in Odin, built to replace bespoke per-repo benchmark harnesses, bloated `history.jsonl` logs, and Python `compare_1v1.py` analysis scripts. Instead of treating benchmarks as ephemeral terminal output, `hugi` records every run against its Git commit SHA inside a compact, transactional `.hugidb` file—allowing you to track performance over the lifetime of a codebase, add or filter benchmarks arbitrarily without breaking schemas, audit regressions with statistical rigor, and export clean datasets or reports into standard analytics formats.
+`hugi` is a benchmark harness and historical performance database written in Odin. Instead of treating benchmarks as ephemeral terminal output or ad-hoc log files, `hugi` records every run against its Git commit SHA inside a compact, transactional `.hugidb` file—allowing you to track performance over the lifetime of a codebase, add or filter benchmarks arbitrarily without breaking schemas, audit regressions with statistical rigor, and export clean datasets or reports into standard analytics formats.
 
 ---
 
@@ -28,7 +28,7 @@ Most benchmarking workflows break down once a project grows past a handful of mi
 
 ## Key Capabilities
 
-* **Zero-Store Runner Isolation:** `hugi/` imports only `base:*`, `core:*`, and [`deps/obench/obench`](deps/obench/obench)—never `deps/xitdb` or `deps/skadi`—so benchmarked libraries (`xitdb`, `skadi`, `heimdall`, `hfsm`, etc.) never hit circular package dependencies.
+* **Zero-Store Runner Isolation:** `hugi/` imports only `base:*`, `core:*`, and [`deps/obench/obench`](deps/obench/obench)—never `deps/xitdb` or `deps/skadi`—so benchmarked libraries (including `xitdb` and `skadi` themselves) never hit circular package dependencies.
 * **Micro-Benchmarks + Stateful Multi-Phase Pipelines:** Combines `obench` micro-benchmark loops (with vDSO `clock_gettime` on 64-bit Linux, ~42 ns timer overhead under `-o:speed`) with stateful `Pipeline` lifecycles (`insert -> lookup -> scan`) where shared state carries across phases, setup/teardown is excluded, and timed passes execute with **unwrapped allocators** (`0 ns` counting overhead) followed by a dedicated untimed `@zero_alloc` verification pass.
 * **Statistical Auditing & CI Gates:** Pools samples across repeated runs of the same commit and evaluates changes using the **Mann-Whitney U** non-parametric rank test (`p < 0.05`) alongside **Welch's `t`-test** with Student's `t` critical values and geometric mean deltas.
 * **Cross-Language 1v1 Audits (`compare-1v1`):** Compare implementations across languages (e.g., `odin` vs `zig` or `rust`) on matching benchmark names, automatically flagging domain memory/disk footprint discrepancies (`[MISMATCH]`) so speedups achieved by trading off memory are immediately visible.
@@ -478,9 +478,9 @@ wc -c benchmarks/history.hugidb .tmp/all_runs.parquet .tmp/all_runs.arrow .tmp/a
 
 ### Migrating Existing Repos
 
-1. Point the repo's benchmark package at `hugi` and replace custom JSONL writers / timers with `hugi.suite_create`, `hugi.group_add`, and `hugi.group_pipeline`.
-2. Backfill historical runs once: `./bin/hugi ingest benchmarks/history.jsonl --db benchmarks/history.hugidb && ./bin/hugi compact --db benchmarks/history.hugidb`.
-3. Replace Python `compare_1v1.py` invocations with `./bin/hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig`.
+1. Point your benchmark package at `hugi` and replace ad-hoc timers or log writers with `hugi.suite_create`, `hugi.group_add`, and `hugi.group_pipeline`.
+2. Backfill any existing JSONL or `obench` JSON logs once: `./bin/hugi ingest results.jsonl --db benchmarks/history.hugidb && ./bin/hugi compact --db benchmarks/history.hugidb`.
+3. Run cross-language comparisons directly via `./bin/hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig` without custom comparison scripts.
 
 ---
 

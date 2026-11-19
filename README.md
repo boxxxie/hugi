@@ -528,22 +528,23 @@ wc -c benchmarks/history.hugidb .tmp/all_runs.parquet .tmp/all_runs.arrow .tmp/a
 
 | Command | Description |
 | :--- | :--- |
-| `hugi run [pkg_dir]` | Build and run an Odin benchmark package and ingest results into the store (`--no-db`, `--overlay`, `--runs`, `--warmup`, `--groups`, `-f`, `--baseline-commit`, `--fail-on-regression`). |
-| `hugi ingest <file...>` | Ingest `.hpk`/`.bpk` binary packets, `obench` `.json` reports, or `.jsonl` benchmark logs (`--lang`, `--commit`). |
+| `hugi run [pkg_dir]` | Build and run an Odin benchmark package and ingest results into the store (`--no-db`, `--overlay`, `--runs`, `--warmup`, `--groups`, `-f`, `--baseline-commit`, `--fail-on-regression`; defaults from `hugi.json`). |
+| `hugi ingest <file...>` | Ingest `.hpk`/`.bpk` binary packets, `obench` `.json` reports, or `.jsonl` benchmark logs (`--lang`, `--commit`, `--capture-host-env`, `--build-flags`, `--runtime-version`). |
 | `hugi history` | List stored commits (`--commits`, default) or individual runs (`--runs`, `--limit <N>`). |
-| `hugi inspect [filter]` | Display Markdown summary and quantile/allocation breakdown (`--commit`, `--run`, `--lang`). |
+| `hugi inspect [filter]` | Display Markdown summary, provenance header, and quantile/allocation breakdown (`--commit`, `--run`, `--lang`). |
 | `hugi compare` | Statistical comparison across `--commits <a..b>`, `--runs <a..b>`, or `--last` (`--threshold <pct>`, `--fail-on-regression`, `--format md|json|csv`, `--out <path|->`). |
 | `hugi compare-1v1` | Cross-language 1v1 comparison with Mann-Whitney U / Welch `t`-test and footprint checks (`--langs <a,b>`, `--commit`, `--format md|json|csv`, `--out <path|->`). |
 | `hugi export` | Export snapshot, `--all-commits`, or `--all-runs` (`--lang odin|<lang>|all`) to `arrow`, `parquet`, `json`, `jsonl`, `csv`, `tsv`, or `md` (including `--out -` stdout streaming) or `--update-readme <path>`. |
 | `hugi compact` | Seal cold runs into `CZCH\x02` columnar chunks and atomically compact dead `xitdb` pages (`--keep-hot <N>`). |
+| `hugi doctor` | Inspect CPU scaling limits, governor, boost state, Odin version, and nearest `hugi.json` (`--strict`, `--format md|json`). |
 
 ---
 
 ## Repository Layout
 
-* [`hugi/`](hugi/) (`package hugi`) — Zero-store benchmark runner, `obench` micro-benchmark re-exports (`hugi.odin`), stateful `Pipeline` phases (`phase.odin`), Git SHA resolver (`git.odin`), `HPKT\x02` binary wire format (`packet.odin`), and JSON/JSONL importers (`importers.odin`).
+* [`hugi/`](hugi/) (`package hugi`) — Zero-store benchmark runner, `obench` micro-benchmark re-exports (`hugi.odin`), stateful `Pipeline` phases (`phase.odin`), Git SHA resolver (`git.odin`), `Run_Env` host/build provenance (`env.odin`), `HPKT\x02` binary wire format (`packet.odin`), and JSON/JSONL importers (`importers.odin`).
 * [`store/`](store/) (`package hugi_store`) — `.hugidb` transactional store (`db.odin`, `query.odin`, `compact.odin`), `HCAT\x01` catalog (`catalog.odin`), `CZPK\x04`/`CZCH\x02` encoders (`format.odin`, `binary_io.odin`), `BU` racing integer codecs (`codec.odin`), multi-run sample pooling & statistical tests (`pool_and_compare.odin`), and Arrow/Parquet/JSON/CSV/Markdown exporters (`export_schema.odin`, `export_arrow.odin`, `parquet.odin`, `export_text.odin`).
-* [`cmd/hugi/`](cmd/hugi/) (`bin/hugi`) — Modular pure-Odin CLI (`main.odin`, `cli_args.odin`, `cmd_run.odin`, `cmd_ingest.odin`, `cmd_query.odin`, `cmd_export.odin`, `cli_test.odin`).
+* [`cmd/hugi/`](cmd/hugi/) (`bin/hugi`) — Modular pure-Odin CLI (`main.odin`, `cli_args.odin`, `config.odin`, `cmd_run.odin`, `cmd_ingest.odin`, `cmd_query.odin`, `cmd_export.odin`, `cmd_doctor.odin`, `cli_test.odin`).
 * [`examples/`](examples/) — Runnable suites and custom renderers: [`micro_and_phases/`](examples/micro_and_phases/) (`make example`), [`custom_markdown_odin/`](examples/custom_markdown_odin/) (pure-Odin grouped Markdown), and [`custom_reports/`](examples/custom_reports/) (DuckDB SQL + Python JSON renderers).
 * [`tests/`](tests/) (`package hugi_tests`) & [`specs/`](specs/) (`package hugi_specs`) — Leak-checked unit tests, property-based codec/stats invariants, and 4-layer ATDD executable specifications.
 * [`docs/`](docs/) — Technical guides covering [writing benchmarks & pipelines](docs/benchmarking-guide.md), [CLI & CI workflows](docs/cli-and-ci.md), [storage & compression architecture](docs/storage-and-compression.md), and [exports & analytics](docs/exports-and-analytics.md).

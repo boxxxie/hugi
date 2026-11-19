@@ -7,15 +7,16 @@ Pure-Odin benchmarking library, compressed transactional history store, statisti
 `hugi` splits execution from storage and reporting so benchmarked libraries (`xitdb`, `skadi`, `heimdall`, `hfsm`, etc.) never hit circular package dependencies:
 
 - [`hugi/`](hugi/) (`package hugi`) — Zero-store runner importing only `base:*`, `core:*`, and [`deps/obench/obench`](deps/obench/obench). Exposes:
-  - `obench` micro-benchmarking primitives (`step`, `set_bytes`, `set_items`, `expect_zero_allocs`, `param`, `threads`, `run_parallel`) with untimed allocation checking (`untimed_alloc_check = true`) and vDSO `clock_gettime` on 64-bit Linux (~42 ns timer overhead under `-o:speed`).
-  - Stateful multi-phase pipelines (`group_pipeline`, `scoped_phase`, `phase_begin`/`phase_end`, `phase_set_footprint`, `phase_metric`) where phases share mutable setup while setup/teardown stay excluded from timing and allocation wrappers.
-  - Binary `HPKT\x02` (`OBRC\x02`) `Run_Packet` serialization (`encode_packet_bytes`, `read_packet_file`) plus importers for `obench` JSON reports and `history.jsonl` files.
+  - `obench` micro-benchmarking primitives (`step`, `set_bytes`, `set_items`, `expect_zero_allocs`, `param`, `threads`, `run_parallel`) with untimed allocation checking (`untimed_alloc_check = true`) and vDSO `clock_gettime` on 64-bit Linux (~42 ns timer overhead under `-o:speed`) in [`hugi/hugi.odin`](hugi/hugi.odin).
+  - Stateful multi-phase pipelines (`group_pipeline`, `scoped_phase`, `phase_begin`/`phase_end`, `phase_set_footprint`, `phase_metric`) in [`hugi/phase.odin`](hugi/phase.odin) where phases share mutable setup while setup/teardown stay excluded from timing and allocation wrappers.
+  - Binary `HPKT\x02` (`OBRC\x02`) `Run_Packet` serialization (`encode_packet_bytes`, `read_packet_file`) and shared `Stats_FS` / throughput math in [`hugi/packet.odin`](hugi/packet.odin), plus `obench` JSON and `history.jsonl` importers (`read_obench_json_packets`, `read_jsonl_packets`) in [`hugi/importers.odin`](hugi/importers.odin).
 - [`store/`](store/) (`package hugi_store`) — Transactional [`deps/xitdb`](deps/xitdb) `.hugidb` persistence and [`deps/skadi`](deps/skadi) analytics/export:
-  - Canonical `v5` `xitdb` `Moment` layout: consolidated Zlib catalog (`catalog` with `HCAT\x01` global symbol/descriptor tables, run metadata, and rank-preserving snapshot index), hot `runs` (`CZPK\x04`), transposed `cold_chunks` (`CZCH\x02` auto-sealed every 32 runs with `O(hot_runs)` chunk-preserving compaction), plus `Core_Overlay` in-memory CoW branching (`--overlay`).
-  - Losslessly compresses exact `u64` rational batch ticks via unified `BU` `U64_Codec` competition (`Raw`, `Zlib_Delta_Varint`, `Zlib_BSS`, `Zlib_Delta_BSS`, and `Zlib_Block_GCD`).
-  - Pools multi-run sample vectors per `(commit, lang, benchmark)` and compares runs/commits or languages (`compare_records`, `compare_1v1_langs`) using Mann-Whitney U and Welch `t` (with Student `t` critical values and domain byte footprint mismatch flags).
-  - Exports pooled records, commit series (`--all-commits`), or per-run histories (`--all-runs`) to 35-column Apache Arrow IPC / Feather v2 (`export_arrow_ipc`, `Decimal64(18, 6)` femtosecond-precision durations, default `LZ4_FRAME` body compression), pure-Odin GZIP Apache Parquet (`export_parquet`), `json`, `jsonl`, `csv`, `tsv`, and Markdown (`md`), plus updates `README.md` benchmark tables between `<!-- BEGIN_BENCHMARK_TABLE -->` and `<!-- END_BENCHMARK_TABLE -->` markers.
-- [`cmd/hugi/`](cmd/hugi/) (`bin/hugi`) — Standalone pure-Odin CLI (`run`, `ingest`, `history`, `inspect`, `compare`, `compare-1v1`, `export`, `compact`).
+  - Modular `v5` `xitdb` storage & compaction across [`store/binary_io.odin`](store/binary_io.odin), [`store/catalog.odin`](store/catalog.odin), [`store/format.odin`](store/format.odin), [`store/db.odin`](store/db.odin), [`store/query.odin`](store/query.odin), and [`store/compact.odin`](store/compact.odin): consolidated Zlib catalog (`catalog` with `HCAT\x01` global symbol/descriptor tables, run metadata, and rank-preserving snapshot index), hot `runs` (`CZPK\x04`), transposed `cold_chunks` (`CZCH\x02` auto-sealed every 32 runs with `O(hot_runs)` chunk-preserving compaction), plus `Core_Overlay` in-memory CoW branching (`--overlay`).
+  - Losslessly compresses exact `u64` rational batch ticks via unified `BU` `U64_Codec` competition (`Raw`, `Zlib_Delta_Varint`, `Zlib_BSS`, `Zlib_Delta_BSS`, and `Zlib_Block_GCD`) in [`store/codec.odin`](store/codec.odin).
+  - Pools multi-run sample vectors per `(commit, lang, benchmark)` and compares runs/commits or languages (`compare_records`, `compare_1v1_langs`) using shared Mann-Whitney U and Welch `t` significance logic (with Student `t` critical values and domain byte footprint mismatch flags) in [`store/pool_and_compare.odin`](store/pool_and_compare.odin).
+  - Exports pooled records, commit series (`--all-commits`), or per-run histories (`--all-runs`) via a unified `35`-column schema in [`store/export_schema.odin`](store/export_schema.odin) across Apache Arrow IPC / Feather v2 ([`store/export_arrow.odin`](store/export_arrow.odin), `Decimal64(18, 6)` + `LZ4_FRAME`), pure-Odin GZIP Apache Parquet ([`store/parquet.odin`](store/parquet.odin)), and `json`, `jsonl`, `csv`, `tsv`, and Markdown (`md`) + `README.md` marker updates ([`store/export_text.odin`](store/export_text.odin)).
+- [`cmd/hugi/`](cmd/hugi/) (`bin/hugi`) — Modular pure-Odin CLI (`main.odin`, `cli_args.odin`, `cmd_run.odin`, `cmd_ingest.odin`, `cmd_query.odin`, `cmd_export.odin`, plus unit tests in `cli_test.odin`).
+- [`tests/`](tests/) (`package hugi_tests`) — Leak-checked subsystem test suites (`codec_test.odin`, `packet_test.odin`, `store_test.odin`, `compare_test.odin`, `export_test.odin`, and `test_helpers.odin`).
 
 ## Quickstart
 
@@ -105,6 +106,14 @@ make build
 | `hugi compare-1v1` | Cross-language 1v1 comparison with byte-footprint parity check | `--db`, `--langs odin,zig`, `--commit`, `--threshold` |
 | `hugi export` | Export snapshot or longitudinal series to Feather v2 `.arrow`, `.parquet`, `.json`, `.jsonl`, `.csv`, `.tsv`, or `.md` | `--db`, `--format arrow\|parquet\|json\|jsonl\|csv\|tsv\|md`, `--all-commits`, `--all-runs`, `--out`, `--update-readme` |
 | `hugi compact` | Compact `xitdb` store (seals cold chunks + reclaims dead pages) | `--db`, `--keep-hot` |
+
+### Standardized Export Schema
+
+All structured exports (`arrow`, `parquet`, `csv`, `tsv`, `json`, and `jsonl`) share the exact same `34` canonical scalar columns in fixed order from [`store/export_schema.odin`](store/export_schema.odin):
+
+`commit`, `lang`, `suite_name`, `group_name`, `name`, `full_name`, `run_id`, `timestamp_unix`, `rank`, `run_count`, `ops_per_sample`, `samples`, `min_ns`, `p25_ns`, `p50_ns`, `p75_ns`, `p95_ns`, `p99_ns`, `max_ns`, `mean_ns`, `std_dev_ns`, `ci95_ns`, `cv_pct`, `iqr_ns`, `mad_ns`, `ops_per_sec`, `mb_per_sec`, `bytes_per_op`, `footprint_bytes`, `allocs_per_op`, `alloc_bytes_per_op`, `temp_allocs_per_op`, `temp_bytes_per_op`, `peak_heap_bytes`.
+
+Column `35` in `arrow` and `parquet` is `samples_blob` (lossless `BU`-compressed per-sample ticks); `json` and `jsonl` instead append `samples_batch_ns` (when present) and `samples_ns` per record.
 
 ### Updating `README.md` Benchmark Tables
 

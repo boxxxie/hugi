@@ -91,12 +91,12 @@ Follow [workflow.md](../../workflow.md): keep `hugi/` isolated from `xitdb`/`ska
 
 ## Phase 6: Split `tests/hugi_test.odin`, Sync Docs, and Full Reference-DB Verification
 
-- [ ] Task: Split `tests/hugi_test.odin` by subsystem
-    - [ ] Split `tests/hugi_test.odin` into `tests/test_helpers.odin`, `tests/codec_test.odin`, `tests/packet_test.odin`, `tests/store_test.odin`, `tests/compare_test.odin`, and `tests/export_test.odin` (all `package hugi_tests`), then delete `tests/hugi_test.odin`.
-    - [ ] Verify every test procedure runs and passes under `make test` with `0` leaks.
-- [ ] Task: Sync documentation (`README.md`)
-    - [ ] Update `README.md` export documentation to reflect standardized `34`-column scalar field names across Arrow IPC, Parquet, CSV, TSV, JSON, and JSONL, and updated repository module structure (inline code spans only; zero `$...$` MathJax blocks).
-- [ ] Task: Final full build/test gate and `v5` reference-DB smoke check
-    - [ ] Run `make fmt && make fmt-check && make check && make test && make example && make build && rm -rf .tmp build`.
-    - [ ] Copy `/home/pauli/projects/odin/mimir/benchmarks/history.hugidb` (`2,152 B`) and `/home/pauli/projects/odin/temple/benchmarks/history.hugidb` (`7,208 B`) to `/tmp` (delete after) and verify `./bin/hugi history`, `./bin/hugi inspect`, `./bin/hugi export` (`.arrow`, `.parquet`, `.csv`, `.json`), and `./bin/hugi compact` preserve exact byte sizes (`2,152 B` and `7,208 B`) and all records.
-- [ ] Task: Conductor - User Manual Verification 'Phase 6: Split tests/hugi_test.odin, Sync Docs, and Full Reference-DB Verification' (Protocol in workflow.md)
+- [x] Task: Split `tests/hugi_test.odin` by subsystem
+    - [x] Split `tests/hugi_test.odin` into `tests/test_helpers.odin`, `tests/codec_test.odin`, `tests/packet_test.odin`, `tests/store_test.odin`, `tests/compare_test.odin`, and `tests/export_test.odin` (all `package hugi_tests`), then delete `tests/hugi_test.odin`.
+    - [x] Verify every test procedure runs and passes under `make test` with `0` leaks.
+- [x] Task: Sync documentation (`README.md`)
+    - [x] Update `README.md` export documentation to reflect standardized `34`-column scalar field names across Arrow IPC, Parquet, CSV, TSV, JSON, and JSONL, and updated repository module structure (inline code spans only; zero `$...$` MathJax blocks).
+- [x] Task: Final full build/test gate and `v5` reference-DB smoke check
+    - [x] Run `make fmt && make fmt-check && make check && make test && make example && make build && rm -rf .tmp build`.
+    - [x] Copy `/home/pauli/projects/odin/mimir/benchmarks/history.hugidb` (`2,152 B`) and `/home/pauli/projects/odin/temple/benchmarks/history.hugidb` (`7,208 B`) to `/tmp` (delete after) and verify `./bin/hugi history`, `./bin/hugi inspect`, `./bin/hugi export` (`.arrow`, `.parquet`, `.csv`, `.json`), and `./bin/hugi compact` preserve exact byte sizes (`2,152 B` and `7,208 B`) and all records.
+- [x] Task: Conductor - User Manual Verification 'Phase 6: Split tests/hugi_test.odin, Sync Docs, and Full Reference-DB Verification' (Protocol in workflow.md)

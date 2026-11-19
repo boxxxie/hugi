@@ -9,12 +9,12 @@ Pure-Odin benchmarking library, compressed transactional history store, statisti
 - [`hugi/`](hugi/) (`package hugi`) — Zero-store runner importing only `base:*`, `core:*`, and [`deps/obench/obench`](deps/obench/obench). Exposes:
   - `obench` micro-benchmarking primitives (`step`, `set_bytes`, `set_items`, `expect_zero_allocs`, `param`, `threads`, `run_parallel`) with untimed allocation checking (`untimed_alloc_check = true`) and vDSO `clock_gettime` on 64-bit Linux (~42 ns timer overhead under `-o:speed`).
   - Stateful multi-phase pipelines (`group_pipeline`, `scoped_phase`, `phase_begin`/`phase_end`, `phase_set_footprint`, `phase_metric`) where phases share mutable setup while setup/teardown stay excluded from timing and allocation wrappers.
-  - Binary `HPKT` `Run_Packet` serialization (`encode_packet_bytes`, `read_packet_file`, also decoding legacy `OBPK` packets) plus importers for `obench` JSON reports and legacy `history.jsonl` files.
+  - Binary `HPKT\x02` (`OBRC\x02`) `Run_Packet` serialization (`encode_packet_bytes`, `read_packet_file`) plus importers for `obench` JSON reports and `history.jsonl` files.
 - [`store/`](store/) (`package hugi_store`) — Transactional [`deps/xitdb`](deps/xitdb) `.hugidb` persistence and [`deps/skadi`](deps/skadi) analytics/export:
-  - Stores every run inside a copy-on-write `xitdb` `Moment` under `runs`, `run_order`, `commits`, and rank-preserving inline `u64` `snapshots` pointers (`<lang>:<run_id>` keys prevent cross-language collisions at shared commits without duplicating record/sample blobs).
-  - Compresses `[]f64` timing vectors via unified `CZPK\x02` 8-way Byte-Stream-Split + zlib (`Codec.Zlib_BSS`) or LZ4 (`Codec.LZ4_BSS`), with automatic fallback to `.Raw` and single-Moment compaction on `hugi compact`.
+  - Canonical `v5` `xitdb` `Moment` layout: consolidated Zlib catalog (`catalog` with `HCAT\x01` global symbol/descriptor tables, run metadata, and rank-preserving snapshot index), hot `runs` (`CZPK\x04`), transposed `cold_chunks` (`CZCH\x02` auto-sealed every 32 runs with `O(hot_runs)` chunk-preserving compaction), plus `Core_Overlay` in-memory CoW branching (`--overlay`).
+  - Losslessly compresses exact `u64` rational batch ticks via unified `BU` `U64_Codec` competition (`Raw`, `Zlib_Delta_Varint`, `Zlib_BSS`, `Zlib_Delta_BSS`, and `Zlib_Block_GCD`).
   - Pools multi-run sample vectors per `(commit, lang, benchmark)` and compares runs/commits or languages (`compare_records`, `compare_1v1_langs`) using Mann-Whitney U and Welch `t` (with Student `t` critical values and domain byte footprint mismatch flags).
-  - Exports pooled records to 33-column Apache Arrow IPC / Feather v2 (`export_arrow_ipc`, default `LZ4_FRAME` body compression), pure-Odin GZIP Apache Parquet (`export_parquet`), `json`, `jsonl`, `csv`, `tsv`, and Markdown (`md`), plus updates `README.md` benchmark tables between `<!-- BEGIN_BENCHMARK_TABLE -->` and `<!-- END_BENCHMARK_TABLE -->` markers.
+  - Exports pooled records, commit series (`--all-commits`), or per-run histories (`--all-runs`) to 35-column Apache Arrow IPC / Feather v2 (`export_arrow_ipc`, `Decimal64(18, 6)` femtosecond-precision durations, default `LZ4_FRAME` body compression), pure-Odin GZIP Apache Parquet (`export_parquet`), `json`, `jsonl`, `csv`, `tsv`, and Markdown (`md`), plus updates `README.md` benchmark tables between `<!-- BEGIN_BENCHMARK_TABLE -->` and `<!-- END_BENCHMARK_TABLE -->` markers.
 - [`cmd/hugi/`](cmd/hugi/) (`bin/hugi`) — Standalone pure-Odin CLI (`run`, `ingest`, `history`, `inspect`, `compare`, `compare-1v1`, `export`, `compact`).
 
 ## Quickstart
@@ -97,14 +97,14 @@ make build
 
 | Command | Purpose | Key Flags |
 | --- | --- | --- |
-| `hugi run [pkg_dir]` | Build with `-o:speed` + discovered `ols.json` collections, run, and ingest packet | `--db`, `--no-db`, `--runs`, `--warmup`, `--groups`, `--filter`, `--lang`, `--baseline-commit`, `--fail-on-regression` |
-| `hugi ingest <file...>` | Import `HPKT`/`OBPK` `.hpk`/`.bpk`, `obench` `.json`, or legacy `.jsonl` files | `--db`, `--lang`, `--commit` |
+| `hugi run [pkg_dir]` | Build with `-o:speed` + discovered `ols.json` collections, run, and ingest packet | `--db`, `--no-db`, `--runs`, `--warmup`, `--groups`, `--filter`, `--lang`, `--baseline-commit`, `--fail-on-regression`, `--overlay` |
+| `hugi ingest <file...>` | Import `HPKT\x02` `.hpk`/`.bpk`, `obench` `.json`, or `.jsonl` files | `--db`, `--lang`, `--commit` |
 | `hugi history` | List stored commits or individual runs | `--db`, `--commits`, `--runs`, `--limit` |
 | `hugi inspect [filter]` | Show pooled quantiles (`p25`..`p99`), CI95, CV%, allocations, and footprint | `--db`, `--commit`, `--lang`, `--run` |
 | `hugi compare` | Mann-Whitney U + Welch `t` regression comparison | `--db`, `--commits a..b`, `--runs a..b`, `--last`, `--threshold`, `--fail-on-regression` |
 | `hugi compare-1v1` | Cross-language 1v1 comparison with byte-footprint parity check | `--db`, `--langs odin,zig`, `--commit`, `--threshold` |
-| `hugi export` | Export snapshot to Feather v2 `.arrow`, `.parquet`, `.json`, `.jsonl`, `.csv`, `.tsv`, or `.md` | `--db`, `--format arrow\|parquet\|json\|jsonl\|csv\|tsv\|md`, `--out`, `--update-readme` |
-| `hugi compact` | Compact `xitdb` store (collapses history + reclaims dead pages) | `--db` |
+| `hugi export` | Export snapshot or longitudinal series to Feather v2 `.arrow`, `.parquet`, `.json`, `.jsonl`, `.csv`, `.tsv`, or `.md` | `--db`, `--format arrow\|parquet\|json\|jsonl\|csv\|tsv\|md`, `--all-commits`, `--all-runs`, `--out`, `--update-readme` |
+| `hugi compact` | Compact `xitdb` store (seals cold chunks + reclaims dead pages) | `--db`, `--keep-hot` |
 
 ### Updating `README.md` Benchmark Tables
 
@@ -128,10 +128,10 @@ Ingesting real benchmark histories from `/home/pauli/projects/odin/xitdb/benchma
 | Artifact | Size | Notes |
 | --- | ---: | --- |
 | Raw `history.jsonl` + `lua.jsonl` (`+ zig.jsonl`) | `297,457 B` (`324,077 B`) | Plain-text JSONL |
-| Pre-compact `.hugidb` (v2 inline snapshots + `CZPK\x02`) | `146,003 B` | 13 CoW `xitdb` moments (`376,089 B` in v1) |
-| Compacted `.hugidb` (`hugi compact`) | `97,566 B` | **69.9% smaller** than all JSONLs (`173,073 B` in v1) |
-| Latest Odin Arrow IPC (`export --format arrow`) | `20,826 B` | 75 benchmarks x 33 columns in Feather v2 with `LZ4_FRAME` + zlib BSS `samples_blob` (`35,130 B` uncompressed) |
-| Latest Odin Parquet (`export --format parquet`) | `11,989 B` | 75 benchmarks x 33 columns in pure-Odin GZIP Parquet |
+| Pre-compact `.hugidb` (`v5`: `HCAT\x01` + `CZPK\x04`) | `41,871 B` | 13 CoW `xitdb` moments |
+| Compacted `.hugidb` (`hugi compact` -> `CZCH\x02`) | `7,513 B` | **97.7% smaller** than all JSONLs (13 runs sealed into cold rollup chunk) |
+| Latest Odin Arrow IPC (`export --format arrow`) | `22,514 B` | 75 benchmarks x 35 columns (`Decimal64(18, 6)` durations) in Feather v2 with `LZ4_FRAME` + `BU` `samples_blob` |
+| Latest Odin Parquet (`export --format parquet`) | `12,604 B` | 75 benchmarks x 35 columns (`Decimal64(18, 6)` durations) in pure-Odin GZIP Parquet |
 
 ### Migrating Existing Repos
 

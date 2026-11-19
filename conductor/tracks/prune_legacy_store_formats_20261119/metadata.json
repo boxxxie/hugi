@@ -1,8 +1,8 @@
 {
   "track_id": "prune_legacy_store_formats_20261119",
   "type": "refactor",
-  "status": "new",
+  "status": "in_progress",
   "created_at": "2026-11-19T02:45:00Z",
-  "updated_at": "2026-11-19T02:45:00Z",
+  "updated_at": "2026-11-19T11:03:00Z",
   "description": "Prune legacy v1-v4 store formats, BF float sample codecs, HPKT v1/OBPK/OBRC v1 binary magics, and Store_Write_Options ablation flags"
 }

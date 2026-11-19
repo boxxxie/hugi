@@ -11,10 +11,7 @@ import "core:strings"
 import "core:time"
 
 PACKET_MAGIC :: "HPKT\x02\x00\x00\x00"
-LEGACY_PACKET_V1_MAGIC :: "HPKT\x01\x00\x00\x00"
-LEGACY_PACKET_MAGIC :: "OBPK\x01\x00\x00\x00"
 RECORD_MAGIC :: "OBRC\x02\x00\x00\x00"
-LEGACY_RECORD_MAGIC :: "OBRC\x01\x00\x00\x00"
 MAX_METRICS :: 8
 
 FS_PER_NS :: i64(1_000_000)
@@ -41,7 +38,7 @@ fs_to_ns_f64 :: #force_inline proc "contextless" (fs: i64) -> f64 {
 	return f64(fs) * 1e-6
 }
 
-legacy_ns_to_batch_ns :: #force_inline proc "contextless" (ns: f64, ops_per_sample: u64) -> u64 {
+ns_f64_to_batch_ns :: #force_inline proc "contextless" (ns: f64, ops_per_sample: u64) -> u64 {
 	if !(ns > 0.0) {
 		return 0
 	}
@@ -379,14 +376,7 @@ _write_record_body :: proc(buf: ^[dynamic]u8, r: Record, include_samples: bool) 
 }
 
 @(private = "file", require_results)
-_read_record_body :: proc(
-	rd: ^_Reader,
-	legacy_f64: bool,
-	allocator: runtime.Allocator,
-) -> (
-	rec: Record,
-	ok: bool,
-) {
+_read_record_body :: proc(rd: ^_Reader, allocator: runtime.Allocator) -> (rec: Record, ok: bool) {
 	defer if !ok {
 		record_destroy(&rec, allocator)
 	}
@@ -407,35 +397,19 @@ _read_record_body :: proc(
 	rec.ops_per_sample = _read_u64(rd) or_return
 	rec.samples = int(_read_u32(rd) or_return)
 	rec.warmup = int(_read_u32(rd) or_return)
-	if legacy_f64 {
-		rec.min_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.p25_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.p50_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.p75_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.p95_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.p99_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.max_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.mean_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.std_dev_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.ci95_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.cv_pct = _read_f64(rd) or_return
-		rec.iqr_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-		rec.mad_fs = ns_f64_to_fs(_read_f64(rd) or_return)
-	} else {
-		rec.min_fs = _read_i64(rd) or_return
-		rec.p25_fs = _read_i64(rd) or_return
-		rec.p50_fs = _read_i64(rd) or_return
-		rec.p75_fs = _read_i64(rd) or_return
-		rec.p95_fs = _read_i64(rd) or_return
-		rec.p99_fs = _read_i64(rd) or_return
-		rec.max_fs = _read_i64(rd) or_return
-		rec.mean_fs = _read_i64(rd) or_return
-		rec.std_dev_fs = _read_i64(rd) or_return
-		rec.ci95_fs = _read_i64(rd) or_return
-		rec.cv_pct = _read_f64(rd) or_return
-		rec.iqr_fs = _read_i64(rd) or_return
-		rec.mad_fs = _read_i64(rd) or_return
-	}
+	rec.min_fs = _read_i64(rd) or_return
+	rec.p25_fs = _read_i64(rd) or_return
+	rec.p50_fs = _read_i64(rd) or_return
+	rec.p75_fs = _read_i64(rd) or_return
+	rec.p95_fs = _read_i64(rd) or_return
+	rec.p99_fs = _read_i64(rd) or_return
+	rec.max_fs = _read_i64(rd) or_return
+	rec.mean_fs = _read_i64(rd) or_return
+	rec.std_dev_fs = _read_i64(rd) or_return
+	rec.ci95_fs = _read_i64(rd) or_return
+	rec.cv_pct = _read_f64(rd) or_return
+	rec.iqr_fs = _read_i64(rd) or_return
+	rec.mad_fs = _read_i64(rd) or_return
 	rec.median_cycles = _read_f64(rd) or_return
 	rec.bytes_per_op = _read_u64(rd) or_return
 	rec.items_per_op = _read_u64(rd) or_return
@@ -468,16 +442,8 @@ _read_record_body :: proc(
 	}
 	reserve(&rec.samples_batch_ns, s_count)
 	for _ in 0 ..< s_count {
-		if legacy_f64 {
-			s := _read_f64(rd) or_return
-			append(&rec.samples_batch_ns, legacy_ns_to_batch_ns(s, rec.ops_per_sample))
-		} else {
-			s := _read_u64(rd) or_return
-			append(&rec.samples_batch_ns, s)
-		}
-	}
-	if legacy_f64 && len(rec.samples_batch_ns) > 0 {
-		recompute_record_stats_from_samples(&rec)
+		s := _read_u64(rd) or_return
+		append(&rec.samples_batch_ns, s)
 	}
 
 	return rec, true
@@ -500,7 +466,7 @@ encode_record_bytes :: proc(
 }
 
 /*
-Decodes a single `OBRC` record byte buffer (`\x02` integer or legacy `\x01` float) into `Record`.
+Decodes a single `OBRC\x02` record byte buffer into `Record`.
 */
 @(require_results)
 decode_record_bytes :: proc(
@@ -510,19 +476,14 @@ decode_record_bytes :: proc(
 	rec: Record,
 	ok: bool,
 ) {
-	if len(data) < len(RECORD_MAGIC) {
+	if len(data) < len(RECORD_MAGIC) || string(data[:len(RECORD_MAGIC)]) != RECORD_MAGIC {
 		return {}, false
 	}
-	hdr := string(data[:len(RECORD_MAGIC)])
-	if hdr != RECORD_MAGIC && hdr != LEGACY_RECORD_MAGIC {
-		return {}, false
-	}
-	legacy := hdr == LEGACY_RECORD_MAGIC
 	rd := _Reader {
 		data = data,
 		pos  = len(RECORD_MAGIC),
 	}
-	return _read_record_body(&rd, legacy, allocator)
+	return _read_record_body(&rd, allocator)
 }
 
 /*
@@ -554,7 +515,7 @@ encode_packet_bytes :: proc(
 }
 
 /*
-Decodes an `HPKT` (`\x02` integer or legacy `\x01`/`OBPK`) binary buffer into a `Run_Packet`.
+Decodes an `HPKT\x02` binary buffer into a `Run_Packet`.
 */
 @(require_results)
 decode_packet_bytes :: proc(
@@ -564,14 +525,9 @@ decode_packet_bytes :: proc(
 	pkt: Run_Packet,
 	ok: bool,
 ) {
-	if len(data) < len(PACKET_MAGIC) {
+	if len(data) < len(PACKET_MAGIC) || string(data[:len(PACKET_MAGIC)]) != PACKET_MAGIC {
 		return {}, false
 	}
-	hdr := string(data[:len(PACKET_MAGIC)])
-	if hdr != PACKET_MAGIC && hdr != LEGACY_PACKET_V1_MAGIC && hdr != LEGACY_PACKET_MAGIC {
-		return {}, false
-	}
-	legacy := hdr != PACKET_MAGIC
 	defer if !ok {
 		packet_destroy(&pkt, allocator)
 	}
@@ -598,7 +554,7 @@ decode_packet_bytes :: proc(
 	}
 	reserve(&pkt.records, rec_count)
 	for _ in 0 ..< rec_count {
-		r := _read_record_body(&rd, legacy, allocator) or_return
+		r := _read_record_body(&rd, allocator) or_return
 		append(&pkt.records, r)
 	}
 	return pkt, true
@@ -783,7 +739,7 @@ read_obench_json_packets :: proc(
 			copy(r.samples_batch_ns[:], e.samples_batch_ns)
 		} else {
 			for s, si in e.samples_ns {
-				r.samples_batch_ns[si] = legacy_ns_to_batch_ns(s, ops)
+				r.samples_batch_ns[si] = ns_f64_to_batch_ns(s, ops)
 			}
 		}
 		for m in e.custom_metrics {
@@ -971,11 +927,11 @@ read_jsonl_packets :: proc(
 			recompute_record_stats_from_samples(&r)
 		} else if len(row.samples_ns) > 0 {
 			for s, si in row.samples_ns {
-				r.samples_batch_ns[si] = legacy_ns_to_batch_ns(s, eff_ops)
+				r.samples_batch_ns[si] = ns_f64_to_batch_ns(s, eff_ops)
 			}
 			recompute_record_stats_from_samples(&r)
 		} else if med > 0 {
-			append(&r.samples_batch_ns, legacy_ns_to_batch_ns(med, eff_ops))
+			append(&r.samples_batch_ns, ns_f64_to_batch_ns(med, eff_ops))
 			recompute_record_stats_from_samples(&r)
 		}
 		if row.pool_hits > 0 || row.pool_misses > 0 {

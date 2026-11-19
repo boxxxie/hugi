@@ -83,7 +83,6 @@ embedding lossless compressed `samples_blob` arrays alongside optional `LZ4_Fram
 export_arrow_ipc :: proc(
 	path: string,
 	records: []Pooled_Record,
-	codec := Codec.Zlib_BSS,
 	ipc_compression := skadi.IPC_Compression.LZ4_Frame,
 	allocator := context.allocator,
 ) -> bool {
@@ -131,7 +130,6 @@ export_arrow_ipc :: proc(
 		skadi.field_make("samples_blob", skadi.Binary_Type{}, false),
 	}
 
-	_ = codec
 	schema, schema_err := skadi.schema_make(fields[:], allocator)
 	if schema_err != nil {
 		return false

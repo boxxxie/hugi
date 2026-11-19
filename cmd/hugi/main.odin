@@ -35,7 +35,7 @@ USAGE:
 
 COMMANDS:
   run [pkg_dir]          Build and execute an Odin benchmark package, ingest results into store
-  ingest <file...>       Ingest .hpk/.bpk packets, obench .json reports, or legacy .jsonl histories
+  ingest <file...>       Ingest HPKT .hpk/.bpk packets, obench .json reports, or .jsonl histories
   history                List commits or runs stored in the benchmark database
   inspect [filter]       Inspect pooled metrics (quantiles, CV%, allocations, footprint)
   compare                Compare commits or runs using Mann-Whitney U and Welch t-test
@@ -603,7 +603,7 @@ _file_has_packet_magic :: proc(path: string) -> bool {
 	defer os.close(f)
 	hdr: [4]u8
 	n, r_err := os.read(f, hdr[:])
-	return r_err == nil && n == 4 && (string(hdr[:]) == "HPKT" || string(hdr[:]) == "OBPK")
+	return r_err == nil && n == 4 && string(hdr[:]) == "HPKT"
 }
 
 @(private = "file")
@@ -1403,15 +1403,9 @@ _cmd_export :: proc(args: []string) -> int {
 		ok := false
 		switch format {
 		case "arrow", "feather", "ipc":
-			ok = store.export_arrow_ipc(
-				out_path,
-				records,
-				.Zlib_BSS,
-				.LZ4_Frame,
-				context.allocator,
-			)
+			ok = store.export_arrow_ipc(out_path, records, .LZ4_Frame, context.allocator)
 		case "parquet", "pq":
-			ok = store.export_parquet(out_path, records, .Zlib_BSS, true, context.allocator)
+			ok = store.export_parquet(out_path, records, true, context.allocator)
 		case "json":
 			ok = store.export_json(out_path, records)
 		case "jsonl", "ndjson":

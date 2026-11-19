@@ -390,7 +390,7 @@ _obench_result_to_record :: proc(
 		recompute_record_stats_from_samples(&rec)
 	} else if len(st.samples_ns) > 0 {
 		for s, i in st.samples_ns {
-			rec.samples_batch_ns[i] = legacy_ns_to_batch_ns(s, ops)
+			rec.samples_batch_ns[i] = ns_f64_to_batch_ns(s, ops)
 		}
 		recompute_record_stats_from_samples(&rec)
 	}

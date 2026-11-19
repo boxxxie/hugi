@@ -544,11 +544,9 @@ PLAIN encoding, optional RFC 1952 GZIP page compression) using pure Odin + `vend
 export_parquet :: proc(
 	path: string,
 	records: []Pooled_Record,
-	codec := Codec.Zlib_BSS,
 	compress_pages := true,
 	allocator := context.allocator,
 ) -> bool {
-	_ = codec
 	_ensure_export_parent_dir(path)
 
 	file_buf := make([dynamic]u8, 0, 16384, allocator)

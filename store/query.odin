@@ -437,11 +437,9 @@ store_load_raw_groups :: proc(
 				run_ord := int(ref.run_ord)
 				if run_ord >= 0 && run_ord < len(mr.cat.runs) {
 					sc := mr.cat.runs[run_ord].commit
-					if sc != "" {
-						sk := fmt.tprintf("%s\x00%s", snap_lang, key)
-						snap_latest_commit[sk] = sc
-						active_commits[sc] = true
-					}
+					sk := fmt.tprintf("%s\x00%s", snap_lang, key)
+					snap_latest_commit[sk] = sc
+					active_commits[sc] = true
 				}
 			}
 		}
@@ -504,10 +502,8 @@ store_load_raw_groups :: proc(
 		run_ord := int(ref.run_ord)
 		if run_ord >= 0 && run_ord < len(mr.cat.runs) {
 			sc := mr.cat.runs[run_ord].commit
-			if sc != "" {
-				snap_latest_commit[key] = sc
-				active_commits[sc] = true
-			}
+			snap_latest_commit[key] = sc
+			active_commits[sc] = true
 		}
 	}
 

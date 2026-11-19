@@ -178,7 +178,10 @@ _try_fast_catalog_compact :: proc(
 		}
 		for {
 			kv_cur, n_err := xitdb.cursor_iterator_next(&it)
-			if n_err != nil || kv_cur == nil {
+			if n_err != nil {
+				return true, false
+			}
+			if kv_cur == nil {
 				break
 			}
 			kv, kv_err := xitdb.cursor_read_kv_pair(kv_cur.?, context.temp_allocator)
@@ -238,7 +241,10 @@ _try_fast_catalog_compact :: proc(
 		}
 		for {
 			cur_maybe, n_err := xitdb.cursor_iterator_next(&it)
-			if n_err != nil || cur_maybe == nil {
+			if n_err != nil {
+				return true, false
+			}
+			if cur_maybe == nil {
 				break
 			}
 			cb, cb_err := xitdb.cursor_read_bytes(cur_maybe.?, 0, context.temp_allocator)

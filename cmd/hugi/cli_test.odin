@@ -1,6 +1,7 @@
 package hugi_cli
 
 import hugi "../../hugi"
+import store "../../store"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
@@ -361,4 +362,34 @@ test_cli_project_config_doctor_and_ingest_env :: proc(t: ^testing.T) {
 	_apply_ingest_env(&pkt, true, "-O3", "Apache Arrow C++ 25.0.1")
 	testing.expect_value(t, pkt.env.build_flags, "-O3")
 	testing.expect_value(t, pkt.env.runtime_version, "Apache Arrow C++ 25.0.1")
+}
+
+@(test)
+test_open_store_or_err_db_path_survives_temp_allocator_reset :: proc(t: ^testing.T) {
+	if !os.exists(".tmp") {
+		_ = os.make_directory(".tmp")
+	}
+	base_dir := fmt.tprintf(".tmp/cli_open_db_test_%d", os.get_pid())
+	_ = os.remove_all(base_dir)
+	_ = os.make_directory_all(base_dir)
+	defer _ = os.remove_all(base_dir)
+
+	expected_path, _ := filepath.join({base_dir, "history.hugidb"}, context.allocator)
+	defer delete(expected_path)
+	tmp_path := strings.clone(expected_path, context.temp_allocator)
+
+	st, db_path, ok := _open_store_or_err("ingest", tmp_path)
+	testing.expect(t, ok, "_open_store_or_err should open store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	free_all(context.temp_allocator)
+	poison := make([]u8, max(len(expected_path), 64), context.temp_allocator)
+	for &b in poison {
+		b = 'X'
+	}
+
+	testing.expect_value(t, db_path, expected_path)
 }

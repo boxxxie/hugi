@@ -335,11 +335,11 @@ _open_store_or_err :: proc(
 	db_path: string,
 	ok: bool,
 ) {
-	db_path = _resolve_db_path(db_flag)
-	st, ok = store.store_open(db_path, allocator)
+	resolved := _resolve_db_path(db_flag)
+	st, ok = store.store_open(resolved, allocator)
 	if !ok {
-		fmt.eprintfln("hugi %s: could not open store '%s'", cmd_name, db_path)
-		return {}, db_path, false
+		fmt.eprintfln("hugi %s: could not open store '%s'", cmd_name, resolved)
+		return {}, resolved, false
 	}
-	return st, db_path, true
+	return st, st.path, true
 }

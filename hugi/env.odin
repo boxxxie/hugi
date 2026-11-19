@@ -195,7 +195,7 @@ check_host_env :: proc(env: Run_Env, allocator := context.allocator) -> [dynamic
 		append(
 			&warnings,
 			fmt.aprintf(
-				"CPU scaling_max_freq is clamped to %.2f GHz (%.0f%% of %.2f GHz max); lift with: sudo cpupower frequency-set -u %d",
+				"CPU scaling_max_freq is clamped to %.2f GHz (%.0f%% of %.2f GHz max); lift with: sudo cpupower frequency-set -u %d (on amd-pstate after suspend/resume, cycle guided->active in /sys/devices/system/cpu/amd_pstate/status first)",
 				f64(env.scaling_max_khz) / 1_000_000.0,
 				pct,
 				f64(env.cpuinfo_max_khz) / 1_000_000.0,

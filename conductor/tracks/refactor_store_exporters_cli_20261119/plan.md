@@ -54,20 +54,20 @@ Follow [workflow.md](../../workflow.md): keep `hugi/` isolated from `xitdb`/`ska
 
 ## Phase 4: Unified 35-Column Export Schema, Arrow/Parquet Cleanup, and Standardized Text Exports
 
-- [ ] Task: Update and expand export schema parity tests
-    - [ ] Update existing TSV/CSV/JSON/JSONL assertions in `tests/hugi_test.odin` to expect the canonical `34` scalar field names (`suite_name`, `group_name`, `run_count`, `iqr_ns`, `mad_ns`, `temp_allocs_per_op`, `temp_bytes_per_op`, `peak_heap_bytes`, etc.).
-    - [ ] Add an explicit schema-parity test verifying identical `34`-column scalar names and ordering across Arrow IPC, Parquet, CSV, TSV, JSON, and JSONL outputs (plus `samples_blob` in Arrow/Parquet and `samples_batch_ns`/`samples_ns` in JSON/JSONL).
-- [ ] Task: Create unified `35`-column export schema (`store/export_schema.odin`)
-    - [ ] Define `Export_Col_Id`, `Export_Col_Kind`, `Export_Col_Spec`, and `@(rodata)` `EXPORT_COLUMNS` (`34` scalar columns + `samples_blob`).
-    - [ ] Add typed value accessors (`_export_col_str`, `_export_col_i64`, `_export_col_u64`, `_export_col_f64`) and shared `_compress_pooled_samples_blob`.
-- [ ] Task: Refactor `store/parquet.odin` to consume `EXPORT_COLUMNS`
-    - [ ] Remove `_pq_column_specs`, `_pq_record_str`, `_pq_record_i64`, `_pq_record_u64`, `_pq_record_f64`, and magic integer field indices.
-    - [ ] Use `EXPORT_COLUMNS`, typed accessors, and `_compress_pooled_samples_blob`, and fix the stale `root + 33 leaves` comment.
-- [ ] Task: Split `store/export.odin` into `store/export_arrow.odin` and `store/export_text.odin`
-    - [ ] Implement `export_arrow_ipc` in `store/export_arrow.odin` driven by `EXPORT_COLUMNS` with a clean column-builder array / loop-based error cleanup (removing the `35` copy-pasted finish/cleanup blocks) and `_compress_pooled_samples_blob`.
-    - [ ] Implement `export_json`, `export_jsonl`, `export_csv`, `export_tsv`, `format_markdown_table`, `export_markdown`, `format_comparison_table`, `format_1v1_table`, and `update_readme_markers` in `store/export_text.odin`, driving CSV/TSV and JSON/JSONL scalar fields from the canonical `34` columns of `EXPORT_COLUMNS`.
-    - [ ] Delete the old monolithic `store/export.odin`.
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Unified 35-Column Export Schema, Arrow/Parquet Cleanup, and Standardized Text Exports' (Protocol in workflow.md)
+- [x] Task: Update and expand export schema parity tests
+    - [x] Update existing TSV/CSV/JSON/JSONL assertions in `tests/hugi_test.odin` to expect the canonical `34` scalar field names (`suite_name`, `group_name`, `run_count`, `iqr_ns`, `mad_ns`, `temp_allocs_per_op`, `temp_bytes_per_op`, `peak_heap_bytes`, etc.).
+    - [x] Add an explicit schema-parity test verifying identical `34`-column scalar names and ordering across Arrow IPC, Parquet, CSV, TSV, JSON, and JSONL outputs (plus `samples_blob` in Arrow/Parquet and `samples_batch_ns`/`samples_ns` in JSON/JSONL).
+- [x] Task: Create unified `35`-column export schema (`store/export_schema.odin`)
+    - [x] Define `Export_Col_Id`, `Export_Col_Kind`, `Export_Col_Spec`, and `@(rodata)` `EXPORT_COLUMNS` (`34` scalar columns + `samples_blob`).
+    - [x] Add typed value accessors (`_export_col_str`, `_export_col_i64`, `_export_col_u64`, `_export_col_f64`) and shared `_compress_pooled_samples_blob`.
+- [x] Task: Refactor `store/parquet.odin` to consume `EXPORT_COLUMNS`
+    - [x] Remove `_pq_column_specs`, `_pq_record_str`, `_pq_record_i64`, `_pq_record_u64`, `_pq_record_f64`, and magic integer field indices.
+    - [x] Use `EXPORT_COLUMNS`, typed accessors, and `_compress_pooled_samples_blob`, and fix the stale `root + 33 leaves` comment.
+- [x] Task: Split `store/export.odin` into `store/export_arrow.odin` and `store/export_text.odin`
+    - [x] Implement `export_arrow_ipc` in `store/export_arrow.odin` driven by `EXPORT_COLUMNS` with a clean column-builder array / loop-based error cleanup (removing the `35` copy-pasted finish/cleanup blocks) and `_compress_pooled_samples_blob`.
+    - [x] Implement `export_json`, `export_jsonl`, `export_csv`, `export_tsv`, `format_markdown_table`, `export_markdown`, `format_comparison_table`, `format_1v1_table`, and `update_readme_markers` in `store/export_text.odin`, driving CSV/TSV and JSON/JSONL scalar fields from the canonical `34` columns of `EXPORT_COLUMNS`.
+    - [x] Delete the old monolithic `store/export.odin`.
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Unified 35-Column Export Schema, Arrow/Parquet Cleanup, and Standardized Text Exports' (Protocol in workflow.md)
 
 ---
 

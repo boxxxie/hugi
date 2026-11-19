@@ -590,8 +590,8 @@ test_exporters_arrow_readme_and_compact :: proc(t: ^testing.T) {
 			tsv_str := string(tsv_bytes)
 			testing.expect(
 				t,
-				strings.contains(tsv_str, "commit\tlang\tsuite\tgroup"),
-				"tsv header uses tabs",
+				strings.contains(tsv_str, "commit\tlang\tsuite_name\tgroup_name"),
+				"tsv header uses canonical column names and tabs",
 			)
 			testing.expect(t, strings.contains(tsv_str, "\tcore::op_a\t"), "tsv contains op_a")
 			testing.expect(t, strings.contains(tsv_str, "\tcore::op_b\t"), "tsv contains op_b")
@@ -2095,4 +2095,360 @@ test_store_multilang_empty_lang_queries :: proc(t: ^testing.T) {
 		testing.expect_value(t, odin_cnt, 3)
 		testing.expect_value(t, zig_cnt, 2)
 	}
+}
+
+@(private = "file")
+_extract_parquet_leaf_columns :: proc(
+	pq_bytes: []u8,
+	allocator := context.allocator,
+) -> (
+	cols: []string,
+	ok: bool,
+) {
+	n := len(pq_bytes)
+	if n < 12 || string(pq_bytes[:4]) != "PAR1" || string(pq_bytes[n - 4:]) != "PAR1" {
+		return nil, false
+	}
+	flen_bytes: [4]u8
+	copy(flen_bytes[:], pq_bytes[n - 8:n - 4])
+	flen := int(u32(transmute(u32le)flen_bytes))
+	if flen <= 0 || flen > n - 12 {
+		return nil, false
+	}
+	footer := pq_bytes[n - 8 - flen:n - 8]
+	pos := 0
+
+	read_u8 :: proc(data: []u8, pos: ^int) -> (u8, bool) {
+		if pos^ >= len(data) {
+			return 0, false
+		}
+		v := data[pos^]
+		pos^ += 1
+		return v, true
+	}
+	read_varint :: proc(data: []u8, pos: ^int) -> (val: u64, ok: bool) {
+		shift: uint = 0
+		for shift < 64 {
+			b := read_u8(data, pos) or_return
+			val |= u64(b & 0x7F) << shift
+			if (b & 0x80) == 0 {
+				return val, true
+			}
+			shift += 7
+		}
+		return 0, false
+	}
+	read_field_hdr :: proc(
+		data: []u8,
+		pos: ^int,
+		prev: ^i32,
+	) -> (
+		fid: i32,
+		ftype: u8,
+		stop: bool,
+		ok: bool,
+	) {
+		b := read_u8(data, pos) or_return
+		if b == 0 {
+			return 0, 0, true, true
+		}
+		delta := i32((b >> 4) & 0x0F)
+		ftype = b & 0x0F
+		if delta == 0 {
+			zz := u16(read_varint(data, pos) or_return)
+			fid = i32(i16((zz >> 1) ~ u16(-i16(zz & 1))))
+		} else {
+			fid = prev^ + delta
+		}
+		prev^ = fid
+		return fid, ftype, false, true
+	}
+
+	fprev: i32 = 0
+	for {
+		fid, ftype, stop, h_ok := read_field_hdr(footer, &pos, &fprev)
+		if !h_ok {
+			return nil, false
+		}
+		if stop {
+			break
+		}
+		if fid == 2 && ftype == 9 {
+			lh := read_u8(footer, &pos) or_return
+			cnt := int(lh >> 4)
+			elem_type := lh & 0x0F
+			if cnt == 15 {
+				c64 := read_varint(footer, &pos) or_return
+				cnt = int(c64)
+			}
+			if elem_type != 12 || cnt < 1 {
+				return nil, false
+			}
+			out := make([dynamic]string, 0, cnt - 1, allocator)
+			defer if !ok {
+				for s in out {
+					delete(s, allocator)
+				}
+				delete(out)
+			}
+			for elem_idx in 0 ..< cnt {
+				sprev: i32 = 0
+				elem_name := ""
+				for {
+					sfid, sftype, sstop, sh_ok := read_field_hdr(footer, &pos, &sprev)
+					if !sh_ok {
+						return nil, false
+					}
+					if sstop {
+						break
+					}
+					switch sftype {
+					case 5, 6:
+						_ = read_varint(footer, &pos) or_return
+					case 8:
+						slen := int(read_varint(footer, &pos) or_return)
+						if slen < 0 || pos + slen > len(footer) {
+							return nil, false
+						}
+						if sfid == 4 {
+							elem_name = string(footer[pos:pos + slen])
+						}
+						pos += slen
+					case:
+						return nil, false
+					}
+				}
+				if elem_idx > 0 {
+					append(&out, strings.clone(elem_name, allocator))
+				}
+			}
+			ok = true
+			return out[:], true
+		}
+		if ftype == 5 || ftype == 6 {
+			_ = read_varint(footer, &pos) or_return
+		} else {
+			break
+		}
+	}
+	return nil, false
+}
+
+@(private = "file")
+_extract_first_json_object_keys :: proc(text: string, allocator := context.allocator) -> []string {
+	keys := make([dynamic]string, allocator)
+	obj_start := strings.index_byte(text, '{')
+	if obj_start < 0 {
+		return keys[:]
+	}
+	brace_depth := 0
+	bracket_depth := 0
+	i := obj_start
+	for i < len(text) {
+		ch := text[i]
+		switch ch {
+		case '{':
+			brace_depth += 1
+			i += 1
+		case '}':
+			brace_depth -= 1
+			i += 1
+			if brace_depth == 0 {
+				return keys[:]
+			}
+		case '[':
+			bracket_depth += 1
+			i += 1
+		case ']':
+			bracket_depth -= 1
+			i += 1
+		case '"':
+			j := i + 1
+			for j < len(text) {
+				if text[j] == '\\' {
+					j += 2
+					continue
+				}
+				if text[j] == '"' {
+					break
+				}
+				j += 1
+			}
+			str_val := text[i + 1:min(j, len(text))]
+			i = j + 1
+			if brace_depth == 1 && bracket_depth == 0 {
+				k := i
+				for k < len(text) && (text[k] == ' ' || text[k] == '\t') {
+					k += 1
+				}
+				if k < len(text) && text[k] == ':' {
+					append(&keys, strings.clone(str_val, allocator))
+				}
+			}
+		case:
+			i += 1
+		}
+	}
+	return keys[:]
+}
+
+@(test)
+test_export_schema_parity_all_formats :: proc(t: ^testing.T) {
+	if !os.exists(".tmp") {
+		_ = os.make_directory(".tmp")
+	}
+	pid := os.get_pid()
+	arrow_path := fmt.aprintf(".tmp/schema_parity_%d.arrow", pid)
+	parquet_path := fmt.aprintf(".tmp/schema_parity_%d.parquet", pid)
+	csv_path := fmt.aprintf(".tmp/schema_parity_%d.csv", pid)
+	tsv_path := fmt.aprintf(".tmp/schema_parity_%d.tsv", pid)
+	json_path := fmt.aprintf(".tmp/schema_parity_%d.json", pid)
+	jsonl_path := fmt.aprintf(".tmp/schema_parity_%d.jsonl", pid)
+	defer {
+		for p in ([]string{arrow_path, parquet_path, csv_path, tsv_path, json_path, jsonl_path}) {
+			if os.exists(p) {
+				_ = os.remove(p)
+			}
+			delete(p)
+		}
+	}
+
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "open in-memory store for schema parity")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	pkt := _make_packet(
+		"par001",
+		"odin",
+		"run-par-1",
+		"parity_suite",
+		[]string{"alpha", "beta"},
+		[]f64{80.0, 210.0},
+		[]u64{1024, 4096},
+	)
+	pkt.records[0].temp_allocs_per_op = 1.5
+	pkt.records[0].temp_bytes_per_op = 48.0
+	pkt.records[0].peak_heap_bytes = 2048
+	defer hugi.packet_destroy(&pkt)
+	testing.expect(t, store.store_ingest_packet(&st, pkt), "ingest parity packet")
+
+	records := store.store_load_pooled_records(&st, "odin")
+	defer store.pooled_records_destroy(records)
+	testing.expect_value(t, len(records), 2)
+
+	testing.expect(t, store.export_arrow_ipc(arrow_path, records), "arrow parity export")
+	testing.expect(t, store.export_parquet(parquet_path, records), "parquet parity export")
+	testing.expect(t, store.export_csv(csv_path, records), "csv parity export")
+	testing.expect(t, store.export_tsv(tsv_path, records), "tsv parity export")
+	testing.expect(t, store.export_json(json_path, records), "json parity export")
+	testing.expect(t, store.export_jsonl(jsonl_path, records), "jsonl parity export")
+
+	// 1. Arrow IPC: exact 35 columns (34 canonical scalar + samples_blob).
+	sc, bs, arrow_ok := skadi.ipc_read_file(arrow_path, context.allocator, true, false)
+	testing.expect(t, arrow_ok, "read parity arrow")
+	if arrow_ok {
+		defer {
+			for &b in bs {
+				skadi.record_batch_free(&b)
+			}
+			delete(bs)
+			if sc != nil {
+				skadi.schema_free(sc)
+				free(sc)
+			}
+		}
+		testing.expect_value(t, len(sc.fields), store.EXPORT_TOTAL_COL_COUNT)
+		for i in 0 ..< min(len(sc.fields), store.EXPORT_TOTAL_COL_COUNT) {
+			testing.expect_value(t, sc.fields[i].name, store.EXPORT_COLUMNS[i].name)
+		}
+	}
+
+	// 2. Parquet: exact 35 columns (34 canonical scalar + samples_blob).
+	if pq_bytes, pq_err := os.read_entire_file(parquet_path, context.allocator); pq_err == nil {
+		defer delete(pq_bytes)
+		pq_cols, pq_ok := _extract_parquet_leaf_columns(pq_bytes, context.allocator)
+		testing.expect(t, pq_ok, "parse parquet schema leaves")
+		if pq_ok {
+			defer {
+				for c in pq_cols {
+					delete(c)
+				}
+				delete(pq_cols)
+			}
+			testing.expect_value(t, len(pq_cols), store.EXPORT_TOTAL_COL_COUNT)
+			for i in 0 ..< min(len(pq_cols), store.EXPORT_TOTAL_COL_COUNT) {
+				testing.expect_value(t, pq_cols[i], store.EXPORT_COLUMNS[i].name)
+			}
+		}
+	}
+
+	// 3. CSV and TSV: exact 34 canonical scalar columns in canonical order.
+	verify_delimited :: proc(
+		t: ^testing.T,
+		path: string,
+		delim: string,
+		label: string,
+		loc := #caller_location,
+	) {
+		raw, err := os.read_entire_file(path, context.allocator)
+		testing.expectf(t, err == nil, "%s read", label, loc = loc)
+		if err != nil {
+			return
+		}
+		defer delete(raw)
+		lines := strings.split_lines(string(raw), context.temp_allocator)
+		testing.expectf(t, len(lines) >= 3, "%s lines >= 3", label, loc = loc)
+		if len(lines) < 3 {
+			return
+		}
+		hdr := strings.split(lines[0], delim, context.temp_allocator)
+		testing.expect_value(t, len(hdr), store.EXPORT_SCALAR_COL_COUNT, loc = loc)
+		for i in 0 ..< min(len(hdr), store.EXPORT_SCALAR_COL_COUNT) {
+			testing.expect_value(t, hdr[i], store.EXPORT_COLUMNS[i].name, loc = loc)
+		}
+		row1 := strings.split(lines[1], delim, context.temp_allocator)
+		testing.expect_value(t, len(row1), store.EXPORT_SCALAR_COL_COUNT, loc = loc)
+	}
+	verify_delimited(t, csv_path, ",", "csv")
+	verify_delimited(t, tsv_path, "\t", "tsv")
+
+	// 4. JSON and JSONL: exact 34 canonical scalar keys in order + samples_batch_ns + samples_ns.
+	verify_json_keys :: proc(t: ^testing.T, path: string, label: string, loc := #caller_location) {
+		raw, err := os.read_entire_file(path, context.allocator)
+		testing.expectf(t, err == nil, "%s read", label, loc = loc)
+		if err != nil {
+			return
+		}
+		defer delete(raw)
+		keys := _extract_first_json_object_keys(string(raw), context.allocator)
+		defer {
+			for k in keys {
+				delete(k)
+			}
+			delete(keys)
+		}
+		testing.expect_value(t, len(keys), store.EXPORT_SCALAR_COL_COUNT + 2, loc = loc)
+		for i in 0 ..< min(len(keys), store.EXPORT_SCALAR_COL_COUNT) {
+			testing.expect_value(t, keys[i], store.EXPORT_COLUMNS[i].name, loc = loc)
+		}
+		if len(keys) == store.EXPORT_SCALAR_COL_COUNT + 2 {
+			testing.expect_value(
+				t,
+				keys[store.EXPORT_SCALAR_COL_COUNT],
+				"samples_batch_ns",
+				loc = loc,
+			)
+			testing.expect_value(
+				t,
+				keys[store.EXPORT_SCALAR_COL_COUNT + 1],
+				"samples_ns",
+				loc = loc,
+			)
+		}
+	}
+	verify_json_keys(t, json_path, "json")
+	verify_json_keys(t, jsonl_path, "jsonl")
 }

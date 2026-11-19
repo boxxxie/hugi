@@ -28,7 +28,7 @@ All CLI commands accept non-empty flags in any of three forms:
 | Variable | Used By | Description |
 | :--- | :--- | :--- |
 | `ODIN` | `hugi run` | Path to the Odin compiler executable (defaults to `odin` on `PATH`). |
-| `HUGI_HOME` | `hugi run` | Path to the `hugi` repository root; used to inject `-collection:hugi` and `-collection:obench` when they are not defined in `ols.json`. |
+| `HUGI_HOME` | `hugi run` | Path to the `hugi` repository root; used to inject `-collection:hugi` and `-collection:obench` when they are not defined in `ols.json`. (If unset, `hugi run` walks upward from the resolved binary location—which works when `bin/hugi` is symlinked via `make install`, whereas a copied binary requires `HUGI_HOME` or `ols.json`.) |
 
 ---
 
@@ -78,7 +78,10 @@ hugi run ./benchmarks \
 | `--extra-build-flags <s>` | `""` | Extra flags appended to `odin build` with quote-aware splitting (e.g., `'-extra-linker-flags:"-L/usr/local/lib -Wl,-rpath,/usr/local/lib"'`). |
 | `--quiet` | `false` | Suppress benchmark runner terminal report (comparison table still prints if `--baseline-commit` is set). |
 
-> **Binary-Only Flags & `run_id` Granularity:** `--run-id` and `--packet-out` are managed internally by `hugi run` and rejected if passed to `hugi run` directly (they apply only when executing a compiled benchmark binary standalone). Also note that `default_run_id()` generates `run-<unix_seconds>`, so two runs of the same `--lang` executed within the same wall-clock second overwrite each other on `(lang, run_id)`.
+> **Binary-Only Flags, Failing Runs & `run_id` Granularity:**
+> * `--run-id` and `--packet-out` are managed internally by `hugi run` and rejected if passed to `hugi run` directly (they apply only when executing a compiled benchmark binary standalone).
+> * If the benchmark binary writes a packet and exits non-zero due to `@zero_alloc` violations or benchmark errors, `hugi run` still ingests that packet into `.hugidb` (whenever `--no-db` is omitted) before exiting `1`. Pass `--overlay` or `--no-db` during local debugging to avoid updating your committed `.hugidb` snapshot.
+> * `default_run_id()` generates `run-<unix_seconds>`, so two runs of the same `--lang` executed within the same wall-clock second overwrite each other on `(lang, run_id)`.
 
 ---
 
@@ -91,13 +94,14 @@ Ingests one or more external benchmark artifacts into `.hugidb`. File type is de
 hugi ingest out/odin.hpk out/zig_bench.jsonl --db benchmarks/history.hugidb --commit a1b2c3d4e5f6
 ```
 
-* `--lang <lang>` and `--commit <sha>` override the language or commit embedded in the input files.
+* Accepts `--db`, `--lang`, and `--commit` (rejects `--filter` / `-f`). `--lang <lang>` and `--commit <sha>` override the language or commit embedded in the input files.
+* **Run ID collisions on batch ingest:** `hugi ingest` passes an empty `run_id_override` to `read_obench_json_packets` (which falls back to `run-<unix_seconds>`), so ingesting multiple `obench` `.json` files in one second assigns identical `(lang, run_id)` keys and the later file overwrites the earlier one. Similarly, `.jsonl` rows omitting `"run_id"` default to `jsonl-<commit>-<lang>`—set explicit `"run_id"` values in JSONL when ingesting multiple runs for the same `(commit, lang)`.
 
 ---
 
 ### `hugi history`
 
-Lists chronological commits (default) or individual runs stored in the database, ordered newest-first.
+Lists chronological commits (default) or individual runs stored in the database, ordered newest-first. Only accepts `--db` (plus `--commits` / `--runs` / `--limit`); rejects `--lang`, `--commit`, and `--filter`.
 
 ```sh
 hugi history --db benchmarks/history.hugidb --commits --limit 15
@@ -125,7 +129,7 @@ hugi inspect --run run-1770000120 --lang zig
 
 ### `hugi compare`
 
-Compares two commits or two run IDs within a single language (defaults to `--lang odin`) using pooled sample distributions. Supports `--format <md|json|csv>` (auto-inferred from `--out` extension if omitted, defaulting to `md`) and `--out <path|->`.
+Compares two commits or two run IDs within a single language (defaults to `--lang odin`) using pooled sample distributions. Supports `--format <md|json|csv>` (auto-inferred from `--out` extension if omitted, defaulting to `md`) and `--out <path|->`. Note that `--last` compares the last two entries from `store_list_commits`, which orders commits by their *first* appearance in `.hugidb`—re-running an older commit pools into its existing slot without moving it to the end (use `--runs <r1>..<r2>` for run-to-run comparison on an existing commit).
 
 ```sh
 # Compare the last two commits for a language (falls back to last two runs if only 1 commit exists)
@@ -146,7 +150,7 @@ hugi compare --runs run-1770000100..run-1770000500 --filter "scan"
 
 ### `hugi compare-1v1`
 
-Runs a cross-language head-to-head comparison on exact-matching `full_name` benchmarks, reporting winners, speedups, Mann-Whitney U `p`-values, unmatched benchmarks (`Only in <lang>`), and domain memory/disk footprint mismatches (`[MISMATCH]`). Supports `--format <md|json|csv>` and `--out <path|->`.
+Runs a cross-language head-to-head comparison on exact-matching `full_name` benchmarks, reporting winners, speedups, Mann-Whitney U `p`-values, unmatched benchmarks (`Only in <lang>`), and domain memory/disk footprint mismatches (`[MISMATCH]`). Accepts `--db`, `--commit`, `--threshold`, `--langs`, `--format`, and `--out` (rejects `--lang` and `--filter` / `-f`).
 
 ```sh
 hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig --commit a1b2c3d4
@@ -177,7 +181,7 @@ hugi export --all-commits --out reports/series.arrow
 hugi export --lang all --all-runs --out reports/all_runs.jsonl
 ```
 
-> **Note:** `--all-commits`, `--all-runs`, and `--commit <sha>` are mutually exclusive scopes. As with `hugi inspect`, default Snapshot exports retain previously recorded benchmarks even if a later commit removed or renamed them unless `--commit <sha>` is specified.
+> **Note:** `--all-commits`, `--all-runs`, and `--commit <sha>` are mutually exclusive scopes (and `hugi export` has no `--run <id>` flag, unlike `hugi inspect --run <id>`). As with `hugi inspect`, default Snapshot exports retain previously recorded benchmarks even if a later commit removed or renamed them unless `--commit <sha>` is specified.
 
 ---
 
@@ -261,4 +265,4 @@ jobs:
 
 > **Note on `BASE_SHA` History:** `--baseline-commit "$BASE_SHA"` requires `BASE_SHA` itself to have a recorded entry in `benchmarks/history.hugidb`. If `main` receives commits that did not re-run benchmarks (such as docs-only changes), copy `benchmarks/history.hugidb` to `.tmp/ci.hugidb`, run `./deps/hugi/bin/hugi run ./benchmarks --db .tmp/ci.hugidb`, and run `./deps/hugi/bin/hugi compare --db .tmp/ci.hugidb --last --threshold 5.0 --fail-on-regression` to gate against the most recent recorded commit in `.hugidb`.
 
-> **CI Tip:** Hardware runners on shared cloud VMs exhibit higher clock jitter than bare-metal workstations. Prefer higher `--runs` (e.g., `--runs 11`), use `--threshold 5.0` (or `7.5` on shared runners), or run baseline and candidate back-to-back on the same runner inside an `--overlay` store before calling `hugi compare`.
+> **CI Tip:** Hardware runners on shared cloud VMs exhibit higher clock jitter than bare-metal workstations. Prefer higher `--runs` for `Pipeline` groups (e.g., `--runs 11`; for `obench` micro-benchmarks, raise `cfg.obench_cfg.sample_count` in code or invoke `hugi run` multiple times on the same commit to pool samples), use `--threshold 5.0` (or `7.5` on shared runners), or run baseline and candidate back-to-back on the same runner inside an `--overlay` store before calling `hugi compare`.

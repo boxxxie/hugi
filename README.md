@@ -63,12 +63,14 @@ Use non-recursive `git submodule update --init` (this skips `deps/xitdb`'s optio
 # Build the standalone CLI binary into ./bin/hugi (-o:speed)
 make build
 
-# Symlink hugi into ~/.local/bin/hugi
+# Symlink ~/.local/bin/hugi -> ./bin/hugi
 make install
 
 # Run unit tests, CLI tests, and 4-layer ATDD specifications (with memory leak checking)
 make test
 ```
+
+> **Symlink vs. Copy:** `make install` creates a symlink into this repository so `hugi run` can locate `hugi/` and `deps/obench/obench` by walking upward from the binary when `ols.json` omits them. If you copy `bin/hugi` to another directory, set `HUGI_HOME=/path/to/hugi` or declare both collections in your project's `ols.json`.
 
 ---
 
@@ -88,6 +90,8 @@ hugi run ./benchmarks -f "kv_lifecycle" --runs 10
 # Trial run in an in-memory CoW overlay (compare against baseline without touching disk)
 hugi run ./benchmarks --overlay --baseline-commit a1b2c3d4e5f6
 ```
+
+> **Note:** Even when a benchmark fails (`@zero_alloc` violation or benchmark error) and `hugi run` exits `1`, the run packet is still ingested into `.hugidb` unless `--overlay` or `--no-db` is passed.
 
 ### 2. Audit History & Inspect Quantiles
 
@@ -134,12 +138,12 @@ hugi compact
 
 ## Writing Benchmarks in Odin
 
-Add `hugi` (or symlink/submodule it) and import only `hugi`. `hugi` supports both classic stateless micro-benchmarks and stateful multi-phase pipelines in the same suite:
+Add `hugi` (or symlink/submodule it) and import `hugi "hugi:."` (configured via `ols.json` or `HUGI_HOME`; examples inside this repository such as [`examples/micro_and_phases/`](examples/micro_and_phases/) use relative `import hugi "../../hugi"`). `hugi` supports both classic stateless micro-benchmarks and stateful multi-phase pipelines in the same suite:
 
 ```odin
 package bench_example
 
-import hugi "../../hugi"
+import hugi "hugi:."
 import "core:os"
 
 // 1. Stateless / Parameterized Micro-Benchmark
@@ -235,12 +239,15 @@ In addition to the `hugi` CLI, you can embed `.hugidb` storage, Copy-on-Write ov
 
 ### Compiler Collections
 
-While benchmark binaries only need `hugi` (`-collection:hugi=./deps/hugi/hugi`, matching `HUGI_HOME` in `hugi run`), tools that also import `hugi_store` can map both collections cleanly in `ols.json` or on the command line (add `-collection:obench=./deps/hugi/deps/obench/obench`, `-collection:xitdb=./deps/hugi/deps/xitdb/xitdb`, and `-collection:skadi=./deps/hugi/deps/skadi/skadi` if your own code imports those packages directly):
+While benchmark binaries only need `hugi` and `obench` (`-collection:hugi=./deps/hugi/hugi`, matching `HUGI_HOME` in `hugi run`), tools that also import `hugi_store` must pass the transitive vendored collections (`obench`, `xitdb`, and `skadi`) in `ols.json` or on the command line:
 
 ```bash
 odin build ./cmd/my_audit_tool \
   -collection:hugi=./deps/hugi/hugi \
-  -collection:hugi_store=./deps/hugi/store
+  -collection:hugi_store=./deps/hugi/store \
+  -collection:obench=./deps/hugi/deps/obench/obench \
+  -collection:xitdb=./deps/hugi/deps/xitdb/xitdb \
+  -collection:skadi=./deps/hugi/deps/skadi/skadi
 ```
 
 ### End-to-End Library Example: Ingest, Compare & Export

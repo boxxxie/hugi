@@ -19,7 +19,7 @@ Concise, high-density rules and patterns for developers and AI coding agents wri
 }
 ```
 
-Add `{ "name": "hugi_store", "path": "./deps/hugi/store" }` (plus `xitdb` and `skadi`) **only** when calling the database/export APIs programmatically from Odin, and import with `import hugi "hugi:."` and `import store "hugi_store:."` (avoid mapping `hugi` to `./deps/hugi` if you rely on `HUGI_HOME`, because `hugi run` injects `-collection:hugi=<repo_root>/hugi`).
+Add `{ "name": "hugi_store", "path": "./deps/hugi/store" }`—along with `xitdb` (`./deps/hugi/deps/xitdb/xitdb`) and `skadi` (`./deps/hugi/deps/skadi/skadi`)—**only** when calling the database/export APIs programmatically from Odin, and import with `import hugi "hugi:."` and `import store "hugi_store:."` (avoid mapping `hugi` to `./deps/hugi` if you rely on `HUGI_HOME`, because `hugi run` injects `-collection:hugi=<repo_root>/hugi`).
 
 ---
 
@@ -130,6 +130,7 @@ bench_kv :: proc(p: ^hugi.Pipeline) {
 
 // DON'T: Mutate non-reset external state via user_ptr assuming Pipeline_Proc runs only once
 // DON'T: Nest phases deeper than hugi.MAX_PHASE_DEPTH (8) or attach > hugi.MAX_METRICS (8) metrics per phase
+// DON'T: Put `zero_alloc = true` on an outer nested phase — inner `phase_begin`/`phase_end` resets and pauses the shared alloc counter (`zero_alloc = true` enforces 0 `context.allocator` allocs on leaf phases; `context.temp_allocator` scratch is tracked separately)
 ```
 
 ---
@@ -203,8 +204,9 @@ hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig --format json -
 * **README Markers:** Ensure `<!-- BEGIN_BENCHMARK_TABLE -->` and `<!-- END_BENCHMARK_TABLE -->` exist in the target Markdown file before running `hugi export --update-readme <path>` (missing markers return exit code `1`).
 * **Custom Client Rendering:** `hugi` intentionally emits a clean 9-column default Markdown table (`--update-readme`) plus machine-readable `parquet`, `arrow`, `json`, `jsonl`, `csv`, and `compare`/`compare-1v1 --format json|csv` streams. Write project-specific grouped/tiered/pivoted tables on the client side (via `hugi_store`, AOT `temple` templates over `--format json --out -`, DuckDB SQL over Parquet, or Python/shell scripts).
 * **`--lang` Defaults, Case Sensitivity & Empty Flags:** `hugi inspect`, `hugi compare`, and `hugi export` default to `--lang odin`—pass `--lang <lang>` for external languages or `--lang all` (or `*`) to export across all languages. Always pass lowercase `--lang` tags (compiled binaries lowercase `--lang`, whereas CLI queries are case-sensitive), and pass empty values as two tokens (`--lang ""`, never `--lang=""`, which consumes the next token). (`--out -` is only valid for text formats, never `arrow` or `parquet`.)
+* **Failing Runs Still Record Unless `--overlay` / `--no-db`:** If a benchmark binary writes a packet and exits `1` due to `@zero_alloc` violations or errors, `hugi run` still ingests that packet into `.hugidb` before returning `1`. Pass `--overlay` or `--no-db` during local debugging.
 * **Selective Runs Are Safe:** Running `hugi run ./benchmarks -f lookup` (or `--groups` other than `"all"`) marks the packet `selective = true` and updates *only* matching benchmarks in the language's latest snapshot while preserving untouched benchmarks from prior commits.
-* **Cross-Language 1v1 (`compare-1v1`):** Emit JSONL from non-Odin harnesses with matching exact `full_name` (`"group::bench"` or `"group::bench[param]/tN"`), `lang`, `commit`, `run_id`, `ops`, `samples_batch_ns` (or `samples_ns`), and `bytes_used` (mapped to `footprint_bytes`). Ingest via `hugi ingest results.jsonl` and run `hugi compare-1v1 --langs odin,zig`—mismatched `footprint_bytes` between languages are flagged `[MISMATCH]`.
+* **Cross-Language 1v1 (`compare-1v1`) & JSONL Ingestion:** Emit JSONL from non-Odin harnesses with `name` matching the exact target `full_name` (`"group::bench"` or `"group::bench[param]/tN"`, as `read_jsonl_packets` copies `name` directly to `full_name` without prepending `group`), `lang`, `commit`, distinct `run_id` (omitting `run_id` defaults every file for the same `(commit, lang)` to `jsonl-<commit>-<lang>`, overwriting on ingest), `ops`, `samples_batch_ns` (or `samples_ns`—providing only `median_ns` synthesizes a 1-sample array and zeroes dispersion stats), and `bytes_used` (mapped to `footprint_bytes`). Ingest via `hugi ingest results.jsonl` (avoid passing multiple `obench` `.json` files in one `hugi ingest` call, as they share the same 1-second `run-<unix_seconds>` ID) and run `hugi compare-1v1 --langs odin,zig`—mismatched `footprint_bytes` between languages are flagged `[MISMATCH]`.
 
 ---
 

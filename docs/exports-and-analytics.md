@@ -114,18 +114,18 @@ Non-Odin benchmark suites (C, C++, Zig, Rust, Go, Python, Lua) can ingest direct
 
 | Field | Type | Notes |
 | :--- | :--- | :--- |
-| `name` | `string` | **Required.** Benchmark full name (e.g., `"kv::get"`). |
+| `name` | `string` | **Required.** Copied directly to both `name` and `full_name` (`row.group` is stored in `group_name` without prefixing `full_name`). |
 | `group` | `string` | Group name (e.g., `"kv"`). |
 | `lang` | `string` | Language identifier (default `"odin"` unless overridden by `--lang`). |
 | `commit` | `string` | Commit SHA (default `"unknown"` unless overridden by `--commit`). |
-| `run_id` | `string` | Run identifier. Packets are grouped by `(commit, lang, run_id)`. |
+| `run_id` | `string` | Run identifier. Packets are grouped by `(commit, lang, run_id)`. Omitting `run_id` defaults to `jsonl-<commit>-<lang>`, overwriting earlier files with the same `(commit, lang)` on ingest. |
 | `rank` | `int` | Explicit suite display rank (defaults to `1`-based order in packet). |
 | `ops` | `u64` | Operations per batch sample (defaults to `1`, or auto-scales `1_000` / `1_000_000` if `ops == 0` and sub-nanosecond fractional `samples_ns` are supplied). |
 | `samples_batch_ns`| `[]u64` | **Preferred.** Exact integer batch durations in nanoseconds. Quantiles are computed automatically in `i64` femtoseconds. |
 | `samples_ns` | `[]f64` | Per-operation nanosecond samples (used when `samples_batch_ns` is omitted). |
 | `runs` / `warmup` | `int` | Sample count fallback and warmup count. |
-| `median_ns` / `ns_per_op` | `f64` | Fallback median if neither sample array is provided. |
-| `min_ns`, `max_ns`, `mean_ns`, `stddev_ns`, `iqr_ns`, `p95_ns`, `p99_ns`, `cv_pct` | `f64` | Summary stats (recomputed automatically whenever `samples_batch_ns` or `samples_ns` is non-empty). |
+| `median_ns` / `ns_per_op` | `f64` | When both sample arrays are empty and `median_ns` (or `ns_per_op`) is `> 0`, `read_jsonl_packets` synthesizes a 1-element `samples_batch_ns` array and runs `recompute_record_stats_from_samples`—setting `samples = 1`, overwriting `min`/`p25`/`p75`/`p95`/`p99`/`max`/`mean` with `median_ns`, and zeroing `std_dev_fs`, `ci95_fs`, `cv_pct`, `iqr_fs`, and `mad_fs`. |
+| `min_ns`, `max_ns`, `mean_ns`, `stddev_ns`, `iqr_ns`, `p95_ns`, `p99_ns`, `cv_pct` | `f64` | Summary stats (overwritten whenever `samples_batch_ns`, `samples_ns`, or `median_ns`/`ns_per_op > 0` is present; preserved as-is only when all three are empty/zero). |
 | `ops_per_sec` / `mb_per_sec` / `gb_per_sec` | `f64` | Throughput overrides (`gb_per_sec` is converted to `mb_per_sec` via `x 1024`). |
 | `bytes_per_op` / `bytes_row` | `u64` | Processed payload bytes per operation (`bytes_row` acts as an alias for `bytes_per_op`). |
 | `bytes_used` | `u64` | Mapped to `footprint_bytes` (used by `compare-1v1` footprint mismatch checks). |

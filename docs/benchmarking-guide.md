@@ -28,7 +28,7 @@ Example `ols.json` in a downstream project:
 }
 ```
 
-> **Collection Import Syntax:** Because Odin resolves imports without `:` as relative subdirectories, always import the collection as `import hugi "hugi:."` when `ols.json` (or `hugi run`'s `HUGI_HOME` fallback) maps `-collection:hugi` to `<hugi_repo>/hugi`. Tools that also need `hugi_store` can add `{ "name": "hugi_store", "path": "./deps/hugi/store" }` to `ols.json` and import `store "hugi_store:."` (avoid mapping `-collection:hugi` to the repo root if you rely on `HUGI_HOME`, since `hugi run` injects `-collection:hugi=<repo_root>/hugi`).
+> **Collection Import Syntax:** Because Odin resolves imports without `:` as relative subdirectories, always import the collection as `import hugi "hugi:."` when `ols.json` (or `hugi run`'s `HUGI_HOME` fallback) maps `-collection:hugi` to `<hugi_repo>/hugi`. Tools that also import `hugi_store` must map `hugi`, `hugi_store` (`./deps/hugi/store`), and the transitive vendored collections (`obench`, `xitdb`, `skadi`) in `ols.json` or `-collection:*` flags and import `store "hugi_store:."` (avoid mapping `-collection:hugi` to the repo root if you rely on `HUGI_HOME`, since `hugi run` injects `-collection:hugi=<repo_root>/hugi`).
 
 ---
 
@@ -144,7 +144,7 @@ Micro-benchmark loops struggle when benchmarking stateful systems such as B-tree
 
 1. **`Warmup` Passes (`warmup` iterations, default `1`):** Runs your `Pipeline_Proc` end-to-end with unwrapped allocators and no clock reads to warm instruction/data caches.
 2. **`Timed` Passes (`runs` iterations, default `7`):** Runs your `Pipeline_Proc` with **unwrapped allocators** (`0 ns` counting-allocator distortion). Each phase bracketed by `phase_begin`..`phase_end` (or `scoped_phase`) records `clobber_memory()`-fenced clock timestamps and subtracts calibrated clock overhead.
-3. **`Alloc_Check` Pass (`1` untimed pass):** Wraps `context.allocator` and `context.temp_allocator` in `obench.Counting_Allocator`s that remain **paused** outside phases and **active** inside phases. Records exact `allocs_per_op`, `resizes_per_op`, `alloc_bytes_per_op`, `peak_heap_bytes`, `temp_allocs_per_op`, `temp_bytes_per_op`, and exact source file/line/procedure locations on `@zero_alloc` violations.
+3. **`Alloc_Check` Pass (`1` untimed pass):** Wraps `context.allocator` and `context.temp_allocator` in `obench.Counting_Allocator`s that remain **paused** outside phases and **active** inside phases. Records exact `allocs_per_op`, `resizes_per_op`, `alloc_bytes_per_op`, `peak_heap_bytes`, `temp_allocs_per_op`, `temp_bytes_per_op`, and exact source file/line/procedure locations on `@zero_alloc` violations (`zero_alloc = true` enforces zero allocations on `context.allocator` only; `context.temp_allocator` scratch usage is allowed and reported separately).
 
 Between every pass, `hugi` resets a private `context.temp_allocator` scratch arena automatically.
 
@@ -218,7 +218,7 @@ Phases can nest up to `hugi.MAX_PHASE_DEPTH :: 8` levels deep using explicit `ph
 
 Each phase slot is emitted as its own `Record` (e.g., `compiler::compile_unit`, `compiler::tokenize`, `compiler::parse_ast`) while preserving deterministic rank order across filtered runs.
 
-> **Nested Allocation Tracking Note:** Wall-clock timers nest cleanly up to `MAX_PHASE_DEPTH`, whereas the untimed `.Alloc_Check` pass uses a single `_heap_counter` / `_temp_counter` that resets on `phase_begin` and pauses on `phase_end`. Place `zero_alloc = true` on leaf phases when nesting so inner phase resets do not mask or split outer allocation counts.
+> **Nested Allocation Tracking Note:** Wall-clock `start_ts` timestamps live on `_phase_stack` and nest cleanly up to `MAX_PHASE_DEPTH`, whereas the untimed `.Alloc_Check` pass shares a single `_heap_counter` / `_temp_counter`: an inner `phase_begin` calls `counting_allocator_reset` (wiping earlier outer-phase counts) and an inner `phase_end` pauses the counter for the remainder of the outer phase (leaving the outer phase with only residual allocations after its last child phase). Use nested phases strictly for wall-clock timing, and place `zero_alloc = true` and allocation auditing on non-overlapping leaf phases. (Note that `zero_alloc = true` checks `context.allocator` only; `context.temp_allocator` usage is permitted and reported separately.)
 
 ---
 

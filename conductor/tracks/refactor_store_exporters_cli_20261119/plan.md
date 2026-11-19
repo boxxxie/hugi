@@ -23,15 +23,15 @@ Follow [workflow.md](../../workflow.md): keep `hugi/` isolated from `xitdb`/`ska
 
 ## Phase 2: Consolidate `store/` Binary I/O and Modularize `store/format.odin`
 
-- [ ] Task: Extract unified `store/` binary I/O helpers (`store/binary_io.odin`)
-    - [ ] Move `_Format_Reader`, `_fmt_append_varint_u64`, `_fmt_append_zigzag_i64`, `_fmt_append_u32_le`, `_fmt_append_u64_le`, `_fmt_append_f64_le`, `_fmt_append_str`, `_fmt_read_u8`, `_fmt_read_u32_le`, `_fmt_read_u64_le`, `_fmt_read_f64_le`, `_fmt_read_varint_u64`, `_fmt_read_zigzag_i64`, `_fmt_read_str`, plus fixed-slice `_write_u32_le` / `_read_u32_le` into `store/binary_io.odin`.
-    - [ ] Remove duplicate `_write_u32_le`, `_read_u32_le`, `_read_varint_u64`, and `_read_zigzag_i64` from `store/codec.odin` and duplicate `_append_u32_le` / `_append_u64_le` from `store/parquet.odin`, switching both files to `store/binary_io.odin`.
-- [ ] Task: Extract `HCAT\x01` catalog and tables (`store/catalog.odin`)
-    - [ ] Move `_Symbol_Table`, `_Descriptor_Table`, `_Bench_Desc`, `_Snap_Ref`, `_Catalog_Run_Entry`, `_Moment_Catalog`, and `_encode_catalog_blob` / `_decode_catalog_blob` from `store/format.odin` into `store/catalog.odin`.
-    - [ ] Add `@(private)` `_run_key(lang, run_id, allocator := context.temp_allocator) -> string` in `store/catalog.odin` and replace all `13` repeated `"%s:%s"` formatting call sites across `store/`.
-- [ ] Task: Keep `store/format.odin` focused on `CZPK\x04` and `CZCH\x02`
-    - [ ] Retain `Store_Write_Options`, `default_store_write_options`, `CZPK_V4_MAGIC`, `CZCH_V2_MAGIC`, `_encode_hot_packet`, `_decode_hot_packet`, `_encode_cold_chunk`, and `_decode_cold_chunk` in `store/format.odin` with zero wire-format changes.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Consolidate store/ Binary I/O and Modularize store/format.odin' (Protocol in workflow.md)
+- [x] Task: Extract unified `store/` binary I/O helpers (`store/binary_io.odin`)
+    - [x] Move `_Format_Reader`, `_fmt_append_varint_u64`, `_fmt_append_zigzag_i64`, `_fmt_append_u32_le`, `_fmt_append_u64_le`, `_fmt_append_f64_le`, `_fmt_append_str`, `_fmt_read_u8`, `_fmt_read_u32_le`, `_fmt_read_u64_le`, `_fmt_read_f64_le`, `_fmt_read_varint_u64`, `_fmt_read_zigzag_i64`, `_fmt_read_str`, plus fixed-slice `_write_u32_le` / `_read_u32_le` into `store/binary_io.odin`.
+    - [x] Remove duplicate `_write_u32_le`, `_read_u32_le`, `_read_varint_u64`, and `_read_zigzag_i64` from `store/codec.odin` and duplicate `_append_u32_le` / `_append_u64_le` from `store/parquet.odin`, switching both files to `store/binary_io.odin`.
+- [x] Task: Extract `HCAT\x01` catalog and tables (`store/catalog.odin`)
+    - [x] Move `_Symbol_Table`, `_Descriptor_Table`, `_Bench_Desc`, `_Snap_Ref`, `_Catalog_Run_Entry`, `_Moment_Catalog`, and `_encode_catalog_blob` / `_decode_catalog_blob` from `store/format.odin` into `store/catalog.odin`.
+    - [x] Add `@(private)` `_run_key(lang, run_id, allocator := context.temp_allocator) -> string` in `store/catalog.odin` and replace all `13` repeated `"%s:%s"` formatting call sites across `store/`.
+- [x] Task: Keep `store/format.odin` focused on `CZPK\x04` and `CZCH\x02`
+    - [x] Retain `Store_Write_Options`, `default_store_write_options`, `CZPK_V4_MAGIC`, `CZCH_V2_MAGIC`, `_encode_hot_packet`, `_decode_hot_packet`, `_encode_cold_chunk`, and `_decode_cold_chunk` in `store/format.odin` with zero wire-format changes.
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Consolidate store/ Binary I/O and Modularize store/format.odin' (Protocol in workflow.md)
 
 ---
 

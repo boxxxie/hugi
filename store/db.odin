@@ -333,8 +333,7 @@ _ingest_batch_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitd
 	}
 
 	for pkt, i in ctx.pkts {
-		lang_key := pkt.lang != "" ? pkt.lang : "odin"
-		run_key := fmt.tprintf("%s:%s", lang_key, pkt.run_id)
+		run_key := _run_key(pkt.lang, pkt.run_id)
 		is_cold := i < cold_count
 		if !is_cold {
 			if prev_ord, seen := cat.run_ord_by_key[run_key];
@@ -383,8 +382,7 @@ _ingest_batch_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitd
 			seal_ok := true
 			for sord in seal_ords {
 				se := cat.runs[sord]
-				eff_lang := se.lang != "" ? se.lang : "odin"
-				srk := fmt.tprintf("%s:%s", eff_lang, se.run_id)
+				srk := _run_key(se.lang, se.run_id)
 				spkt, sp_ok := _read_run_packet_from_map(
 					runs_map.read_hash_map,
 					cat.syms,
@@ -423,8 +421,7 @@ _ingest_batch_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) -> xitd
 			}
 			for sord in seal_ords {
 				se := &cat.runs[sord]
-				eff_lang := se.lang != "" ? se.lang : "odin"
-				srk := fmt.tprintf("%s:%s", eff_lang, se.run_id)
+				srk := _run_key(se.lang, se.run_id)
 				_remove_hash_key_if_exists(&runs_map, srk) or_return
 				se.in_cold_chunk = true
 			}
@@ -644,8 +641,7 @@ _ensure_cold_chunks_loaded :: proc(mr: ^_Moment_Reader) {
 			continue
 		}
 		for &pkt in pkts {
-			lang_key := pkt.lang != "" ? pkt.lang : "odin"
-			rk := fmt.aprintf("%s:%s", lang_key, pkt.run_id, allocator = mr.allocator)
+			rk := _run_key(pkt.lang, pkt.run_id, mr.allocator)
 			overridden := false
 			if mr.has_runs {
 				if slot_ptr, _ := xitdb.hash_map_get_slot(mr.runs_map, rk); slot_ptr != nil {
@@ -826,8 +822,7 @@ store_load_all_packets :: proc(st: ^Store, allocator := context.allocator) -> []
 		if mr, mr_ok := _moment_reader_init(moment, allocator); mr_ok {
 			defer _moment_reader_destroy(&mr)
 			for e in mr.cat.runs {
-				eff_lang := e.lang != "" ? e.lang : "odin"
-				rk := fmt.tprintf("%s:%s", eff_lang, e.run_id)
+				rk := _run_key(e.lang, e.run_id)
 				if pkt, pkt_ok := _moment_reader_take_packet(&mr, rk); pkt_ok {
 					append(&pkts, pkt)
 				}
@@ -864,8 +859,7 @@ _fast_compact_moment_cb :: proc(cursor: ^xitdb.Write_Cursor, user_data: rawptr) 
 		runs_map := xitdb.write_hash_map_init(runs_cur) or_return
 		for ord in ctx.keep_ords {
 			e := ctx.cat.runs[ord]
-			eff_lang := e.lang != "" ? e.lang : "odin"
-			rk := fmt.tprintf("%s:%s", eff_lang, e.run_id)
+			rk := _run_key(e.lang, e.run_id)
 			xitdb.hash_map_put(&runs_map, rk, ctx.hot_blobs[ord]) or_return
 		}
 	}
@@ -1302,7 +1296,7 @@ store_load_raw_groups :: proc(
 	defer _moment_reader_destroy(&mr)
 
 	if run_id != "" {
-		prefixed_key := fmt.tprintf("%s:%s", lang != "" ? lang : "odin", run_id)
+		prefixed_key := _run_key(lang, run_id)
 		pkt, pkt_ok := _moment_reader_get_packet(&mr, prefixed_key)
 		if !pkt_ok {
 			pkt, pkt_ok = _moment_reader_get_packet(&mr, run_id)
@@ -1333,8 +1327,7 @@ store_load_raw_groups :: proc(
 			if (lang != "" && e.lang != lang) || !_match_commit_prefix(e.commit, commit) {
 				continue
 			}
-			e_lang := e.lang != "" ? e.lang : "odin"
-			rk := fmt.tprintf("%s:%s", e_lang, e.run_id)
+			rk := _run_key(e.lang, e.run_id)
 			pkt, pkt_ok := _moment_reader_get_packet(&mr, rk)
 			if !pkt_ok {
 				continue
@@ -1385,7 +1378,7 @@ store_load_raw_groups :: proc(
 		if e.lang != eff_lang || (e.commit not_in active_commits) {
 			continue
 		}
-		rk := fmt.tprintf("%s:%s", eff_lang, e.run_id)
+		rk := _run_key(eff_lang, e.run_id)
 		pkt, pkt_ok := _moment_reader_get_packet(&mr, rk)
 		if !pkt_ok || pkt.lang != eff_lang {
 			continue
@@ -1488,8 +1481,7 @@ _store_load_commit_series_raw_groups :: proc(
 		if lang != "" && e.lang != lang {
 			continue
 		}
-		e_lang := e.lang != "" ? e.lang : "odin"
-		rk := fmt.tprintf("%s:%s", e_lang, e.run_id)
+		rk := _run_key(e.lang, e.run_id)
 		pkt, p_ok := _moment_reader_get_packet(&mr, rk)
 		if !p_ok || (lang != "" && pkt.lang != lang) {
 			continue
@@ -1555,8 +1547,7 @@ _store_load_all_run_raw_groups :: proc(
 		if lang != "" && e.lang != lang {
 			continue
 		}
-		e_lang := e.lang != "" ? e.lang : "odin"
-		rk := fmt.tprintf("%s:%s", e_lang, e.run_id)
+		rk := _run_key(e.lang, e.run_id)
 		pkt, p_ok := _moment_reader_get_packet(&mr, rk)
 		if !p_ok || (lang != "" && pkt.lang != lang) {
 			continue

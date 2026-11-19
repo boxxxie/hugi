@@ -373,27 +373,6 @@ _tw_stop :: proc(buf: ^[dynamic]u8) {
 }
 
 @(private = "file")
-_append_u32_le :: proc(buf: ^[dynamic]u8, v: u32) {
-	b := [4]u8{u8(v), u8(v >> 8), u8(v >> 16), u8(v >> 24)}
-	append(buf, ..b[:])
-}
-
-@(private = "file")
-_append_u64_le :: proc(buf: ^[dynamic]u8, v: u64) {
-	b := [8]u8 {
-		u8(v),
-		u8(v >> 8),
-		u8(v >> 16),
-		u8(v >> 24),
-		u8(v >> 32),
-		u8(v >> 40),
-		u8(v >> 48),
-		u8(v >> 56),
-	}
-	append(buf, ..b[:])
-}
-
-@(private = "file")
 _pq_record_str :: proc(r: ^Pooled_Record, idx: int) -> string {
 	switch idx {
 	case 0:
@@ -575,14 +554,14 @@ export_parquet :: proc(
 				switch spec.kind {
 				case .String:
 					s := _pq_record_str(r, spec.str_field)
-					_append_u32_le(&page_raw, u32(len(s)))
+					_fmt_append_u32_le(&page_raw, u32(len(s)))
 					append(&page_raw, ..transmute([]u8)s)
 				case .I64, .Decimal_FS:
-					_append_u64_le(&page_raw, u64(_pq_record_i64(r, spec.i64_field)))
+					_fmt_append_u64_le(&page_raw, u64(_pq_record_i64(r, spec.i64_field)))
 				case .U64:
-					_append_u64_le(&page_raw, _pq_record_u64(r, spec.u64_field))
+					_fmt_append_u64_le(&page_raw, _pq_record_u64(r, spec.u64_field))
 				case .F64:
-					_append_u64_le(&page_raw, transmute(u64)_pq_record_f64(r, spec.f64_field))
+					_fmt_append_u64_le(&page_raw, transmute(u64)_pq_record_f64(r, spec.f64_field))
 				case .Samples_Blob:
 					blob: []u8
 					comp_ok: bool
@@ -596,7 +575,7 @@ export_parquet :: proc(
 						delete(blob, allocator)
 						return false
 					}
-					_append_u32_le(&page_raw, u32(len(blob)))
+					_fmt_append_u32_le(&page_raw, u32(len(blob)))
 					append(&page_raw, ..blob)
 					delete(blob, allocator)
 				}
@@ -724,7 +703,7 @@ export_parquet :: proc(
 		return false
 	}
 	append(&file_buf, ..footer[:])
-	_append_u32_le(&file_buf, u32(len(footer)))
+	_fmt_append_u32_le(&file_buf, u32(len(footer)))
 	append(&file_buf, 'P', 'A', 'R', '1')
 
 	return os.write_entire_file(path, file_buf[:]) == nil

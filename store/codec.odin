@@ -10,44 +10,6 @@ BLOB_MAGIC_1 :: u8('Z')
 BLOB_MAGIC_2 :: u8(1)
 BLOB_HEADER_LEN :: 8
 
-@(private = "file")
-_write_u32_le :: proc(dst: []u8, v: u32) {
-	le := u32le(v)
-	b := transmute([4]u8)le
-	copy(dst[:4], b[:])
-}
-
-@(private = "file", require_results)
-_read_u32_le :: proc(src: []u8) -> u32 {
-	b: [4]u8
-	copy(b[:], src[:4])
-	return u32(transmute(u32le)b)
-}
-
-@(private = "file", require_results)
-_read_varint_u64 :: proc(src: []u8, pos: ^int) -> (val: u64, ok: bool) {
-	shift: uint = 0
-	for shift < 64 {
-		if pos^ >= len(src) {
-			return 0, false
-		}
-		b := src[pos^]
-		pos^ += 1
-		val |= u64(b & 0x7F) << shift
-		if (b & 0x80) == 0 {
-			return val, true
-		}
-		shift += 7
-	}
-	return 0, false
-}
-
-@(private = "file", require_results)
-_read_zigzag_i64 :: proc(src: []u8, pos: ^int) -> (val: i64, ok: bool) {
-	uv := _read_varint_u64(src, pos) or_return
-	return i64((uv >> 1) ~ u64(-i64(uv & 1))), true
-}
-
 /*
 Compresses an arbitrary byte buffer with Zlib (storing raw bytes if compression does not shrink).
 */
@@ -490,22 +452,24 @@ decompress_samples_u64_with_flags :: proc(
 			return nil, 0, false
 		}
 		defer delete(var_raw, context.temp_allocator)
-		pos := 0
-		v0, v0_ok := _read_varint_u64(var_raw, &pos)
+		rd := _Format_Reader {
+			data = var_raw,
+		}
+		v0, v0_ok := _fmt_read_varint_u64(&rd)
 		if !v0_ok {
 			delete(out_arr, allocator)
 			return nil, 0, false
 		}
 		out_arr[0] = v0
 		for i in 1 ..< count {
-			delta, d_ok := _read_zigzag_i64(var_raw, &pos)
+			delta, d_ok := _fmt_read_zigzag_i64(&rd)
 			if !d_ok {
 				delete(out_arr, allocator)
 				return nil, 0, false
 			}
 			out_arr[i] = out_arr[i - 1] + u64(delta)
 		}
-		if pos != raw_len {
+		if rd.pos != raw_len {
 			delete(out_arr, allocator)
 			return nil, 0, false
 		}
@@ -568,10 +532,12 @@ decompress_samples_u64_with_flags :: proc(
 			return nil, 0, false
 		}
 		defer delete(gcd_raw, context.temp_allocator)
-		pos := 0
+		rd := _Format_Reader {
+			data = gcd_raw,
+		}
 		for b0 := 0; b0 < count; b0 += _U64_GCD_BLOCK {
 			m := min(_U64_GCD_BLOCK, count - b0)
-			hdr, h_ok := _read_varint_u64(gcd_raw, &pos)
+			hdr, h_ok := _fmt_read_varint_u64(&rd)
 			if !h_ok {
 				delete(out_arr, allocator)
 				return nil, 0, false
@@ -582,14 +548,14 @@ decompress_samples_u64_with_flags :: proc(
 				return nil, 0, false
 			}
 			base_div := (hdr & 1) != 0
-			bval, b_ok := _read_varint_u64(gcd_raw, &pos)
+			bval, b_ok := _fmt_read_varint_u64(&rd)
 			if !b_ok || (base_div && bval > max(u64) / g) {
 				delete(out_arr, allocator)
 				return nil, 0, false
 			}
 			out_arr[b0] = bval * g if base_div else bval
 			for j in 1 ..< m {
-				q, q_ok := _read_zigzag_i64(gcd_raw, &pos)
+				q, q_ok := _fmt_read_zigzag_i64(&rd)
 				if !q_ok {
 					delete(out_arr, allocator)
 					return nil, 0, false
@@ -604,7 +570,7 @@ decompress_samples_u64_with_flags :: proc(
 				}
 			}
 		}
-		if pos != raw_len {
+		if rd.pos != raw_len {
 			delete(out_arr, allocator)
 			return nil, 0, false
 		}

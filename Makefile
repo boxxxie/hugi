@@ -1,4 +1,4 @@
-.PHONY: all build check test example fmt fmt-check clean install
+.PHONY: all build check test specs example fmt fmt-check clean install
 
 ODIN ?= odin
 ODINFMT ?= odinfmt
@@ -6,10 +6,10 @@ ODINFMT ?= odinfmt
 COLS := -collection:hugi=./hugi -collection:hugi_store=./store -collection:obench=./deps/obench/obench -collection:xitdb=./deps/xitdb/xitdb -collection:skadi=./deps/skadi/skadi
 HUGI_ONLY_COL := -collection:obench=./deps/obench/obench
 HUGI_FLAGS := -vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-errors -disallow-do
-FULL_FLAGS := -vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests
+FULL_FLAGS := -vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests,hugi_specs
 TEST_FLAGS ?= -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
-SOURCES := hugi/*.odin store/*.odin cmd/hugi/*.odin examples/micro_and_phases/*.odin tests/*.odin
+SOURCES := hugi/*.odin store/*.odin cmd/hugi/*.odin examples/micro_and_phases/*.odin tests/*.odin specs/*.odin
 
 BIN_DIR := bin
 HUGI_BIN := $(BIN_DIR)/hugi
@@ -28,11 +28,17 @@ check:
 	$(ODIN) check cmd/hugi $(COLS) $(FULL_FLAGS)
 	$(ODIN) check examples/micro_and_phases $(COLS) $(FULL_FLAGS)
 	$(ODIN) check tests -no-entry-point $(COLS) $(FULL_FLAGS)
+	$(ODIN) check specs -no-entry-point $(COLS) $(FULL_FLAGS)
 
-test:
+specs: $(HUGI_BIN)
+	@mkdir -p .tmp
+	$(ODIN) test specs -out:.tmp/hugi_specs $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)
+
+test: $(HUGI_BIN)
 	@mkdir -p .tmp
 	$(ODIN) test tests -out:.tmp/hugi_tests $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)
 	$(ODIN) test cmd/hugi -out:.tmp/hugi_cli_tests $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)
+	$(ODIN) test specs -out:.tmp/hugi_specs $(COLS) $(FULL_FLAGS) $(TEST_FLAGS)
 
 example: build
 	@mkdir -p .tmp

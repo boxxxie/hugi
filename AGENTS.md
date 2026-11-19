@@ -9,8 +9,9 @@ Run all commands from the repository root (`/home/pauli/projects/odin/hugi`):
 ```bash
 make fmt          # Format all project .odin files with odinfmt -config:odinfmt.json
 make fmt-check    # Verify formatting cleanly (fails on any diff)
-make check        # Strict compiler/vet checks across all 5 packages
+make check        # Strict compiler/vet checks across all 6 packages
 make test         # Run tests with -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+make specs        # Run 4-layer ATDD specs & property tests in specs/
 make build        # Build -o:speed CLI binary at bin/hugi
 ```
 
@@ -27,8 +28,8 @@ make build        # Build -o:speed CLI binary at bin/hugi
 3. **Compiler flag split (`-disallow-do`):**
    - Check `hugi/` with strict flags including `-disallow-do`:
      `-vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-errors -disallow-do`
-   - Do NOT pass `-disallow-do` when building or checking `store/`, `cmd/hugi/`, `examples/`, or `tests/` because `deps/xitdb/xitdb/lua.odin` uses `do`. Always use:
-     `-vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests`
+   - Do NOT pass `-disallow-do` when building or checking `store/`, `cmd/hugi/`, `examples/`, `tests/`, or `specs/` because `deps/xitdb/xitdb/lua.odin` uses `do`. Always use:
+     `-vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests,hugi_specs`
    - Still avoid `do` statements and preserve hard tabs across every `.odin` file written in this repository.
 
 ## `xitdb` Storage Invariants

@@ -2,12 +2,13 @@
 
 Fork: [`boxxxie/obench`](https://github.com/boxxxie/obench) (forked from [`zeybek/obench`](https://github.com/zeybek/obench)).
 
-`deps/obench` tracks branch `odin-bench` (`c5654f0`) in `/home/pauli/projects/odin/obench`, which merges four independent PR branches layered cleanly over upstream `main` (`44000fb`):
+`deps/obench` currently tracks branch `feat/rational-batch-and-femtoseconds` (`1f16d35`) in [`boxxxie/obench`](https://github.com/boxxxie/obench), which layers exact `overhead_fs` and integer `samples_batch_ns` atop `odin-bench` (`c5654f0`) — merging four independent PR branches over upstream `main` (`44000fb`) — and will switch back once the PRs merge:
 
 - [#14](https://github.com/zeybek/obench/pull/14) — `perf/linux-vdso-clock-and-noalias` (`559bbbf`)
 - [#15](https://github.com/zeybek/obench/pull/15) — `feat/untimed-alloc-tracking` (`bcbc532`)
 - [#16](https://github.com/zeybek/obench/pull/16) — `feat/cli-compiler-flags-and-ols` (`0b8b2ad`)
 - [#17](https://github.com/zeybek/obench/pull/17) — `feat/programmatic-hooks-and-phases` (`39b8204`)
+- `feat/rational-batch-and-femtoseconds` (`1f16d35`) — exact rational integer `samples_batch_ns` and `overhead_fs` reporting
 
 ---
 

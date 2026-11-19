@@ -111,16 +111,14 @@ spec_cli_version_help_ingest_history_and_inspect_workflow :: proc(t: ^testing.T)
 }
 
 @(test)
-spec_cli_run_no_db_overlay_and_baseline_regression_gate :: proc(t: ^testing.T) {
+spec_cli_run_no_db_and_overlay :: proc(t: ^testing.T) {
 	w: World
 	world_init(&w, t)
-	world_set_timeout(&w, 45)
+	world_set_timeout(&w, 60)
 	defer world_destroy(&w)
 
 	given_cli_workspace(&w)
 	given_cli_bench_package(&w, "clean-pkg", work_iters = 32)
-	given_cli_bench_package(&w, "slow-pkg", work_iters = 25_000)
-	given_cli_bench_package(&w, "bad-pkg", work_iters = 16, violate_zero_alloc = true)
 
 	upon_running_cli(
 		&w,
@@ -129,6 +127,8 @@ spec_cli_run_no_db_overlay_and_baseline_regression_gate :: proc(t: ^testing.T) {
 		"--no-db",
 		"--db",
 		"@nodb",
+		"--extra-build-flags",
+		"-o:none",
 		"--quiet",
 		"--runs",
 		"2",
@@ -171,6 +171,8 @@ spec_cli_run_no_db_overlay_and_baseline_regression_gate :: proc(t: ^testing.T) {
 		"--overlay",
 		"--commit",
 		"trial01",
+		"--extra-build-flags",
+		"-o:none",
 		"--quiet",
 		"--runs",
 		"2",
@@ -187,6 +189,39 @@ spec_cli_run_no_db_overlay_and_baseline_regression_gate :: proc(t: ^testing.T) {
 		shows_exit_code(&w, out, 0)
 		shows_stdout_contains(&w, out, "base00")
 		shows_stdout_does_not_contain(&w, out, "trial01")
+	}
+}
+
+@(test)
+spec_cli_run_baseline_regression_gate :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 90)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_cli_bench_package(&w, "slow-pkg", work_iters = 25_000)
+
+	given_packet_file(
+		&w,
+		"base-pkt",
+		commit = "base00",
+		lang = "odin",
+		run_id = "r-base00",
+		benches = []Bench_Observation {
+			{
+				name = "work",
+				group = "pipe",
+				median_ns = 5.0,
+				spread_ns = 0.05,
+				samples = 8,
+				ops_per_sample = 1,
+			},
+		},
+	)
+	upon_running_cli(&w, "ingest", "--db", "@db", "@base-pkt")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
 	}
 
 	upon_running_cli(
@@ -210,8 +245,30 @@ spec_cli_run_no_db_overlay_and_baseline_regression_gate :: proc(t: ^testing.T) {
 		shows_exit_code(&w, out, 1)
 		shows_stdout_contains(&w, out, "REGRESSION")
 	}
+}
 
-	upon_running_cli(&w, "run", "@bad-pkg", "--no-db", "--runs", "2", "--warmup", "0")
+@(test)
+spec_cli_run_zero_alloc_violation :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 60)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_cli_bench_package(&w, "bad-pkg", work_iters = 16, violate_zero_alloc = true)
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@bad-pkg",
+		"--no-db",
+		"--extra-build-flags",
+		"-o:none",
+		"--runs",
+		"2",
+		"--warmup",
+		"0",
+	)
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 1)
 		shows_stdout_contains(&w, out, "[FAIL: @zero_alloc]")

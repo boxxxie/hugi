@@ -181,6 +181,16 @@ _collection_name :: proc "contextless" (entry: string) -> string {
 	return entry
 }
 
+@(private)
+_has_opt_flag :: proc(flags: []string) -> bool {
+	for tok in flags {
+		if strings.has_prefix(tok, "-o:") {
+			return true
+		}
+	}
+	return false
+}
+
 @(private = "file")
 _parse_run_args :: proc(args: []string) -> (opts: _Run_Opts, exit_code: int, done: bool) {
 	opts.pkg_dir = "."
@@ -252,15 +262,15 @@ _parse_run_args :: proc(args: []string) -> (opts: _Run_Opts, exit_code: int, don
 
 @(private = "file")
 _build_run_binary :: proc(opts: _Run_Opts, bin_path: string) -> bool {
+	ols_flags := _discover_ols_build_flags(opts.pkg_dir)
+	extra_flags :=
+		strings.fields(opts.extra_build_flags, context.temp_allocator) if opts.extra_build_flags != "" else nil
+
 	build_cmd := make([dynamic]string, context.temp_allocator)
-	append(
-		&build_cmd,
-		_odin_executable(),
-		"build",
-		opts.pkg_dir,
-		fmt.tprintf("-out:%s", bin_path),
-		"-o:speed",
-	)
+	append(&build_cmd, _odin_executable(), "build", opts.pkg_dir, fmt.tprintf("-out:%s", bin_path))
+	if !_has_opt_flag(ols_flags[:]) && !_has_opt_flag(extra_flags) {
+		append(&build_cmd, "-o:speed")
+	}
 
 	seen_cols := make(map[string]bool, context.temp_allocator)
 	for col in _discover_ols_collections(opts.pkg_dir) {
@@ -286,18 +296,16 @@ _build_run_binary :: proc(opts: _Run_Opts, bin_path: string) -> bool {
 		}
 	}
 	seen_flags := make(map[string]bool, context.temp_allocator)
-	for tok in _discover_ols_build_flags(opts.pkg_dir) {
+	for tok in ols_flags {
 		if tok != "" && tok not_in seen_flags {
 			append(&build_cmd, tok)
 			seen_flags[tok] = true
 		}
 	}
-	if opts.extra_build_flags != "" {
-		for tok in strings.fields(opts.extra_build_flags, context.temp_allocator) {
-			if tok != "" && tok not_in seen_flags {
-				append(&build_cmd, tok)
-				seen_flags[tok] = true
-			}
+	for tok in extra_flags {
+		if tok != "" && tok not_in seen_flags {
+			append(&build_cmd, tok)
+			seen_flags[tok] = true
 		}
 	}
 

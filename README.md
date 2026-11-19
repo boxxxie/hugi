@@ -1,4 +1,11 @@
-# `hugi` (`odin/hugi`)
+# `hugi`
+
+[![CI](https://github.com/boxxxie/hugi/actions/workflows/ci.yml/badge.svg)](https://github.com/boxxxie/hugi/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](cmd/hugi/main.odin)
+[![Odin](https://img.shields.io/badge/Odin-lang-3882D2.svg)](https://odin-lang.org/)
+[![Store Format](https://img.shields.io/badge/store-xitdb%20v5-5C6BC0.svg)](store/format.odin)
+[![Export](https://img.shields.io/badge/export-Arrow%20IPC%20%7C%20Parquet-orange.svg)](store/export_schema.odin)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Pure-Odin benchmarking library, compressed transactional history store, statistical comparator, and CLI built to replace bespoke per-repo benchmark harnesses, bloated `history.jsonl` logs, and Python `compare_1v1.py` analysis scripts.
 
@@ -16,7 +23,21 @@ Pure-Odin benchmarking library, compressed transactional history store, statisti
   - Pools multi-run sample vectors per `(commit, lang, benchmark)` and compares runs/commits or languages (`compare_records`, `compare_1v1_langs`) using shared Mann-Whitney U and Welch `t` significance logic (with Student `t` critical values and domain byte footprint mismatch flags) in [`store/pool_and_compare.odin`](store/pool_and_compare.odin).
   - Exports pooled records, commit series (`--all-commits`), or per-run histories (`--all-runs`) via a unified `35`-column schema in [`store/export_schema.odin`](store/export_schema.odin) across Apache Arrow IPC / Feather v2 ([`store/export_arrow.odin`](store/export_arrow.odin), `Decimal64(18, 6)` + `LZ4_FRAME`), pure-Odin GZIP Apache Parquet ([`store/parquet.odin`](store/parquet.odin)), and `json`, `jsonl`, `csv`, `tsv`, and Markdown (`md`) + `README.md` marker updates ([`store/export_text.odin`](store/export_text.odin)).
 - [`cmd/hugi/`](cmd/hugi/) (`bin/hugi`) — Modular pure-Odin CLI (`main.odin`, `cli_args.odin`, `cmd_run.odin`, `cmd_ingest.odin`, `cmd_query.odin`, `cmd_export.odin`, plus unit tests in `cli_test.odin`).
-- [`tests/`](tests/) (`package hugi_tests`) — Leak-checked subsystem test suites (`codec_test.odin`, `packet_test.odin`, `store_test.odin`, `compare_test.odin`, `export_test.odin`, and `test_helpers.odin`).
+- [`tests/`](tests/) (`package hugi_tests`) — Leak-checked subsystem test suites (`codec_test.odin`, `packet_test.odin`, `git_test.odin`, `store_test.odin`, `compare_test.odin`, `export_test.odin`, and `test_helpers.odin`).
+- [`specs/`](specs/) (`package hugi_specs`) — 4-layer ATDD executable specifications (`runner_pipeline_spec_test.odin`, `history_store_spec_test.odin`, `comparison_spec_test.odin`, `export_spec_test.odin`, `cli_e2e_spec_test.odin`) and property tests (`invariants_prop_test.odin`) built on `dsl_test.odin` and `driver_test.odin`.
+
+## Clone & Prerequisites
+
+```bash
+git clone https://github.com/boxxxie/hugi.git
+cd hugi
+git submodule update --init
+```
+
+Use non-recursive `git submodule update --init` (this skips `deps/xitdb`'s optional Zig reference submodules).
+
+- The zero-store `hugi/` runner requires only the Odin compiler and `deps/obench`.
+- Building `store/` and `bin/hugi` additionally requires system development headers for `zlib` (`zlib1g-dev` on Debian/Ubuntu) and `liblz4` (`liblz4-dev`).
 
 ## Quickstart
 
@@ -132,7 +153,7 @@ Then run:
 
 ## Measured Storage & Migration (`xitdb` History Smoke Run)
 
-Ingesting real benchmark histories from `/home/pauli/projects/odin/xitdb/benchmarks/` (`history.jsonl` with Odin + Zig runs across 6 commits, `zig.jsonl`, and `lua.jsonl` — 13 ingested packets, 773 benchmark records across 7 commits and 3 languages):
+Ingesting real benchmark histories from [`boxxxie/odin-xitdb`](https://github.com/boxxxie/odin-xitdb)'s `benchmarks/` directory (`history.jsonl` with Odin + Zig runs across 6 commits, `zig.jsonl`, and `lua.jsonl` — 13 ingested packets, 773 benchmark records across 7 commits and 3 languages):
 
 | Artifact | Size | Notes |
 | --- | ---: | --- |
@@ -150,10 +171,14 @@ Ingesting real benchmark histories from `/home/pauli/projects/odin/xitdb/benchma
 
 ## Development & Upstream `obench` PRs
 
-Run verification checks:
+Run verification checks (including `make specs` for the ATDD & property suite):
 
 ```bash
-make fmt && make fmt-check && make check && make test && make build
+make fmt && make fmt-check && make check && make test && make specs && make build
 ```
 
-Details on the four upstream feature/performance PR branches carried by [`deps/obench`](deps/obench) (`odin-bench` branch) are documented in [`docs/OBENCH_PRS.md`](docs/OBENCH_PRS.md).
+Details on the upstream feature/performance PR branches carried by [`deps/obench`](deps/obench) are documented in [`docs/OBENCH_PRS.md`](docs/OBENCH_PRS.md).
+
+## License
+
+Released under the [MIT License](LICENSE).

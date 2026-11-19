@@ -12,7 +12,7 @@
    - Clean temporary test artifacts (`rm -rf .tmp build`) after verification runs; never commit compiled binaries.
 
 ## Mandatory Verification Commands
-Run from `/home/pauli/projects/odin/hugi`:
+Run from the repository root:
 - `make fmt` / `make fmt-check`
 - `make check`
 - `make test` (`-define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`)

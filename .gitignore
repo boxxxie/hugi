@@ -8,4 +8,6 @@ build/
 *.arrow
 *.jsonl
 *.csv
+*.tsv
+*.parquet
 *.md.bak

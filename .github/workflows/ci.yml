@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test Full Suite (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install system compression libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev liblz4-dev
+
+      - name: Setup Odin compiler
+        uses: laytan/setup-odin@v2
+        with:
+          release: latest
+          token: ${{ secrets.GITHUB_TOKEN }}
+          cache: false
+
+      - name: Odin compiler info
+        run: odin report
+
+      - name: Run strict static checks across all packages
+        run: make check
+
+      - name: Build CLI binary
+        run: make build
+
+      - name: Run unit, CLI, and 4-layer ATDD specification suites
+        run: make test
+
+      - name: Run example benchmark suite
+        run: make example
+
+      - name: Verify package documentation generation
+        run: |
+          odin doc hugi -collection:obench=./deps/obench/obench > /dev/null
+          odin doc store -collection:hugi=./hugi -collection:hugi_store=./store -collection:obench=./deps/obench/obench -collection:xitdb=./deps/xitdb/xitdb -collection:skadi=./deps/skadi/skadi > /dev/null
+
+  runner:
+    name: Zero-Store Runner (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Odin compiler
+        uses: laytan/setup-odin@v2
+        with:
+          release: latest
+          token: ${{ secrets.GITHUB_TOKEN }}
+          cache: false
+
+      - name: Check zero-store runner and example strictly
+        run: |
+          odin check hugi -no-entry-point -collection:obench=./deps/obench/obench -vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-errors -disallow-do
+          odin check examples/micro_and_phases -collection:obench=./deps/obench/obench -vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi

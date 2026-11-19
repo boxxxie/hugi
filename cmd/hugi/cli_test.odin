@@ -153,6 +153,11 @@ test_cli_infer_export_format_resolve_db_and_collections :: proc(t: ^testing.T) {
 	testing.expect(t, _is_reserved_collection("base"))
 	testing.expect(t, _is_reserved_collection("vendor"))
 	testing.expect(t, !_is_reserved_collection("hugi"))
+
+	testing.expect(t, _has_opt_flag([]string{"-o:none"}))
+	testing.expect(t, _has_opt_flag([]string{"-vet", "-o:aggressive"}))
+	testing.expect(t, !_has_opt_flag([]string{"-vet", "-strict-style"}))
+	testing.expect(t, !_has_opt_flag([]string{}))
 }
 
 @(test)

@@ -4,7 +4,7 @@ This repository provides a pure-Odin benchmarking library (`hugi`), a compressed
 
 ## Build, Format, Check, and Test Commands
 
-Run all commands from the repository root (`/home/pauli/projects/odin/hugi`):
+Run all commands from the repository root:
 
 ```bash
 make fmt          # Format all project .odin files with odinfmt -config:odinfmt.json
@@ -43,4 +43,4 @@ make build        # Build -o:speed CLI binary at bin/hugi
 
 ## Upstream `obench` Dependency
 
-`deps/obench` tracks the local `/home/pauli/projects/odin/obench` branch `odin-bench`, which integrates four focused feature/perf PR branches layered cleanly on top of upstream `main` (`44000fb`). Never edit files inside `deps/*` directly from `hugi`; make upstream changes in `/home/pauli/projects/odin/obench` on feature branches and update the submodule pointer deliberately.
+`deps/obench` currently pins `feat/rational-batch-and-femtoseconds` layered on top of `odin-bench` in `boxxxie/obench` (which integrates four focused feature/perf PR branches layered cleanly on top of upstream `main` `44000fb`). Never edit files inside `deps/*` directly from `hugi`; make upstream changes in `boxxxie/obench` on feature branches and update the submodule pointer deliberately.

@@ -1,10 +1,12 @@
 [submodule "deps/obench"]
 	path = deps/obench
-	url = /home/pauli/projects/odin/obench
-	branch = odin-bench
+	url = https://github.com/boxxxie/obench.git
+	branch = feat/rational-batch-and-femtoseconds
 [submodule "deps/xitdb"]
 	path = deps/xitdb
-	url = /home/pauli/projects/odin/xitdb
+	url = https://github.com/boxxxie/odin-xitdb.git
+	branch = master
 [submodule "deps/skadi"]
 	path = deps/skadi
-	url = /home/pauli/projects/odin/skadi
+	url = https://github.com/boxxxie/skadi.git
+	branch = feat/ipc-lz4-body-compression

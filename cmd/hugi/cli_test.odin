@@ -256,4 +256,30 @@ test_cli_ols_discovery_and_export_validation :: proc(t: ^testing.T) {
 	check_export(t, []string{"--out", "a.parquet"}, true, "parquet")
 	check_export(t, []string{"--all-commits", "--out", "series.arrow"}, true, "arrow")
 	check_export(t, []string{"--update-readme", "README.md"}, true, "md")
+	check_export(t, []string{"--format", "jsonl", "--out", "-"}, true, "jsonl")
+	check_export(t, []string{"--format", "arrow", "--out", "-"}, false)
+	check_export(t, []string{"--format", "parquet", "--out", "-"}, false)
+	check_export(t, []string{"--out", "-"}, false)
+
+	testing.expect_value(t, _infer_report_format("", ""), "md")
+	testing.expect_value(t, _infer_report_format("", "rep.json"), "json")
+	testing.expect_value(t, _infer_report_format("", "rep.csv"), "csv")
+	testing.expect_value(t, _infer_report_format("Markdown", ""), "md")
+	testing.expect_value(t, _infer_report_format("JSON", "-"), "json")
+
+	toks := _split_shell_tokens(
+		`-o:speed -extra-linker-flags:"-L/home/pauli/.local/lib -Wl,-rpath,/home/pauli/.local/lib" -define:MSG="a \"b\"" 'plain arg'`,
+		context.temp_allocator,
+	)
+	testing.expect_value(t, len(toks), 4)
+	if len(toks) == 4 {
+		testing.expect_value(t, toks[0], "-o:speed")
+		testing.expect_value(
+			t,
+			toks[1],
+			"-extra-linker-flags:-L/home/pauli/.local/lib -Wl,-rpath,/home/pauli/.local/lib",
+		)
+		testing.expect_value(t, toks[2], `-define:MSG=a "b"`)
+		testing.expect_value(t, toks[3], "plain arg")
+	}
 }

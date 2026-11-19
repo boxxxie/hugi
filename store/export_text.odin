@@ -3,8 +3,46 @@ package hugi_store
 import obench "../deps/obench/obench"
 import hugi "../hugi"
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:strings"
+
+@(private = "file")
+_write_json_f64 :: proc(sb: ^strings.Builder, format: string, v: f64) {
+	if math.is_nan(v) || math.is_inf(v) {
+		strings.write_byte(sb, '0')
+		return
+	}
+	fmt.sbprintf(sb, format, v)
+}
+
+@(private = "file")
+_write_json_bool :: proc(sb: ^strings.Builder, v: bool) {
+	strings.write_string(sb, "true" if v else "false")
+}
+
+@(private = "file", require_results)
+_write_text_output :: proc(path: string, content: string) -> bool {
+	if path == "-" {
+		_, err := os.write_string(os.stdout, content)
+		return err == nil
+	}
+	_ensure_parent_dir(path)
+	return os.write_entire_file(path, transmute([]u8)content) == nil
+}
+
+@(private = "file")
+_verdict_str :: proc "contextless" (v: Verdict, upper: bool) -> string {
+	switch v {
+	case .Faster:
+		return "FASTER" if upper else "faster"
+	case .Regression:
+		return "REGRESSION" if upper else "regression"
+	case .Unchanged:
+		return "unchanged"
+	}
+	return "unchanged"
+}
 
 @(private = "file")
 _write_json_str :: proc(sb: ^strings.Builder, s: string) {
@@ -85,7 +123,7 @@ _write_json_record :: proc(sb: ^strings.Builder, r: Pooled_Record, pretty: bool)
 		case .Decimal_FS:
 			hugi.write_decimal_ns_fs(sb, _export_col_i64(&rc, spec.id))
 		case .F64:
-			fmt.sbprintf(sb, spec.f64_fmt, _export_col_f64(&rc, spec.id))
+			_write_json_f64(sb, spec.f64_fmt, _export_col_f64(&rc, spec.id))
 		case .Samples_Blob:
 		}
 	}
@@ -115,17 +153,14 @@ _write_json_record :: proc(sb: ^strings.Builder, r: Pooled_Record, pretty: bool)
 }
 
 /*
-Exports pooled benchmark records to a formatted JSON array document.
+Formats pooled benchmark records as a pretty-printed JSON array document.
 */
 @(require_results)
-export_json :: proc(path: string, records: []Pooled_Record) -> bool {
-	_ensure_parent_dir(path)
-
+format_json_records :: proc(records: []Pooled_Record, allocator := context.allocator) -> string {
 	if len(records) == 0 {
-		return os.write_entire_file(path, transmute([]u8)string("[]\n")) == nil
+		return strings.clone("[]\n", allocator)
 	}
-
-	sb := strings.builder_make(context.temp_allocator)
+	sb := strings.builder_make(allocator)
 	strings.write_string(&sb, "[\n")
 	for r, idx in records {
 		if idx > 0 {
@@ -134,31 +169,45 @@ export_json :: proc(path: string, records: []Pooled_Record) -> bool {
 		_write_json_record(&sb, r, true)
 	}
 	strings.write_string(&sb, "\n]\n")
-
-	return os.write_entire_file(path, transmute([]u8)strings.to_string(sb)) == nil
+	return strings.to_string(sb)
 }
 
 /*
-Exports pooled benchmark records to JSON Lines using the canonical 34 scalar fields.
+Formats pooled benchmark records as JSON Lines using the canonical 34 scalar fields.
 */
 @(require_results)
-export_jsonl :: proc(path: string, records: []Pooled_Record) -> bool {
-	_ensure_parent_dir(path)
-
-	sb := strings.builder_make(context.temp_allocator)
+format_jsonl_records :: proc(records: []Pooled_Record, allocator := context.allocator) -> string {
+	sb := strings.builder_make(allocator)
 	for r in records {
 		_write_json_record(&sb, r, false)
 		strings.write_byte(&sb, '\n')
 	}
-
-	return os.write_entire_file(path, transmute([]u8)strings.to_string(sb)) == nil
+	return strings.to_string(sb)
 }
 
-@(private = "file")
-_export_delimited :: proc(path: string, records: []Pooled_Record, delim: byte) -> bool {
-	_ensure_parent_dir(path)
+/*
+Exports pooled benchmark records to a formatted JSON array document (or stdout when `path == "-"`).
+*/
+@(require_results)
+export_json :: proc(path: string, records: []Pooled_Record) -> bool {
+	return _write_text_output(path, format_json_records(records, context.temp_allocator))
+}
 
-	sb := strings.builder_make(context.temp_allocator)
+/*
+Exports pooled benchmark records to JSON Lines (or stdout when `path == "-"`).
+*/
+@(require_results)
+export_jsonl :: proc(path: string, records: []Pooled_Record) -> bool {
+	return _write_text_output(path, format_jsonl_records(records, context.temp_allocator))
+}
+
+@(private = "file", require_results)
+_format_delimited_records :: proc(
+	records: []Pooled_Record,
+	delim: byte,
+	allocator := context.allocator,
+) -> string {
+	sb := strings.builder_make(allocator)
 	for spec, idx in EXPORT_COLUMNS[:EXPORT_SCALAR_COL_COUNT] {
 		if idx > 0 {
 			strings.write_byte(&sb, delim)
@@ -190,23 +239,39 @@ _export_delimited :: proc(path: string, records: []Pooled_Record, delim: byte) -
 		strings.write_byte(&sb, '\n')
 	}
 
-	return os.write_entire_file(path, transmute([]u8)strings.to_string(sb)) == nil
+	return strings.to_string(sb)
 }
 
 /*
-Exports pooled benchmark records as an RFC 4180 CSV file.
+Formats pooled benchmark records as an RFC 4180 CSV string.
+*/
+@(require_results)
+format_csv_records :: proc(records: []Pooled_Record, allocator := context.allocator) -> string {
+	return _format_delimited_records(records, ',', allocator)
+}
+
+/*
+Formats pooled benchmark records as a Tab-Separated Values (TSV) string.
+*/
+@(require_results)
+format_tsv_records :: proc(records: []Pooled_Record, allocator := context.allocator) -> string {
+	return _format_delimited_records(records, '\t', allocator)
+}
+
+/*
+Exports pooled benchmark records as an RFC 4180 CSV file (or stdout when `path == "-"`).
 */
 @(require_results)
 export_csv :: proc(path: string, records: []Pooled_Record) -> bool {
-	return _export_delimited(path, records, ',')
+	return _write_text_output(path, format_csv_records(records, context.temp_allocator))
 }
 
 /*
-Exports pooled benchmark records as a Tab-Separated Values (TSV) file.
+Exports pooled benchmark records as a Tab-Separated Values (TSV) file (or stdout when `path == "-"`).
 */
 @(require_results)
 export_tsv :: proc(path: string, records: []Pooled_Record) -> bool {
-	return _export_delimited(path, records, '\t')
+	return _write_text_output(path, format_tsv_records(records, context.temp_allocator))
 }
 
 /*
@@ -253,13 +318,19 @@ format_markdown_table :: proc(records: []Pooled_Record, allocator := context.all
 }
 
 /*
-Exports pooled benchmark records as a GitHub-Flavored Markdown report file.
+Exports pooled benchmark records as a GitHub-Flavored Markdown report file (or stdout when `path == "-"`).
 */
 @(require_results)
 export_markdown :: proc(path: string, records: []Pooled_Record) -> bool {
-	_ensure_parent_dir(path)
-	md := format_markdown_table(records, context.temp_allocator)
-	return os.write_entire_file(path, transmute([]u8)md) == nil
+	return _write_text_output(path, format_markdown_table(records, context.temp_allocator))
+}
+
+/*
+Writes rendered report text (`md`, `json`, `csv`) to `out_path` or stdout when empty / `"-"`.
+*/
+@(require_results)
+export_report_text :: proc(out_path: string, content: string) -> bool {
+	return _write_text_output(out_path == "" ? "-" : out_path, content)
 }
 
 /*
@@ -297,15 +368,6 @@ format_comparison_table :: proc(
 		} else {
 			test_str = fmt.tprintf("Welch t=%.2f", r.welch_t)
 		}
-		verdict_str := "unchanged"
-		switch r.verdict {
-		case .Faster:
-			verdict_str = "FASTER"
-		case .Regression:
-			verdict_str = "REGRESSION"
-		case .Unchanged:
-			verdict_str = "unchanged"
-		}
 		fmt.sbprintf(
 			&sb,
 			"| `%s` | %s | %s | %+.2f%% | %.2fx | %s | %s |\n",
@@ -315,8 +377,148 @@ format_comparison_table :: proc(
 			r.delta_pct,
 			r.speedup,
 			test_str,
-			verdict_str,
+			_verdict_str(r.verdict, upper = true),
 		)
+	}
+	return strings.to_string(sb)
+}
+
+/*
+Formats a commit/run statistical comparison report as JSON with exact fixed-point nanosecond fields.
+*/
+@(require_results)
+format_comparison_json :: proc(
+	rep: Comparison_Report,
+	base_label := "Baseline",
+	cand_label := "Candidate",
+	allocator := context.allocator,
+) -> string {
+	sb := strings.builder_make(allocator)
+	strings.write_string(&sb, "{\n  \"baseline\": ")
+	_write_json_str(&sb, base_label)
+	strings.write_string(&sb, ",\n  \"candidate\": ")
+	_write_json_str(&sb, cand_label)
+	strings.write_string(&sb, ",\n  \"geomean_delta_pct\": ")
+	_write_json_f64(&sb, "%.4f", rep.geomean_delta)
+	fmt.sbprintf(
+		&sb,
+		",\n  \"improvements\": %d,\n  \"regressions\": %d,\n  \"unchanged\": %d,\n  \"rows\": [",
+		rep.improvements,
+		rep.regressions,
+		rep.unchanged,
+	)
+	for r, idx in rep.rows {
+		if idx > 0 {
+			strings.write_byte(&sb, ',')
+		}
+		strings.write_string(&sb, "\n    {\n      \"full_name\": ")
+		_write_json_str(&sb, r.full_name)
+		strings.write_string(&sb, ",\n      \"base_p50_ns\": ")
+		hugi.write_decimal_ns_fs(&sb, r.base_p50_fs)
+		strings.write_string(&sb, ",\n      \"cand_p50_ns\": ")
+		hugi.write_decimal_ns_fs(&sb, r.cand_p50_fs)
+		strings.write_string(&sb, ",\n      \"base_std_dev_ns\": ")
+		hugi.write_decimal_ns_fs(&sb, r.base_std_fs)
+		strings.write_string(&sb, ",\n      \"cand_std_dev_ns\": ")
+		hugi.write_decimal_ns_fs(&sb, r.cand_std_fs)
+		fmt.sbprintf(
+			&sb,
+			",\n      \"base_samples\": %d,\n      \"cand_samples\": %d,\n      \"delta_pct\": ",
+			r.base_samples,
+			r.cand_samples,
+		)
+		_write_json_f64(&sb, "%.4f", r.delta_pct)
+		strings.write_string(&sb, ",\n      \"speedup\": ")
+		_write_json_f64(&sb, "%.6f", r.speedup)
+		strings.write_string(&sb, ",\n      \"welch_t\": ")
+		_write_json_f64(&sb, "%.4f", r.welch_t)
+		strings.write_string(&sb, ",\n      \"welch_df\": ")
+		_write_json_f64(&sb, "%.2f", r.welch_df)
+		strings.write_string(&sb, ",\n      \"used_rank_test\": ")
+		_write_json_bool(&sb, r.used_rank_test)
+		strings.write_string(&sb, ",\n      \"p_value\": ")
+		_write_json_f64(&sb, "%.6f", r.p_value)
+		strings.write_string(&sb, ",\n      \"is_significant\": ")
+		_write_json_bool(&sb, r.is_significant)
+		strings.write_string(&sb, ",\n      \"verdict\": ")
+		_write_json_str(&sb, _verdict_str(r.verdict, upper = false))
+		strings.write_string(&sb, ",\n      \"base_allocs_per_op\": ")
+		_write_json_f64(&sb, "%.4f", r.base_allocs)
+		strings.write_string(&sb, ",\n      \"cand_allocs_per_op\": ")
+		_write_json_f64(&sb, "%.4f", r.cand_allocs)
+		strings.write_string(&sb, ",\n      \"base_alloc_bytes_per_op\": ")
+		_write_json_f64(&sb, "%.2f", r.base_alloc_bytes)
+		strings.write_string(&sb, ",\n      \"cand_alloc_bytes_per_op\": ")
+		_write_json_f64(&sb, "%.2f", r.cand_alloc_bytes)
+		fmt.sbprintf(
+			&sb,
+			",\n      \"base_footprint_bytes\": %d,\n      \"cand_footprint_bytes\": %d\n    }",
+			r.base_footprint,
+			r.cand_footprint,
+		)
+	}
+	if len(rep.rows) > 0 {
+		strings.write_string(&sb, "\n  ]\n}\n")
+	} else {
+		strings.write_string(&sb, "]\n}\n")
+	}
+	return strings.to_string(sb)
+}
+
+/*
+Formats a commit/run statistical comparison report as RFC 4180 CSV.
+*/
+@(require_results)
+format_comparison_csv :: proc(
+	rep: Comparison_Report,
+	base_label := "Baseline",
+	cand_label := "Candidate",
+	allocator := context.allocator,
+) -> string {
+	sb := strings.builder_make(allocator)
+	strings.write_string(
+		&sb,
+		"baseline,candidate,full_name,base_p50_ns,cand_p50_ns,base_std_dev_ns,cand_std_dev_ns,base_samples,cand_samples,delta_pct,speedup,welch_t,welch_df,used_rank_test,p_value,is_significant,verdict,base_allocs_per_op,cand_allocs_per_op,base_alloc_bytes_per_op,cand_alloc_bytes_per_op,base_footprint_bytes,cand_footprint_bytes\n",
+	)
+	for r in rep.rows {
+		_write_delimited_str(&sb, base_label, ',')
+		strings.write_byte(&sb, ',')
+		_write_delimited_str(&sb, cand_label, ',')
+		strings.write_byte(&sb, ',')
+		_write_delimited_str(&sb, r.full_name, ',')
+		strings.write_byte(&sb, ',')
+		hugi.write_decimal_ns_fs(&sb, r.base_p50_fs)
+		strings.write_byte(&sb, ',')
+		hugi.write_decimal_ns_fs(&sb, r.cand_p50_fs)
+		strings.write_byte(&sb, ',')
+		hugi.write_decimal_ns_fs(&sb, r.base_std_fs)
+		strings.write_byte(&sb, ',')
+		hugi.write_decimal_ns_fs(&sb, r.cand_std_fs)
+		fmt.sbprintf(&sb, ",%d,%d,", r.base_samples, r.cand_samples)
+		_write_json_f64(&sb, "%.4f", r.delta_pct)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.6f", r.speedup)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.welch_t)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.2f", r.welch_df)
+		strings.write_byte(&sb, ',')
+		_write_json_bool(&sb, r.used_rank_test)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.6f", r.p_value)
+		strings.write_byte(&sb, ',')
+		_write_json_bool(&sb, r.is_significant)
+		strings.write_byte(&sb, ',')
+		strings.write_string(&sb, _verdict_str(r.verdict, upper = false))
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.base_allocs)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.cand_allocs)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.2f", r.base_alloc_bytes)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.2f", r.cand_alloc_bytes)
+		fmt.sbprintf(&sb, ",%d,%d\n", r.base_footprint, r.cand_footprint)
 	}
 	return strings.to_string(sb)
 }
@@ -393,6 +595,138 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 		for s in rep.only_in_b {
 			fmt.sbprintf(&sb, " `%s`", s)
 		}
+		strings.write_byte(&sb, '\n')
+	}
+	return strings.to_string(sb)
+}
+
+@(private = "file")
+_write_json_str_array :: proc(sb: ^strings.Builder, items: []string) {
+	strings.write_byte(sb, '[')
+	for s, idx in items {
+		if idx > 0 {
+			strings.write_string(sb, ", ")
+		}
+		_write_json_str(sb, s)
+	}
+	strings.write_byte(sb, ']')
+}
+
+/*
+Formats a 1v1 cross-language comparison report as JSON with exact fixed-point nanosecond fields.
+*/
+@(require_results)
+format_1v1_json :: proc(rep: Cross_Lang_Report, allocator := context.allocator) -> string {
+	sb := strings.builder_make(allocator)
+	strings.write_string(&sb, "{\n  \"lang_a\": ")
+	_write_json_str(&sb, rep.lang_a)
+	strings.write_string(&sb, ",\n  \"lang_b\": ")
+	_write_json_str(&sb, rep.lang_b)
+	fmt.sbprintf(
+		&sb,
+		",\n  \"a_wins\": %d,\n  \"b_wins\": %d,\n  \"ties\": %d,\n  \"footprint_mismatches\": %d,\n  \"only_in_a\": ",
+		rep.a_wins,
+		rep.b_wins,
+		rep.ties,
+		rep.footprint_mismatches,
+	)
+	_write_json_str_array(&sb, rep.only_in_a[:])
+	strings.write_string(&sb, ",\n  \"only_in_b\": ")
+	_write_json_str_array(&sb, rep.only_in_b[:])
+	strings.write_string(&sb, ",\n  \"rows\": [")
+	for r, idx in rep.rows {
+		if idx > 0 {
+			strings.write_byte(&sb, ',')
+		}
+		strings.write_string(&sb, "\n    {\n      \"full_name\": ")
+		_write_json_str(&sb, r.full_name)
+		fmt.sbprintf(&sb, ",\n      \"ops\": %d,\n      \"a_p50_ns\": ", r.ops)
+		hugi.write_decimal_ns_fs(&sb, r.a_p50_fs)
+		strings.write_string(&sb, ",\n      \"a_std_dev_ns\": ")
+		hugi.write_decimal_ns_fs(&sb, r.a_std_fs)
+		strings.write_string(&sb, ",\n      \"b_p50_ns\": ")
+		hugi.write_decimal_ns_fs(&sb, r.b_p50_fs)
+		strings.write_string(&sb, ",\n      \"b_std_dev_ns\": ")
+		hugi.write_decimal_ns_fs(&sb, r.b_std_fs)
+		strings.write_string(&sb, ",\n      \"a_cv_pct\": ")
+		_write_json_f64(&sb, "%.4f", r.a_cv_pct)
+		strings.write_string(&sb, ",\n      \"b_cv_pct\": ")
+		_write_json_f64(&sb, "%.4f", r.b_cv_pct)
+		strings.write_string(&sb, ",\n      \"faster_lang\": ")
+		_write_json_str(&sb, r.faster_lang)
+		strings.write_string(&sb, ",\n      \"speedup_ratio\": ")
+		_write_json_f64(&sb, "%.6f", r.speedup_ratio)
+		strings.write_string(&sb, ",\n      \"is_significant\": ")
+		_write_json_bool(&sb, r.is_significant)
+		strings.write_string(&sb, ",\n      \"p_value\": ")
+		_write_json_f64(&sb, "%.6f", r.p_value)
+		strings.write_string(&sb, ",\n      \"welch_t\": ")
+		_write_json_f64(&sb, "%.4f", r.welch_t)
+		fmt.sbprintf(
+			&sb,
+			",\n      \"a_footprint_bytes\": %d,\n      \"b_footprint_bytes\": %d,\n      \"footprint_mismatch\": ",
+			r.a_footprint,
+			r.b_footprint,
+		)
+		_write_json_bool(&sb, r.footprint_mismatch)
+		strings.write_string(&sb, ",\n      \"a_allocs_per_op\": ")
+		_write_json_f64(&sb, "%.4f", r.a_allocs)
+		strings.write_string(&sb, ",\n      \"b_allocs_per_op\": ")
+		_write_json_f64(&sb, "%.4f", r.b_allocs)
+		strings.write_string(&sb, "\n    }")
+	}
+	if len(rep.rows) > 0 {
+		strings.write_string(&sb, "\n  ]\n}\n")
+	} else {
+		strings.write_string(&sb, "]\n}\n")
+	}
+	return strings.to_string(sb)
+}
+
+/*
+Formats a 1v1 cross-language comparison report as RFC 4180 CSV.
+*/
+@(require_results)
+format_1v1_csv :: proc(rep: Cross_Lang_Report, allocator := context.allocator) -> string {
+	sb := strings.builder_make(allocator)
+	strings.write_string(
+		&sb,
+		"lang_a,lang_b,full_name,ops,a_p50_ns,a_std_dev_ns,b_p50_ns,b_std_dev_ns,a_cv_pct,b_cv_pct,faster_lang,speedup_ratio,is_significant,p_value,welch_t,a_footprint_bytes,b_footprint_bytes,footprint_mismatch,a_allocs_per_op,b_allocs_per_op\n",
+	)
+	for r in rep.rows {
+		_write_delimited_str(&sb, rep.lang_a, ',')
+		strings.write_byte(&sb, ',')
+		_write_delimited_str(&sb, rep.lang_b, ',')
+		strings.write_byte(&sb, ',')
+		_write_delimited_str(&sb, r.full_name, ',')
+		fmt.sbprintf(&sb, ",%d,", r.ops)
+		hugi.write_decimal_ns_fs(&sb, r.a_p50_fs)
+		strings.write_byte(&sb, ',')
+		hugi.write_decimal_ns_fs(&sb, r.a_std_fs)
+		strings.write_byte(&sb, ',')
+		hugi.write_decimal_ns_fs(&sb, r.b_p50_fs)
+		strings.write_byte(&sb, ',')
+		hugi.write_decimal_ns_fs(&sb, r.b_std_fs)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.a_cv_pct)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.b_cv_pct)
+		strings.write_byte(&sb, ',')
+		_write_delimited_str(&sb, r.faster_lang, ',')
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.6f", r.speedup_ratio)
+		strings.write_byte(&sb, ',')
+		_write_json_bool(&sb, r.is_significant)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.6f", r.p_value)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.welch_t)
+		fmt.sbprintf(&sb, ",%d,%d,", r.a_footprint, r.b_footprint)
+		_write_json_bool(&sb, r.footprint_mismatch)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.a_allocs)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.b_allocs)
 		strings.write_byte(&sb, '\n')
 	}
 	return strings.to_string(sb)

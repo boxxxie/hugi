@@ -234,6 +234,79 @@ _infer_export_format :: proc(format, out_path, readme_path: string) -> string {
 }
 
 @(private, require_results)
+_infer_report_format :: proc(format, out_path: string) -> string {
+	fmt_out := strings.to_lower(format, context.temp_allocator)
+	if fmt_out == "markdown" {
+		return "md"
+	}
+	if fmt_out == "" && out_path != "" && out_path != "-" {
+		ext := strings.to_lower(filepath.ext(out_path), context.temp_allocator)
+		switch ext {
+		case ".json":
+			return "json"
+		case ".csv":
+			return "csv"
+		case ".md", ".markdown":
+			return "md"
+		}
+	}
+	if fmt_out == "" {
+		return "md"
+	}
+	return fmt_out
+}
+
+@(private, require_results)
+_split_shell_tokens :: proc(s: string, allocator := context.temp_allocator) -> []string {
+	out := make([dynamic]string, allocator)
+	cur := strings.builder_make(allocator)
+	has_tok := false
+	quote: byte = 0
+
+	for i := 0; i < len(s); i += 1 {
+		b := s[i]
+		if quote != 0 {
+			if b == quote {
+				quote = 0
+				continue
+			}
+			if quote == '"' && b == '\\' && i + 1 < len(s) {
+				next := s[i + 1]
+				if next == '"' || next == '\\' {
+					strings.write_byte(&cur, next)
+					i += 1
+					continue
+				}
+			}
+			strings.write_byte(&cur, b)
+			continue
+		}
+
+		if b == '\'' || b == '"' {
+			quote = b
+			has_tok = true
+			continue
+		}
+		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			if has_tok {
+				append(&out, strings.clone(strings.to_string(cur), allocator))
+				strings.builder_reset(&cur)
+				has_tok = false
+			}
+			continue
+		}
+		strings.write_byte(&cur, b)
+		has_tok = true
+	}
+
+	if has_tok {
+		append(&out, strings.clone(strings.to_string(cur), allocator))
+	}
+	strings.builder_destroy(&cur)
+	return out[:]
+}
+
+@(private, require_results)
 _open_store_or_err :: proc(
 	cmd_name: string,
 	db_flag: string,

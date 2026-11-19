@@ -101,6 +101,36 @@ spec_longitudinal_commit_series_and_all_runs_exports :: proc(t: ^testing.T) {
 	)
 	then_file_contains(&w, "all-runs-jsonl", `"run_id":"r-01"`)
 	then_file_contains(&w, "all-runs-jsonl", `"run_id":"r-04"`)
+
+	given_recorded_run(
+		&w,
+		commit = "c02",
+		lang = "zig",
+		run_id = "rz-01",
+		benches = []Bench_Observation{{name = "get", median_ns = 70.0}},
+		timestamp_unix = i64(1770000300),
+	)
+	upon_exporting(&w, .Jsonl, "all-langs-snap", scope = .Snapshot, lang = "all")
+	then_export_succeeded(&w)
+	then_exported_artifact_valid(
+		&w,
+		"all-langs-snap",
+		.Jsonl,
+		expected_rows = 3,
+		expected_cols = 34,
+	)
+	then_file_contains(&w, "all-langs-snap", `"lang":"odin"`)
+	then_file_contains(&w, "all-langs-snap", `"lang":"zig"`)
+
+	upon_exporting(&w, .Jsonl, "all-langs-series", scope = .All_Commits, lang = "all")
+	then_export_succeeded(&w)
+	then_exported_artifact_valid(
+		&w,
+		"all-langs-series",
+		.Jsonl,
+		expected_rows = 5,
+		expected_cols = 34,
+	)
 }
 
 @(test)

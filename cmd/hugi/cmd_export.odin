@@ -75,6 +75,14 @@ _validate_export_opts :: proc(opts: ^_Export_Opts) -> (err_msg: string, ok: bool
 	if opts.out_path == "" && opts.readme_path == "" {
 		return "hugi export: --out <path> (or --update-readme <path>) is required", false
 	}
+	if opts.out_path == "-" &&
+	   (opts.format == "arrow" ||
+			   opts.format == "feather" ||
+			   opts.format == "ipc" ||
+			   opts.format == "parquet" ||
+			   opts.format == "pq") {
+		return "hugi export: binary format requires a file path in --out, not '-'", false
+	}
 	return "", true
 }
 
@@ -162,21 +170,23 @@ _cmd_export :: proc(args: []string) -> int {
 			)
 			return 1
 		}
-		if fi, s_err := os.stat(opts.out_path, context.temp_allocator); s_err == nil {
-			fmt.printfln(
-				"Exported %d record(s) (%s) -> %s (%d bytes)",
-				len(records),
-				opts.format,
-				opts.out_path,
-				fi.size,
-			)
-		} else {
-			fmt.printfln(
-				"Exported %d record(s) (%s) -> %s",
-				len(records),
-				opts.format,
-				opts.out_path,
-			)
+		if opts.out_path != "-" {
+			if fi, s_err := os.stat(opts.out_path, context.temp_allocator); s_err == nil {
+				fmt.printfln(
+					"Exported %d record(s) (%s) -> %s (%d bytes)",
+					len(records),
+					opts.format,
+					opts.out_path,
+					fi.size,
+				)
+			} else {
+				fmt.printfln(
+					"Exported %d record(s) (%s) -> %s",
+					len(records),
+					opts.format,
+					opts.out_path,
+				)
+			}
 		}
 	}
 
@@ -189,7 +199,11 @@ _cmd_export :: proc(args: []string) -> int {
 			)
 			return 1
 		}
-		fmt.printfln("Updated benchmark table in %s", opts.readme_path)
+		if opts.out_path == "-" {
+			fmt.eprintfln("Updated benchmark table in %s", opts.readme_path)
+		} else {
+			fmt.printfln("Updated benchmark table in %s", opts.readme_path)
+		}
 	}
 
 	return 0

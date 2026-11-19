@@ -109,6 +109,11 @@ _open_latest_moment_reader :: proc(
 	return _moment_reader_init(moment, allocator)
 }
 
+@(private)
+_is_wildcard_lang :: proc "contextless" (lang: string) -> bool {
+	return lang == "*" || lang == "all"
+}
+
 @(private, require_results)
 _moment_reader_get_catalog_run :: proc(
 	mr: ^_Moment_Reader,
@@ -119,12 +124,13 @@ _moment_reader_get_catalog_run :: proc(
 	pkt_lang: string,
 	ok: bool,
 ) {
-	if lang_filter != "" && e.lang != lang_filter {
+	any_lang := lang_filter == "" || _is_wildcard_lang(lang_filter)
+	if !any_lang && e.lang != lang_filter {
 		return {}, "", false
 	}
 	rk := _run_key(e.lang, e.run_id)
 	pkt = _moment_reader_get_packet(mr, rk) or_return
-	if lang_filter != "" && pkt.lang != lang_filter {
+	if !any_lang && pkt.lang != lang_filter {
 		return {}, "", false
 	}
 	pkt_lang = pkt.lang != "" ? pkt.lang : "odin"
@@ -299,12 +305,13 @@ store_load_raw_groups :: proc(
 	defer _moment_reader_destroy(&mr)
 
 	if run_id != "" {
-		prefixed_key := _run_key(lang, run_id)
+		any_lang := lang == "" || _is_wildcard_lang(lang)
+		prefixed_key := any_lang ? run_id : _run_key(lang, run_id)
 		pkt, pkt_ok := _moment_reader_get_packet(&mr, prefixed_key)
-		if !pkt_ok {
+		if !pkt_ok && !any_lang {
 			pkt, pkt_ok = _moment_reader_get_packet(&mr, run_id)
 		}
-		if !pkt_ok && lang == "" {
+		if !pkt_ok && any_lang {
 			for e in mr.cat.runs {
 				if e.run_id == run_id {
 					pkt, pkt_ok = _moment_reader_get_packet(&mr, _run_key(e.lang, e.run_id))
@@ -314,7 +321,7 @@ store_load_raw_groups :: proc(
 				}
 			}
 		}
-		if !pkt_ok || (lang != "" && pkt.lang != lang) {
+		if !pkt_ok || (!any_lang && pkt.lang != lang) {
 			return groups[:]
 		}
 		pkt_lang := pkt.lang != "" ? pkt.lang : "odin"
@@ -356,7 +363,7 @@ store_load_raw_groups :: proc(
 					r,
 					filter,
 					allocator,
-					key_by_lang = (lang == ""),
+					key_by_lang = (lang == "" || _is_wildcard_lang(lang)),
 				)
 			}
 		}
@@ -365,6 +372,69 @@ store_load_raw_groups :: proc(
 				return a.records[0].rank < b.records[0].rank
 			}
 			return a.lang < b.lang
+		})
+		return groups[:]
+	}
+
+	if _is_wildcard_lang(lang) {
+		snap_latest_commit := make(map[string]string, context.temp_allocator)
+		active_commits := make(map[string]bool, context.temp_allocator)
+		defer {
+			delete(snap_latest_commit)
+			delete(active_commits)
+		}
+		for snap_lang, snap_m in mr.cat.snaps {
+			for key, ref in snap_m {
+				if !hugi.matches_name_filter(filter, key) {
+					continue
+				}
+				run_ord := int(ref.run_ord)
+				if run_ord >= 0 && run_ord < len(mr.cat.runs) {
+					sc := mr.cat.runs[run_ord].commit
+					if sc != "" {
+						sk := fmt.tprintf("%s\x00%s", snap_lang, key)
+						snap_latest_commit[sk] = sc
+						active_commits[sc] = true
+					}
+				}
+			}
+		}
+
+		for e in mr.cat.runs {
+			if e.commit not_in active_commits {
+				continue
+			}
+			pkt, pkt_lang, pkt_ok := _moment_reader_get_catalog_run(&mr, e, "")
+			if !pkt_ok {
+				continue
+			}
+			for r in pkt.records {
+				key := r.full_name != "" ? r.full_name : r.name
+				sk := fmt.tprintf("%s\x00%s", pkt_lang, key)
+				if target_commit, found := snap_latest_commit[sk];
+				   found && pkt.commit == target_commit {
+					_raw_groups_add_record(
+						&groups,
+						&by_name,
+						pkt.commit,
+						pkt.run_id,
+						pkt_lang,
+						pkt.suite_name,
+						pkt.timestamp_unix,
+						r,
+						filter,
+						allocator,
+						key_by_lang = true,
+					)
+				}
+			}
+		}
+
+		slice.sort_by(groups[:], proc(a, b: _Raw_Group) -> bool {
+			if a.lang != b.lang {
+				return a.lang < b.lang
+			}
+			return a.records[0].rank < b.records[0].rank
 		})
 		return groups[:]
 	}

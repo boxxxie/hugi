@@ -231,6 +231,8 @@ _cmd_compare :: proc(args: []string) -> int {
 	}
 	commits_arg := ""
 	runs_arg := ""
+	format_arg := ""
+	out_path := ""
 	fail_on_reg := false
 
 	allowed := _Common_Flag_Set{.DB, .Lang, .Filter, .Threshold}
@@ -260,6 +262,14 @@ _cmd_compare :: proc(args: []string) -> int {
 			v, ok := _consume_value(args, &i, inline_val, key)
 			if !ok {return 1}
 			runs_arg = v
+		case "format":
+			v, ok := _consume_value(args, &i, inline_val, key)
+			if !ok {return 1}
+			format_arg = v
+		case "out":
+			v, ok := _consume_value(args, &i, inline_val, key)
+			if !ok {return 1}
+			out_path = v
 		case "last":
 		// Default behavior when neither --commits nor --runs is provided.
 		case "fail-on-regression":
@@ -268,6 +278,12 @@ _cmd_compare :: proc(args: []string) -> int {
 			fmt.eprintfln("hugi compare: unknown flag '--%s'", key)
 			return 1
 		}
+	}
+
+	rep_fmt := _infer_report_format(format_arg, out_path)
+	if rep_fmt != "md" && rep_fmt != "json" && rep_fmt != "csv" {
+		fmt.eprintfln("hugi compare: unsupported format '%s' (expected md|json|csv)", rep_fmt)
+		return 1
 	}
 
 	st, db_path, open_ok := _open_store_or_err("compare", common.db_flag)
@@ -382,7 +398,19 @@ _cmd_compare :: proc(args: []string) -> int {
 		context.allocator,
 	)
 	defer store.comparison_report_destroy(&rep)
-	fmt.print(store.format_comparison_table(rep, base_label, cand_label, context.temp_allocator))
+	text := ""
+	switch rep_fmt {
+	case "json":
+		text = store.format_comparison_json(rep, base_label, cand_label, context.temp_allocator)
+	case "csv":
+		text = store.format_comparison_csv(rep, base_label, cand_label, context.temp_allocator)
+	case:
+		text = store.format_comparison_table(rep, base_label, cand_label, context.temp_allocator)
+	}
+	if !store.export_report_text(out_path, text) {
+		fmt.eprintfln("hugi compare: failed writing %s report to '%s'", rep_fmt, out_path)
+		return 1
+	}
 
 	if fail_on_reg && rep.regressions > 0 {
 		return 1
@@ -396,6 +424,8 @@ _cmd_compare_1v1 :: proc(args: []string) -> int {
 		threshold_pct = 3.0,
 	}
 	langs_arg := "odin,zig"
+	format_arg := ""
+	out_path := ""
 
 	allowed := _Common_Flag_Set{.DB, .Commit, .Threshold}
 	i := 0
@@ -420,10 +450,24 @@ _cmd_compare_1v1 :: proc(args: []string) -> int {
 			v, ok := _consume_value(args, &i, inline_val, key)
 			if !ok {return 1}
 			langs_arg = v
+		case "format":
+			v, ok := _consume_value(args, &i, inline_val, key)
+			if !ok {return 1}
+			format_arg = v
+		case "out":
+			v, ok := _consume_value(args, &i, inline_val, key)
+			if !ok {return 1}
+			out_path = v
 		case:
 			fmt.eprintfln("hugi compare-1v1: unknown flag '--%s'", key)
 			return 1
 		}
+	}
+
+	rep_fmt := _infer_report_format(format_arg, out_path)
+	if rep_fmt != "md" && rep_fmt != "json" && rep_fmt != "csv" {
+		fmt.eprintfln("hugi compare-1v1: unsupported format '%s' (expected md|json|csv)", rep_fmt)
+		return 1
 	}
 
 	parts := strings.split(langs_arg, ",", context.temp_allocator)
@@ -454,6 +498,18 @@ _cmd_compare_1v1 :: proc(args: []string) -> int {
 		context.allocator,
 	)
 	defer store.cross_lang_report_destroy(&rep)
-	fmt.print(store.format_1v1_table(rep, context.temp_allocator))
+	text := ""
+	switch rep_fmt {
+	case "json":
+		text = store.format_1v1_json(rep, context.temp_allocator)
+	case "csv":
+		text = store.format_1v1_csv(rep, context.temp_allocator)
+	case:
+		text = store.format_1v1_table(rep, context.temp_allocator)
+	}
+	if !store.export_report_text(out_path, text) {
+		fmt.eprintfln("hugi compare-1v1: failed writing %s report to '%s'", rep_fmt, out_path)
+		return 1
+	}
 	return 0
 }

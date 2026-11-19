@@ -88,12 +88,12 @@ test_jsonl_and_obench_json_wire_importers :: proc(t: ^testing.T) {
 	jsonl_in := strings.concatenate({tmp, "/multi.jsonl"}, context.temp_allocator)
 	jsonl_data :=
 		"\n" +
-		`{"rank":1,"group":"kv","lang":"odin","commit":"imp001","run_id":"jr-1","name":"kv::get","ops":100,"runs":3,"warmup":1,"median_ns":42.5,"samples_ns":[42.0,42.5,43.0],"bytes_used":512}` +
+		`{"rank":1,"group":"kv","lang":"odin","commit":"imp001","run_id":"jr-1","name":"kv::get","ops":100,"runs":3,"warmup":1,"median_ns":42.5,"samples_ns":[42.0,42.5,43.0],"bytes_row":64,"mb_per_sec":1435.0,"bytes_used":512}` +
 		"\n" +
 		"NOT_VALID_JSON_LINE\n" +
 		`{"rank":2,"group":"kv","lang":"odin","commit":"imp001","run_id":"jr-1","name":"kv::put","ops":100,"runs":3,"warmup":1,"median_ns":84.0,"samples_ns":[83.0,84.0,85.0],"bytes_used":1024}` +
 		"\n" +
-		`{"rank":1,"group":"kv","lang":"zig","commit":"imp001","run_id":"jr-z1","name":"kv::get","ops":100,"runs":3,"warmup":1,"median_ns":60.0,"samples_ns":[59.0,60.0,61.0],"bytes_used":512}` +
+		`{"rank":1,"group":"kv","lang":"zig","commit":"imp001","run_id":"jr-z1","name":"kv::get","ops":100,"runs":3,"warmup":1,"median_ns":60.0,"samples_ns":[59.0,60.0,61.0],"gb_per_sec":2.5,"bytes_used":512}` +
 		"\n"
 	testing.expect(
 		t,
@@ -111,10 +111,13 @@ test_jsonl_and_obench_json_wire_importers :: proc(t: ^testing.T) {
 			testing.expect_value(t, jpkts[0].run_id, "jr-1")
 			testing.expect_value(t, len(jpkts[0].records), 2)
 			testing.expect_value(t, jpkts[0].records[0].samples_batch_ns[1], u64(4250))
+			testing.expect_value(t, jpkts[0].records[0].bytes_per_op, u64(64))
+			testing.expect_value(t, jpkts[0].records[0].mb_per_sec, 1435.0)
 
 			testing.expect_value(t, jpkts[1].lang, "zig")
 			testing.expect_value(t, jpkts[1].run_id, "jr-z1")
 			testing.expect_value(t, len(jpkts[1].records), 1)
+			testing.expect_value(t, jpkts[1].records[0].mb_per_sec, 2560.0)
 		}
 	}
 	hugi.packets_destroy(jpkts)

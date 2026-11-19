@@ -406,6 +406,57 @@ spec_cli_compare_commits_runs_and_last_fallback :: proc(t: ^testing.T) {
 		shows_stdout_contains(&w, out, "Comparison: r-s1 -> r-s2")
 		shows_stdout_contains(&w, out, "REGRESSION")
 	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@db",
+		"--commits",
+		"base01..fast02",
+		"--format",
+		"json",
+		"--out",
+		"-",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, `"baseline": "base01"`)
+		shows_stdout_contains(&w, out, `"candidate": "fast02"`)
+		shows_stdout_contains(&w, out, `"verdict": "faster"`)
+	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@db",
+		"--commits",
+		"base01..cand03",
+		"--format",
+		"json",
+		"--fail-on-regression",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 1)
+		shows_stdout_contains(&w, out, `"verdict": "regression"`)
+	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@db",
+		"--commits",
+		"base01..fast02",
+		"--out",
+		"@cmp.csv",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+	then_file_contains(&w, "cmp.csv", "baseline,candidate,full_name,")
+	then_file_contains(&w, "cmp.csv", "base01,fast02,core::scan,")
 }
 
 @(test)
@@ -454,6 +505,43 @@ spec_cli_compare_1v1_reports_winner_mismatch_and_unmatched :: proc(t: ^testing.T
 		shows_stdout_contains(&w, out, "Only in odin (1):")
 		shows_stdout_contains(&w, out, "core::odin_only")
 	}
+
+	upon_running_cli(
+		&w,
+		"compare-1v1",
+		"--db",
+		"@db",
+		"--langs",
+		"odin,zig",
+		"--commit",
+		"cmp99",
+		"--format",
+		"json",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, `"lang_a": "odin"`)
+		shows_stdout_contains(&w, out, `"footprint_mismatches": 1`)
+		shows_stdout_contains(&w, out, `"only_in_a": ["core::odin_only"]`)
+	}
+
+	upon_running_cli(
+		&w,
+		"compare-1v1",
+		"--db",
+		"@db",
+		"--langs",
+		"odin,zig",
+		"--commit",
+		"cmp99",
+		"--out",
+		"@cmp1v1.csv",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+	then_file_contains(&w, "cmp1v1.csv", "lang_a,lang_b,full_name,")
+	then_file_contains(&w, "cmp1v1.csv", "odin,zig,core::fast_op,")
 }
 
 @(test)
@@ -541,6 +629,40 @@ spec_cli_export_all_formats_filter_readme_and_compact_workflow :: proc(t: ^testi
 	then_file_contains(&w, "readme.md", "core::alpha")
 	then_file_does_not_contain(&w, "readme.md", "\nstale\n")
 
+	given_legacy_jsonl_fixture(
+		&w,
+		"pkt-z-stream",
+		commit = "ex02",
+		lang = "zig",
+		run_id = "ex-z1",
+		full_name = "core::alpha",
+		median_ns = 90.0,
+		ops = 10,
+	)
+	upon_running_cli(&w, "ingest", "--db", "@db", "@pkt-z-stream")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+
+	upon_running_cli(
+		&w,
+		"export",
+		"--db",
+		"@db",
+		"--lang",
+		"all",
+		"--format",
+		"jsonl",
+		"--out",
+		"-",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, `"lang":"odin"`)
+		shows_stdout_contains(&w, out, `"lang":"zig"`)
+		shows_stdout_does_not_contain(&w, out, "Exported ")
+	}
+
 	upon_running_cli(&w, "compact", "--db", "@db", "--keep-hot", "0")
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
@@ -595,6 +717,11 @@ spec_cli_invalid_invocations_return_nonzero_and_diagnostics_matrix :: proc(t: ^t
 			"export-missing-out",
 			[]string{"export", "--db", "@db", "--format", "csv"},
 			"--out <path>",
+		),
+		cli_guard_case(
+			"export-binary-stdout",
+			[]string{"export", "--db", "@db", "--format", "arrow", "--out", "-"},
+			"binary format requires a file path",
 		),
 		cli_guard_case(
 			"compact-negative-keep-hot",

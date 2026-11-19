@@ -9,7 +9,7 @@ HUGI_FLAGS := -vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-err
 FULL_FLAGS := -vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests,hugi_specs
 TEST_FLAGS ?= -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
-SOURCES := hugi/*.odin store/*.odin cmd/hugi/*.odin examples/micro_and_phases/*.odin tests/*.odin specs/*.odin
+SOURCES := hugi/*.odin store/*.odin cmd/hugi/*.odin examples/micro_and_phases/*.odin examples/custom_markdown_odin/*.odin tests/*.odin specs/*.odin
 
 BIN_DIR := bin
 HUGI_BIN := $(BIN_DIR)/hugi
@@ -27,6 +27,7 @@ check:
 	$(ODIN) check store -no-entry-point $(COLS) $(FULL_FLAGS)
 	$(ODIN) check cmd/hugi $(COLS) $(FULL_FLAGS)
 	$(ODIN) check examples/micro_and_phases $(COLS) $(FULL_FLAGS)
+	$(ODIN) check examples/custom_markdown_odin $(COLS) $(FULL_FLAGS)
 	$(ODIN) check tests -no-entry-point $(COLS) $(FULL_FLAGS)
 	$(ODIN) check specs -no-entry-point $(COLS) $(FULL_FLAGS)
 

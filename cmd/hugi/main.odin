@@ -27,7 +27,7 @@ COMMANDS:
 
 COMMON OPTIONS:
   --db <path>            Store path (default: benchmarks/history.hugidb or history.hugidb)
-  --lang <lang>          Language tag (default: odin)
+  --lang <lang>          Language tag (default: odin; export also accepts 'all' or '*')
   --commit <sha>         Commit identifier override
   --filter <pat>         Benchmark name substring filter (supports ',' or '|' alternation)
 
@@ -39,7 +39,7 @@ RUN OPTIONS:
   --baseline-commit <c>  Compare run immediately against baseline commit <c>
   --fail-on-regression   Exit non-zero if statistical regressions are detected
   --threshold <pct>      Regression threshold percentage (default: 5.0)
-  --extra-build-flags s  Space-separated extra flags passed to 'odin build'
+  --extra-build-flags s  Extra flags passed to 'odin build' (supports quoted arguments)
   --overlay              Ingest into an in-memory CoW Core_Overlay branch (no disk write)
 
 COMPARE / EXPORT / COMPACT OPTIONS:
@@ -49,8 +49,8 @@ COMPARE / EXPORT / COMPACT OPTIONS:
   --langs <a,b>          Languages for compare-1v1 (default: odin,zig)
   --all-commits          Export longitudinal commit-by-commit series (instead of latest snapshot)
   --all-runs             Export every stored run individually (unpooled longitudinal series)
-  --format <fmt>         Export format: arrow | parquet | json | jsonl | csv | tsv | md (auto-detected from --out extension if omitted)
-  --out <path>           Output path for export
+  --format <fmt>         export: arrow | parquet | json | jsonl | csv | tsv | md; compare/compare-1v1: md | json | csv
+  --out <path|->         Output path (or '-' to stream text formats to stdout)
   --update-readme <path> Replace <!-- BEGIN_BENCHMARK_TABLE -->..<!-- END_BENCHMARK_TABLE -->
   --limit <N>            Maximum history entries to display (0 = all)
   --keep-hot <N>         Hot recent runs kept unrolled during 'compact' (default: 0)

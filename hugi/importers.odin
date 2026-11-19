@@ -147,7 +147,10 @@ _Jsonl_Row :: struct {
 	p95_ns:              f64 `json:"p95_ns"`,
 	p99_ns:              f64 `json:"p99_ns"`,
 	ops_per_sec:         f64 `json:"ops_per_sec"`,
+	mb_per_sec:          f64 `json:"mb_per_sec"`,
 	gb_per_sec:          f64 `json:"gb_per_sec"`,
+	bytes_per_op:        u64 `json:"bytes_per_op"`,
+	bytes_row:           u64 `json:"bytes_row"`,
 	bytes_used:          u64 `json:"bytes_used"`,
 	allocs_per_run:      u64 `json:"allocs_per_run"`,
 	resizes_per_run:     u64 `json:"resizes_per_run"`,
@@ -249,7 +252,8 @@ read_jsonl_packets :: proc(
 		}
 
 		ops_f := f64(max(row.ops, 1))
-		mb_s := row.gb_per_sec * 1024.0
+		bpo := row.bytes_per_op > 0 ? row.bytes_per_op : row.bytes_row
+		mb_s := row.gb_per_sec > 0 ? row.gb_per_sec * 1024.0 : row.mb_per_sec
 		med := row.median_ns > 0 ? row.median_ns : row.ns_per_op
 		ops_s := row.ops_per_sec
 		if ops_s <= 0 && med > 0 {
@@ -275,6 +279,7 @@ read_jsonl_packets :: proc(
 			std_dev_fs         = ns_f64_to_fs(row.stddev_ns),
 			cv_pct             = row.cv_pct,
 			iqr_fs             = ns_f64_to_fs(row.iqr_ns),
+			bytes_per_op       = bpo,
 			mb_per_sec         = mb_s,
 			items_per_sec      = ops_s,
 			footprint_bytes    = row.bytes_used,
@@ -289,14 +294,17 @@ read_jsonl_packets :: proc(
 		if len(row.samples_batch_ns) > 0 {
 			copy(r.samples_batch_ns[:], row.samples_batch_ns)
 			recompute_record_stats_from_samples(&r)
+			refresh_record_throughput(&r, overwrite = false)
 		} else if len(row.samples_ns) > 0 {
 			for s, si in row.samples_ns {
 				r.samples_batch_ns[si] = ns_f64_to_batch_ns(s, eff_ops)
 			}
 			recompute_record_stats_from_samples(&r)
+			refresh_record_throughput(&r, overwrite = false)
 		} else if med > 0 {
 			append(&r.samples_batch_ns, ns_f64_to_batch_ns(med, eff_ops))
 			recompute_record_stats_from_samples(&r)
+			refresh_record_throughput(&r, overwrite = false)
 		}
 		if row.pool_hits > 0 || row.pool_misses > 0 {
 			append(

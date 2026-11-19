@@ -264,7 +264,7 @@ _parse_run_args :: proc(args: []string) -> (opts: _Run_Opts, exit_code: int, don
 _build_run_binary :: proc(opts: _Run_Opts, bin_path: string) -> bool {
 	ols_flags := _discover_ols_build_flags(opts.pkg_dir)
 	extra_flags :=
-		strings.fields(opts.extra_build_flags, context.temp_allocator) if opts.extra_build_flags != "" else nil
+		_split_shell_tokens(opts.extra_build_flags, context.temp_allocator) if opts.extra_build_flags != "" else nil
 
 	build_cmd := make([dynamic]string, context.temp_allocator)
 	append(&build_cmd, _odin_executable(), "build", opts.pkg_dir, fmt.tprintf("-out:%s", bin_path))

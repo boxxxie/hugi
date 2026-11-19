@@ -297,4 +297,133 @@ test_export_uncompressed_empty_and_escaping_edge_cases :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(t_1v1, "[MISMATCH]"), "1v1 table marks footprint mismatch")
 	testing.expect(t, strings.contains(t_1v1, "Only in odin (1):"), "1v1 only_in_a bucket")
 	testing.expect(t, strings.contains(t_1v1, "Only in zig (1):"), "1v1 only_in_b bucket")
+
+	// 5. Machine-readable comparison and 1v1 JSON / CSV formatters.
+	cmp_rep := store.Comparison_Report {
+		rows          = make([dynamic]store.Comparison_Row),
+		improvements  = 1,
+		geomean_delta = -25.0,
+	}
+	defer store.comparison_report_destroy(&cmp_rep)
+	append(
+		&cmp_rep.rows,
+		store.Comparison_Row {
+			full_name = strings.clone("core::op"),
+			base_p50_fs = 100_000_000,
+			cand_p50_fs = 75_000_000,
+			base_std_fs = 1_500_000,
+			cand_std_fs = 1_000_000,
+			base_samples = 5,
+			cand_samples = 5,
+			delta_pct = -25.0,
+			speedup = 1.333333,
+			welch_t = -4.2,
+			welch_df = 7.5,
+			used_rank_test = true,
+			p_value = 0.008,
+			is_significant = true,
+			verdict = .Faster,
+			base_footprint = 1024,
+			cand_footprint = 1024,
+		},
+	)
+
+	cmp_json := store.format_comparison_json(cmp_rep, "c01", "c02", context.allocator)
+	defer delete(cmp_json)
+	if parsed, p_err := json.parse(transmute([]u8)cmp_json, allocator = context.allocator);
+	   p_err == .None {
+		defer json.destroy_value(parsed, context.allocator)
+		obj, is_obj := parsed.(json.Object)
+		testing.expect(t, is_obj, "comparison json root must be object")
+		if is_obj {
+			testing.expect_value(t, obj["baseline"].(json.String) or_else "", "c01")
+			testing.expect_value(t, obj["candidate"].(json.String) or_else "", "c02")
+			rows_arr, has_rows := obj["rows"].(json.Array)
+			testing.expect(t, has_rows && len(rows_arr) == 1, "expected 1 comparison row")
+			if has_rows && len(rows_arr) == 1 {
+				row_obj := rows_arr[0].(json.Object)
+				testing.expect_value(t, row_obj["verdict"].(json.String) or_else "", "faster")
+			}
+		}
+	} else {
+		testing.expectf(t, false, "comparison json failed to parse: %v", p_err)
+	}
+
+	cmp_csv := store.format_comparison_csv(cmp_rep, "c01", "c02", context.allocator)
+	defer delete(cmp_csv)
+	testing.expect(
+		t,
+		strings.contains(cmp_csv, "baseline,candidate,full_name,"),
+		"comparison csv header",
+	)
+	testing.expect(
+		t,
+		strings.contains(cmp_csv, "c01,c02,core::op,100.000000,75.000000"),
+		"comparison csv row",
+	)
+
+	json_1v1 := store.format_1v1_json(rep_1v1, context.allocator)
+	defer delete(json_1v1)
+	if parsed, p_err := json.parse(transmute([]u8)json_1v1, allocator = context.allocator);
+	   p_err == .None {
+		defer json.destroy_value(parsed, context.allocator)
+		obj, is_obj := parsed.(json.Object)
+		testing.expect(t, is_obj, "1v1 json root must be object")
+		if is_obj {
+			testing.expect_value(t, obj["lang_a"].(json.String) or_else "", "odin")
+			testing.expect_value(t, obj["lang_b"].(json.String) or_else "", "zig")
+			rows_arr, has_rows := obj["rows"].(json.Array)
+			testing.expect(t, has_rows && len(rows_arr) == 1, "expected 1 1v1 row")
+			if has_rows && len(rows_arr) == 1 {
+				row_obj := rows_arr[0].(json.Object)
+				testing.expect_value(t, row_obj["faster_lang"].(json.String) or_else "", "odin")
+				testing.expect_value(
+					t,
+					row_obj["footprint_mismatch"].(json.Boolean) or_else false,
+					true,
+				)
+			}
+		}
+	} else {
+		testing.expectf(t, false, "1v1 json failed to parse: %v", p_err)
+	}
+
+	csv_1v1 := store.format_1v1_csv(rep_1v1, context.allocator)
+	defer delete(csv_1v1)
+	testing.expect(t, strings.contains(csv_1v1, "lang_a,lang_b,full_name,"), "1v1 csv header")
+	testing.expect(
+		t,
+		strings.contains(csv_1v1, "odin,zig,core::op,10,50.000000,0.000000,100.000000"),
+		"1v1 csv row",
+	)
+
+	// 6. Wildcard "--lang all" loads snapshot and commit-series across multiple languages.
+	st_multi, m_ok := store.store_open(":memory:", context.allocator)
+	testing.expect(t, m_ok, "open in-memory store for wildcard lang test")
+	if m_ok {
+		defer store.store_close(&st_multi)
+		p_odin := _make_store_test_packet("r-o1", "ml01", 40.0)
+		defer hugi.packet_destroy(&p_odin)
+		p_zig := _make_store_test_packet("r-z1", "ml01", 80.0)
+		defer hugi.packet_destroy(&p_zig)
+		delete(p_zig.lang)
+		p_zig.lang = strings.clone("zig")
+
+		testing.expect(t, store.store_ingest_packet(&st_multi, p_odin), "ingest odin packet")
+		testing.expect(t, store.store_ingest_packet(&st_multi, p_zig), "ingest zig packet")
+
+		all_snap := store.store_load_pooled_records(&st_multi, "all")
+		defer store.pooled_records_destroy(all_snap)
+		testing.expect_value(t, len(all_snap), 6)
+		if len(all_snap) == 6 {
+			testing.expect_value(t, all_snap[0].lang, "odin")
+			testing.expect_value(t, all_snap[2].lang, "odin")
+			testing.expect_value(t, all_snap[3].lang, "zig")
+			testing.expect_value(t, all_snap[5].lang, "zig")
+		}
+
+		all_series := store.store_load_commit_series_records(&st_multi, "*")
+		defer store.pooled_records_destroy(all_series)
+		testing.expect_value(t, len(all_series), 6)
+	}
 }

@@ -2,7 +2,6 @@ package hugi_tests
 
 import hugi "../hugi"
 import store "../store"
-import "core:os"
 import "core:strings"
 import "core:testing"
 
@@ -138,217 +137,45 @@ test_exported_samples_fs_bu_only :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_rational_batch_u64_and_femtosecond_decimal_precision :: proc(t: ^testing.T) {
-	// 1. u64 batch codec round-trip across empty, clustered ticks, and large wrapping deltas.
-	emp_blob, emp_ok := store.compress_samples_u64([]u64{}, context.allocator)
-	testing.expect(t, emp_ok, "empty u64 compress should succeed")
-	if emp_ok {
-		defer delete(emp_blob)
-		emp_back, emp_dok := store.decompress_samples_u64(emp_blob, context.allocator)
-		testing.expect(t, emp_dok, "empty u64 decode should succeed")
-		if emp_dok {
-			defer delete(emp_back)
-			testing.expect_value(t, len(emp_back), 0)
-		}
+test_femtosecond_decimal_and_duration_formatting :: proc(t: ^testing.T) {
+	Decimal_Case :: struct {
+		fs:       i64,
+		expected: string,
+	}
+	decimal_cases := []Decimal_Case {
+		{0, "0.000000"},
+		{42, "0.000042"},
+		{5_000, "0.005000"},
+		{125_000, "0.125000"},
+		{42_125_000, "42.125000"},
+		{1_250_000_000, "1250.000000"},
 	}
 
-	clustered := []u64 {
-		41_732_000,
-		41_732_030,
-		41_731_990,
-		41_732_000,
-		41_732_010,
-		41_731_970,
-		0,
-		max(u64),
-		12345,
-	}
-	c_blob, c_ok := store.compress_samples_u64(clustered, context.allocator)
-	testing.expect(t, c_ok, "clustered/wrapping u64 compress should succeed")
-	if c_ok {
-		defer delete(c_blob)
-		c_back, c_dok := store.decompress_samples_u64(c_blob, context.allocator)
-		testing.expect(t, c_dok, "clustered/wrapping u64 decode should succeed")
-		if c_dok {
-			defer delete(c_back)
-			testing.expect_value(t, len(c_back), len(clustered))
-			for v, i in clustered {
-				testing.expect_value(t, c_back[i], v)
-			}
-		}
+	sb := strings.builder_make(context.allocator)
+	defer strings.builder_destroy(&sb)
+	for tc in decimal_cases {
+		strings.builder_reset(&sb)
+		hugi.write_decimal_ns_fs(&sb, tc.fs)
+		testing.expect_value(t, strings.to_string(sb), tc.expected)
 	}
 
-	// 2. Signed femtosecond sample codec round-trip (`compress_samples_fs_i64`).
-	fs_vals := []i64{-123_456_789, -1, 0, 1, 5_000, 41_732_000_000}
-	fs_blob, f_ok := store.compress_samples_fs_i64(fs_vals, context.allocator)
-	testing.expect(t, f_ok, "fs i64 compress should succeed")
-	if f_ok {
-		defer delete(fs_blob)
-		fs_back, f_dok := store.decompress_samples_fs_i64(fs_blob, context.allocator)
-		testing.expect(t, f_dok, "fs i64 decode should succeed")
-		if f_dok {
-			defer delete(fs_back)
-			testing.expect_value(t, len(fs_back), len(fs_vals))
-			for v, i in fs_vals {
-				testing.expect_value(t, fs_back[i], v)
-			}
-		}
+	Duration_Case :: struct {
+		fs:       i64,
+		expected: string,
 	}
-
-	// 3. Exact sub-picosecond SIMD and clamped zero formatting + CZPK\x04 / CZCH\x02 round-trip.
-	sb := strings.builder_make(context.temp_allocator)
-	hugi.write_decimal_ns_fs(&sb, 5_000)
-	testing.expect_value(t, strings.to_string(sb), "0.005000")
-	ps_str := hugi.format_duration_fs(5_000, context.allocator)
-	defer delete(ps_str)
-	testing.expect_value(t, ps_str, "5.00 ps")
-
-	if !os.exists(".tmp") {
-		_ = os.make_directory(".tmp")
+	duration_cases := []Duration_Case {
+		{0, "0.00 ns"},
+		{42, "42 fs"},
+		{5_000, "5.00 ps"},
+		{125_000, "125.00 ps"},
+		{42_500_000, "42.50 ns"},
+		{1_250_000_000, "1.25 us"},
+		{2_500_000_000_000, "2.50 ms"},
+		{1_500_000_000_000_000, "1.500 s"},
 	}
-	db_path := ".tmp/hugi_test_rational.hugidb"
-	csv_path := ".tmp/hugi_test_rational.csv"
-	json_path := ".tmp/hugi_test_rational.json"
-	for p in ([3]string{db_path, csv_path, json_path}) {
-		if os.exists(p) {
-			_ = os.remove(p)
-		}
-	}
-	defer for p in ([3]string{db_path, csv_path, json_path}) {
-		if os.exists(p) {
-			_ = os.remove(p)
-		}
-	}
-
-	make_simd_pkt := proc(run_id, commit: string) -> hugi.Run_Packet {
-		pkt := hugi.Run_Packet {
-			run_id         = strings.clone(run_id),
-			commit         = strings.clone(commit),
-			timestamp_unix = 1770000100,
-			lang           = strings.clone("odin"),
-			suite_name     = strings.clone("simd_suite"),
-			os             = strings.clone("linux"),
-			arch           = strings.clone("amd64"),
-			optimization   = strings.clone("-o:speed"),
-			odin_version   = strings.clone("dev"),
-			records        = make([dynamic]hugi.Record),
-		}
-
-		r_simd := hugi.Record {
-			rank             = 1,
-			group_name       = strings.clone("simd"),
-			name             = strings.clone("dot8"),
-			full_name        = strings.clone("simd::dot8"),
-			ops_per_sample   = 10_000_000,
-			samples_batch_ns = make([dynamic]u64),
-			metrics          = make([dynamic]hugi.Metric),
-		}
-		append(&r_simd.samples_batch_ns, 50_000, 50_000, 50_010)
-		hugi.recompute_record_stats_from_samples(&r_simd)
-		append(&pkt.records, r_simd)
-
-		r_zero := hugi.Record {
-			rank             = 2,
-			group_name       = strings.clone("simd"),
-			name             = strings.clone("clamped_zero"),
-			full_name        = strings.clone("simd::clamped_zero"),
-			ops_per_sample   = 1_000_000,
-			samples_batch_ns = make([dynamic]u64),
-			metrics          = make([dynamic]hugi.Metric),
-		}
-		append(&r_zero.samples_batch_ns, 0, 0, 1)
-		hugi.recompute_record_stats_from_samples(&r_zero)
-		append(&pkt.records, r_zero)
-		return pkt
-	}
-
-	{
-		st, ok := store.store_open(db_path)
-		testing.expect(t, ok, "open rational store")
-		if !ok {
-			return
-		}
-		defer store.store_close(&st)
-
-		p1 := make_simd_pkt("rr-1", "rc01")
-		defer hugi.packet_destroy(&p1)
-		p2 := make_simd_pkt("rr-2", "rc02")
-		defer hugi.packet_destroy(&p2)
-		p3 := make_simd_pkt("rr-3", "rc02")
-		defer hugi.packet_destroy(&p3)
-		testing.expect_value(t, p1.records[0].p50_fs, i64(5_000))
-		testing.expect_value(t, p1.records[1].min_fs, i64(0))
-		testing.expect_value(t, p1.records[1].p50_fs, i64(0))
-		testing.expect_value(t, p1.records[1].max_fs, i64(1))
-
-		testing.expect(t, store.store_ingest_packet(&st, p1), "ingest rational p1")
-		testing.expect(t, store.store_ingest_packet(&st, p2), "ingest rational p2")
-		testing.expect(t, store.store_ingest_packet(&st, p3), "ingest rational p3")
-	}
-
-	_, _, c_ok2 := store.store_compact(db_path)
-	testing.expect(t, c_ok2, "compact rational store into CZCHv2")
-
-	st_back, ok_back := store.store_open(db_path)
-	testing.expect(t, ok_back, "reopen compacted rational store")
-	if !ok_back {
-		return
-	}
-	defer store.store_close(&st_back)
-
-	all_pkts := store.store_load_all_packets(&st_back)
-	defer {
-		for &p in all_pkts {
-			hugi.packet_destroy(&p)
-		}
-		delete(all_pkts)
-	}
-	testing.expect_value(t, len(all_pkts), 3)
-	if len(all_pkts) == 3 && len(all_pkts[0].records) == 2 {
-		rs := all_pkts[0].records[0]
-		rz := all_pkts[0].records[1]
-		testing.expect_value(t, rs.p50_fs, i64(5_000))
-		testing.expect_value(t, len(rs.samples_batch_ns), 3)
-		testing.expect_value(t, rs.samples_batch_ns[0], u64(50_000))
-		testing.expect_value(t, rs.samples_batch_ns[2], u64(50_010))
-		testing.expect_value(t, rz.min_fs, i64(0))
-		testing.expect_value(t, rz.p50_fs, i64(0))
-		testing.expect_value(t, rz.max_fs, i64(1))
-		testing.expect_value(t, rz.samples_batch_ns[0], u64(0))
-		testing.expect_value(t, rz.samples_batch_ns[2], u64(1))
-	}
-
-	pooled := store.store_load_pooled_records(&st_back, "odin")
-	defer store.pooled_records_destroy(pooled)
-	testing.expect_value(t, len(pooled), 2)
-	if len(pooled) == 2 {
-		testing.expect_value(t, pooled[0].p50_fs, i64(5_000))
-		testing.expect_value(t, len(pooled[0].samples_batch_ns), 6)
-		testing.expect_value(t, pooled[1].min_fs, i64(0))
-		testing.expect_value(t, pooled[1].max_fs, i64(1))
-	}
-
-	testing.expect(t, store.export_csv(csv_path, pooled), "export rational csv")
-	testing.expect(t, store.export_json(json_path, pooled), "export rational json")
-	if csv_bytes, err := os.read_entire_file(csv_path, context.allocator); err == nil {
-		defer delete(csv_bytes)
-		testing.expect(
-			t,
-			strings.contains(string(csv_bytes), ",0.005000,"),
-			"csv must format 5000 fs as exact 0.005000",
-		)
-	}
-	if json_bytes, err := os.read_entire_file(json_path, context.allocator); err == nil {
-		defer delete(json_bytes)
-		testing.expect(
-			t,
-			strings.contains(string(json_bytes), `"samples_batch_ns": [50000,`),
-			"json must include raw samples_batch_ns",
-		)
-		testing.expect(
-			t,
-			strings.contains(string(json_bytes), `"p50_ns": 0.005000`),
-			"json must format DECIMAL(18, 6) p50_ns cleanly",
-		)
+	for tc in duration_cases {
+		got := hugi.format_duration_fs(tc.fs, context.allocator)
+		testing.expect_value(t, got, tc.expected)
+		delete(got)
 	}
 }

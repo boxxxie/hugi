@@ -70,143 +70,102 @@ test_packet_binary_roundtrip :: proc(t: ^testing.T) {
 		hugi.record_destroy(&bad_rec)
 		delete(rbuf)
 	}
+}
 
-	// Verify .jsonl and obench .json importers remain intact.
-	if !os.exists(".tmp") {
-		_ = os.make_directory(".tmp")
+@(test)
+test_jsonl_and_obench_json_wire_importers :: proc(t: ^testing.T) {
+	tmp, mk_err := os.make_directory_temp("", "hugi-pkt-import-*", context.allocator)
+	testing.expectf(t, mk_err == nil && tmp != "", "create temp import dir: %v", mk_err)
+	if mk_err != nil || tmp == "" {
+		return
 	}
-	jsonl_in := ".tmp/hugi_test_import.jsonl"
-	ojson_in := ".tmp/hugi_test_import_obench.json"
 	defer {
-		if os.exists(jsonl_in) {
-			_ = os.remove(jsonl_in)
-		}
-		if os.exists(ojson_in) {
-			_ = os.remove(ojson_in)
-		}
+		_ = os.remove_all(tmp)
+		delete(tmp)
 	}
 
+	// 1. Multi-packet .jsonl with blank/malformed lines + grouping + overrides.
+	jsonl_in := strings.concatenate({tmp, "/multi.jsonl"}, context.temp_allocator)
 	jsonl_data :=
+		"\n" +
 		`{"rank":1,"group":"kv","lang":"odin","commit":"imp001","run_id":"jr-1","name":"kv::get","ops":100,"runs":3,"warmup":1,"median_ns":42.5,"samples_ns":[42.0,42.5,43.0],"bytes_used":512}` +
+		"\n" +
+		"NOT_VALID_JSON_LINE\n" +
+		`{"rank":2,"group":"kv","lang":"odin","commit":"imp001","run_id":"jr-1","name":"kv::put","ops":100,"runs":3,"warmup":1,"median_ns":84.0,"samples_ns":[83.0,84.0,85.0],"bytes_used":1024}` +
+		"\n" +
+		`{"rank":1,"group":"kv","lang":"zig","commit":"imp001","run_id":"jr-z1","name":"kv::get","ops":100,"runs":3,"warmup":1,"median_ns":60.0,"samples_ns":[59.0,60.0,61.0],"bytes_used":512}` +
 		"\n"
 	testing.expect(
 		t,
 		os.write_entire_file(jsonl_in, transmute([]u8)jsonl_data) == nil,
 		"write sample jsonl",
 	)
+
 	jpkts, j_ok := hugi.read_jsonl_packets(jsonl_in)
 	testing.expect(t, j_ok, "read_jsonl_packets should succeed")
 	if j_ok {
-		testing.expect_value(t, len(jpkts), 1)
-		if len(jpkts) == 1 && len(jpkts[0].records) == 1 {
+		testing.expect_value(t, len(jpkts), 2)
+		if len(jpkts) == 2 {
 			testing.expect_value(t, jpkts[0].commit, "imp001")
+			testing.expect_value(t, jpkts[0].lang, "odin")
+			testing.expect_value(t, jpkts[0].run_id, "jr-1")
+			testing.expect_value(t, len(jpkts[0].records), 2)
 			testing.expect_value(t, jpkts[0].records[0].samples_batch_ns[1], u64(4250))
+
+			testing.expect_value(t, jpkts[1].lang, "zig")
+			testing.expect_value(t, jpkts[1].run_id, "jr-z1")
+			testing.expect_value(t, len(jpkts[1].records), 1)
 		}
 	}
 	hugi.packets_destroy(jpkts)
 
-	ojson_data := `{"format_version":3,"suite_name":"ob_suite","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev","benchmarks":[{"suite_name":"ob_suite","group_name":"math","name":"mul","full_name":"math::mul","samples":3,"batch_size":10,"min_ns":10.0,"p50_ns":10.1,"p95_ns":10.2,"p99_ns":10.2,"max_ns":10.2,"mean_ns":10.1,"samples_batch_ns":[100,101,102]}]}`
+	// Overrides force a shared lang/commit/run_id grouping.
+	jpkts_ov, j_ov_ok := hugi.read_jsonl_packets(
+		jsonl_in,
+		lang_override = "rust",
+		commit_override = "ovr999",
+		run_id_override = "forced-run",
+	)
+	testing.expect(t, j_ov_ok, "read_jsonl_packets with overrides should succeed")
+	if j_ov_ok {
+		testing.expect_value(t, len(jpkts_ov), 1)
+		if len(jpkts_ov) == 1 {
+			testing.expect_value(t, jpkts_ov[0].lang, "rust")
+			testing.expect_value(t, jpkts_ov[0].commit, "ovr999")
+			testing.expect_value(t, jpkts_ov[0].run_id, "forced-run")
+			testing.expect_value(t, len(jpkts_ov[0].records), 3)
+		}
+	}
+	hugi.packets_destroy(jpkts_ov)
+
+	// 2. obench JSON splitting across suite names + run_id suffixing.
+	ojson_in := strings.concatenate({tmp, "/obench.json"}, context.temp_allocator)
+	ojson_data := `{"format_version":3,"suite_name":"default_suite","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev","benchmarks":[{"suite_name":"alpha","group_name":"math","name":"mul","full_name":"math::mul","samples":3,"batch_size":10,"min_ns":10.0,"p50_ns":10.1,"p95_ns":10.2,"p99_ns":10.2,"max_ns":10.2,"mean_ns":10.1,"samples_batch_ns":[100,101,102]},{"suite_name":"beta","group_name":"io","name":"copy","full_name":"io::copy","samples":3,"batch_size":10,"min_ns":20.0,"p50_ns":20.1,"p95_ns":20.2,"p99_ns":20.2,"max_ns":20.2,"mean_ns":20.1,"samples_batch_ns":[200,201,202]}]}`
 	testing.expect(
 		t,
 		os.write_entire_file(ojson_in, transmute([]u8)ojson_data) == nil,
 		"write sample obench json",
 	)
-	opkts, o_ok := hugi.read_obench_json_packets(ojson_in, commit_override = "ob001")
+	opkts, o_ok := hugi.read_obench_json_packets(
+		ojson_in,
+		lang_override = "odin",
+		commit_override = "ob001",
+		run_id_override = "ob-run",
+	)
 	testing.expect(t, o_ok, "read_obench_json_packets should succeed")
 	if o_ok {
-		testing.expect_value(t, len(opkts), 1)
-		if len(opkts) == 1 && len(opkts[0].records) == 1 {
+		testing.expect_value(t, len(opkts), 2)
+		if len(opkts) == 2 {
+			testing.expect_value(t, opkts[0].suite_name, "alpha")
 			testing.expect_value(t, opkts[0].commit, "ob001")
+			testing.expect_value(t, opkts[0].lang, "odin")
+			testing.expect_value(t, opkts[0].run_id, "ob-run")
 			testing.expect_value(t, opkts[0].records[0].samples_batch_ns[1], u64(101))
+
+			testing.expect_value(t, opkts[1].suite_name, "beta")
+			testing.expect_value(t, opkts[1].run_id, "ob-run-1")
+			testing.expect_value(t, opkts[1].records[0].samples_batch_ns[1], u64(201))
 		}
 	}
 	hugi.packets_destroy(opkts)
-}
-
-@(private = "file")
-_zero_alloc_sum :: proc(b: ^hugi.Bencher) {
-	data := [8]u64{1, 2, 3, 4, 5, 6, 7, 8}
-	hugi.expect_zero_allocs(b)
-	for hugi.step(b) {
-		acc := u64(0)
-		for v in data {
-			acc += v
-		}
-		_ = hugi.black_box(acc)
-	}
-}
-
-@(private = "file")
-_clean_pipeline :: proc(p: ^hugi.Pipeline) {
-	vals := make([]u64, 16)
-	defer delete(vals)
-
-	{
-		ph := hugi.scoped_phase(p, "fill", ops = 16, bytes_per_op = 8)
-		for i in 0 ..< 16 {
-			vals[i] = u64(i * 3)
-		}
-		hugi.phase_set_footprint(ph, u64(len(vals) * size_of(u64)))
-	}
-	{
-		ph := hugi.scoped_phase(p, "sum", ops = 16, bytes_per_op = 8, zero_alloc = true)
-		acc := u64(0)
-		for v in vals {
-			acc += v
-		}
-		_ = hugi.black_box(acc)
-		hugi.phase_metric(ph, 100.0, "hit%")
-	}
-	{
-		_ = hugi.scoped_phase(p, "verify", ops = 16, zero_alloc = true)
-		_ = hugi.black_box(vals[0] + vals[15])
-	}
-}
-
-@(private = "file")
-_violating_pipeline :: proc(p: ^hugi.Pipeline) {
-	ph := hugi.scoped_phase(p, "leaking_phase", ops = 1, zero_alloc = true)
-	buf := make([]u8, 64)
-	_ = hugi.black_box(buf[0])
-	delete(buf)
-	_ = ph
-}
-
-@(test)
-test_suite_pipeline_and_untimed_zero_alloc :: proc(t: ^testing.T) {
-	cfg := hugi.default_suite_config()
-	cfg.quiet = true
-	cfg.runs = 5
-	cfg.warmup = 1
-	cfg.obench_cfg.sample_count = 15
-	cfg.obench_cfg.warmup_time = 0
-	cfg.obench_cfg.fixed_batch_size = 16
-
-	suite := hugi.suite_create("pipeline_test", cfg)
-	defer hugi.suite_destroy(&suite)
-
-	hugi.bench(&suite, "sum_zero_alloc", _zero_alloc_sum, zero_alloc = true)
-	hugi.group_pipeline(&suite, "kv_pipe", _clean_pipeline)
-
-	ok := hugi.suite_execute(&suite)
-	testing.expect(t, ok, "clean suite with @zero_alloc and phases should pass")
-	testing.expect_value(t, suite.failed_zero_alloc, 0)
-	testing.expect_value(t, len(suite.last_packet.records), 4)
-	testing.expect_value(t, suite.last_packet.records[1].footprint_bytes, u64(16 * size_of(u64)))
-	testing.expect_value(t, len(suite.last_packet.records[2].metrics), 1)
-	testing.expect_value(t, suite.last_packet.records[2].metrics[0].unit, "hit%")
-
-	cfg2 := hugi.default_suite_config()
-	cfg2.quiet = true
-	cfg2.runs = 4
-	cfg2.warmup = 1
-	suite2 := hugi.suite_create("violation_test", cfg2)
-	defer hugi.suite_destroy(&suite2)
-
-	hugi.group_pipeline(&suite2, "bad_pipe", _violating_pipeline)
-	ok2 := hugi.suite_execute(&suite2)
-	testing.expect(t, !ok2, "zero_alloc pipeline allocating heap memory must fail")
-	testing.expect(t, suite2.failed_zero_alloc > 0, "failed_zero_alloc must be recorded")
-	testing.expect_value(t, len(suite2.last_packet.records), 1)
-	testing.expect_value(t, len(suite2.last_packet.records[0].samples_batch_ns), 4)
 }

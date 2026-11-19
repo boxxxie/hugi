@@ -1,0 +1,556 @@
+package hugi_specs
+
+import "core:testing"
+
+@(test)
+spec_cli_version_help_ingest_history_and_inspect_workflow :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 15)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+
+	upon_running_cli(&w, "version")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "hugi 0.1.0")
+	}
+
+	upon_running_cli(&w, "help")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "USAGE:")
+		shows_stdout_contains(&w, out, "COMMANDS:")
+	}
+
+	given_packet_file(
+		&w,
+		"pkt-odin",
+		commit = "cli101",
+		lang = "odin",
+		run_id = "cli-r1",
+		benches = []Bench_Observation {
+			{name = "get", median_ns = 45.0, footprint_bytes = 1024},
+			{name = "put", median_ns = 95.0, footprint_bytes = 2048},
+		},
+	)
+	given_legacy_jsonl_fixture(
+		&w,
+		"pkt-zig",
+		commit = "cli101",
+		lang = "zig",
+		run_id = "cli-z1",
+		full_name = "core::get",
+		median_ns = 80.0,
+		ops = 100,
+		footprint_bytes = 1024,
+	)
+	given_obench_report_fixture(
+		&w,
+		"pkt-obench",
+		suite_name = "ob_cli",
+		group_name = "math",
+		bench_name = "mul",
+		median_ns = 12.1,
+		batch_size = 10,
+	)
+
+	upon_running_cli(
+		&w,
+		"ingest",
+		"--db",
+		"@db",
+		"@pkt-odin",
+		"@pkt-zig",
+		"@pkt-obench",
+		"--commit",
+		"cli101",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Ingested 3 packet(s), 4 record(s)")
+	}
+
+	upon_running_cli(&w, "history", "--db", "@db", "--commits")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "cli101")
+		shows_stdout_contains(&w, out, "odin,zig")
+	}
+
+	upon_running_cli(&w, "history", "--db", "@db", "--runs", "--limit", "2")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "cli-z1")
+		shows_stdout_contains(&w, out, "ob_cli")
+		shows_stdout_does_not_contain(&w, out, "cli-r1")
+	}
+
+	upon_running_cli(&w, "inspect", "--db", "@db", "--lang", "odin", "get")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Inspect (odin, 1 benchmarks)")
+		shows_stdout_contains(&w, out, "core::get")
+		shows_stdout_contains(&w, out, "Quantile Breakdown:")
+	}
+
+	upon_running_cli(&w, "inspect", "--db", "@db", "--lang", "odin", "--run", "cli-r1")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Inspect (odin, 2 benchmarks)")
+		shows_stdout_contains(&w, out, "core::put")
+	}
+
+	upon_running_cli(&w, "inspect", "--db", "@db", "--commit", "cli101", "--lang", "zig")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Inspect (zig, 1 benchmarks)")
+		shows_stdout_contains(&w, out, "core::get")
+	}
+}
+
+@(test)
+spec_cli_run_no_db_overlay_and_baseline_regression_gate :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 45)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_cli_bench_package(&w, "clean-pkg", work_iters = 32)
+	given_cli_bench_package(&w, "slow-pkg", work_iters = 25_000)
+	given_cli_bench_package(&w, "bad-pkg", work_iters = 16, violate_zero_alloc = true)
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@clean-pkg",
+		"--no-db",
+		"--db",
+		"@nodb",
+		"--quiet",
+		"--runs",
+		"2",
+		"--warmup",
+		"0",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+	then_store_file_does_not_exist(&w, "nodb")
+
+	given_packet_file(
+		&w,
+		"base-pkt",
+		commit = "base00",
+		lang = "odin",
+		run_id = "r-base00",
+		benches = []Bench_Observation {
+			{
+				name = "work",
+				group = "pipe",
+				median_ns = 5.0,
+				spread_ns = 0.05,
+				samples = 8,
+				ops_per_sample = 1,
+			},
+		},
+	)
+	upon_running_cli(&w, "ingest", "--db", "@db", "@base-pkt")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@clean-pkg",
+		"--db",
+		"@db",
+		"--overlay",
+		"--commit",
+		"trial01",
+		"--quiet",
+		"--runs",
+		"2",
+		"--warmup",
+		"0",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "disk untouched")
+	}
+
+	upon_running_cli(&w, "history", "--db", "@db", "--commits")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "base00")
+		shows_stdout_does_not_contain(&w, out, "trial01")
+	}
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@slow-pkg",
+		"--db",
+		"@db",
+		"--commit",
+		"reg01",
+		"--baseline-commit",
+		"base00",
+		"--fail-on-regression",
+		"--quiet",
+		"--runs",
+		"4",
+		"--warmup",
+		"0",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 1)
+		shows_stdout_contains(&w, out, "REGRESSION")
+	}
+
+	upon_running_cli(&w, "run", "@bad-pkg", "--no-db", "--runs", "2", "--warmup", "0")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 1)
+		shows_stdout_contains(&w, out, "[FAIL: @zero_alloc]")
+	}
+}
+
+@(test)
+spec_cli_compare_commits_runs_and_last_fallback :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 15)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_packet_file(
+		&w,
+		"pkt-base",
+		commit = "base01",
+		lang = "odin",
+		run_id = "r-base",
+		benches = []Bench_Observation {
+			{name = "scan", median_ns = 100.0, samples = 12, spread_ns = 0.2},
+		},
+	)
+	given_packet_file(
+		&w,
+		"pkt-fast",
+		commit = "fast02",
+		lang = "odin",
+		run_id = "r-fast",
+		benches = []Bench_Observation {
+			{name = "scan", median_ns = 65.0, samples = 12, spread_ns = 0.2},
+		},
+	)
+	given_packet_file(
+		&w,
+		"pkt-reg",
+		commit = "cand03",
+		lang = "odin",
+		run_id = "r-cand",
+		benches = []Bench_Observation {
+			{name = "scan", median_ns = 145.0, samples = 12, spread_ns = 0.2},
+		},
+	)
+
+	upon_running_cli(&w, "ingest", "--db", "@db", "@pkt-base", "@pkt-fast", "@pkt-reg")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@db",
+		"--commits",
+		"base01..fast02",
+		"--threshold",
+		"5.0",
+		"--fail-on-regression",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Comparison: base01 -> fast02")
+		shows_stdout_contains(&w, out, "improved: 1")
+		shows_stdout_contains(&w, out, "FASTER")
+	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@db",
+		"--commits",
+		"base01..cand03",
+		"--threshold",
+		"5.0",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Comparison: base01 -> cand03")
+		shows_stdout_contains(&w, out, "REGRESSION")
+	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@db",
+		"--runs",
+		"r-base..r-cand",
+		"--fail-on-regression",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 1)
+		shows_stdout_contains(&w, out, "Comparison: r-base -> r-cand")
+		shows_stdout_contains(&w, out, "REGRESSION")
+	}
+
+	upon_running_cli(&w, "compare", "--db", "@db", "--last", "--fail-on-regression")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 1)
+		shows_stdout_contains(&w, out, "Comparison: fast02 -> cand03")
+		shows_stdout_contains(&w, out, "regressed: 1")
+		shows_stdout_contains(&w, out, "REGRESSION")
+	}
+
+	given_packet_file(
+		&w,
+		"pkt-s1",
+		commit = "only01",
+		lang = "odin",
+		run_id = "r-s1",
+		benches = []Bench_Observation {
+			{name = "scan", median_ns = 100.0, samples = 12, spread_ns = 0.2},
+		},
+	)
+	given_packet_file(
+		&w,
+		"pkt-s2",
+		commit = "only01",
+		lang = "odin",
+		run_id = "r-s2",
+		benches = []Bench_Observation {
+			{name = "scan", median_ns = 145.0, samples = 12, spread_ns = 0.2},
+		},
+	)
+	upon_running_cli(&w, "ingest", "--db", "@single-commit-db", "@pkt-s1", "@pkt-s2")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+	upon_running_cli(&w, "compare", "--db", "@single-commit-db", "--last", "--fail-on-regression")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 1)
+		shows_stdout_contains(&w, out, "Comparison: r-s1 -> r-s2")
+		shows_stdout_contains(&w, out, "REGRESSION")
+	}
+}
+
+@(test)
+spec_cli_compare_1v1_reports_winner_mismatch_and_unmatched :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 15)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_packet_file(
+		&w,
+		"pkt-o",
+		commit = "cmp99",
+		lang = "odin",
+		run_id = "o-1",
+		benches = []Bench_Observation {
+			{name = "fast_op", median_ns = 50.0, footprint_bytes = 4096},
+			{name = "mem_op", median_ns = 120.0, footprint_bytes = 4096},
+			{name = "odin_only", median_ns = 40.0, footprint_bytes = 1024},
+		},
+	)
+	given_packet_file(
+		&w,
+		"pkt-z",
+		commit = "cmp99",
+		lang = "zig",
+		run_id = "z-1",
+		benches = []Bench_Observation {
+			{name = "fast_op", median_ns = 100.0, footprint_bytes = 4096},
+			{name = "mem_op", median_ns = 118.0, footprint_bytes = 16384},
+		},
+	)
+
+	upon_running_cli(&w, "ingest", "--db", "@db", "@pkt-o", "@pkt-z")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+
+	upon_running_cli(&w, "compare-1v1", "--db", "@db", "--langs", "odin,zig", "--commit", "cmp99")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Cross-Language 1v1: odin vs zig")
+		shows_stdout_contains(&w, out, "footprint mismatches: 1")
+		shows_stdout_contains(&w, out, "[MISMATCH]")
+		shows_stdout_contains(&w, out, "Only in odin (1):")
+		shows_stdout_contains(&w, out, "core::odin_only")
+	}
+}
+
+@(test)
+spec_cli_export_all_formats_filter_readme_and_compact_workflow :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 15)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_readme_file(
+		&w,
+		"readme.md",
+		"# Benchmarks\n\n<!-- BEGIN_BENCHMARK_TABLE -->\nstale\n<!-- END_BENCHMARK_TABLE -->\n",
+	)
+	given_packet_file(
+		&w,
+		"pkt-1",
+		commit = "ex01",
+		lang = "odin",
+		run_id = "ex-r1",
+		benches = []Bench_Observation {
+			{name = "alpha", median_ns = 60.0, footprint_bytes = 1024},
+			{name = "beta", median_ns = 180.0, footprint_bytes = 4096},
+		},
+	)
+	given_packet_file(
+		&w,
+		"pkt-2",
+		commit = "ex02",
+		lang = "odin",
+		run_id = "ex-r2",
+		benches = []Bench_Observation {
+			{name = "alpha", median_ns = 55.0, footprint_bytes = 1024},
+			{name = "beta", median_ns = 175.0, footprint_bytes = 4096},
+		},
+	)
+
+	upon_running_cli(&w, "ingest", "--db", "@db", "@pkt-1", "@pkt-2")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+
+	upon_running_cli(&w, "export", "--db", "@db", "--all-commits", "--out", "@series.arrow")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Exported 4 record(s) (arrow)")
+	}
+	then_exported_artifact_valid(&w, "series.arrow", .Arrow, expected_rows = 4, expected_cols = 35)
+
+	upon_running_cli(&w, "export", "--db", "@db", "--all-runs", "--out", "@runs.parquet")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Exported 4 record(s) (parquet)")
+	}
+	then_exported_artifact_valid(
+		&w,
+		"runs.parquet",
+		.Parquet,
+		expected_rows = 4,
+		expected_cols = 35,
+	)
+
+	upon_running_cli(&w, "export", "--db", "@db", "--out", "@snap.csv")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Exported 2 record(s) (csv)")
+	}
+	then_exported_artifact_valid(&w, "snap.csv", .Csv, expected_rows = 2, expected_cols = 34)
+
+	upon_running_cli(&w, "export", "--db", "@db", "--filter", "alpha", "--out", "@alpha.csv")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Exported 1 record(s) (csv)")
+	}
+	then_exported_artifact_valid(&w, "alpha.csv", .Csv, expected_rows = 1, expected_cols = 34)
+	then_file_contains(&w, "alpha.csv", "core::alpha")
+	then_file_does_not_contain(&w, "alpha.csv", "core::beta")
+
+	upon_running_cli(&w, "export", "--db", "@db", "--update-readme", "@readme.md")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Updated benchmark table")
+	}
+	then_file_contains(&w, "readme.md", "core::alpha")
+	then_file_does_not_contain(&w, "readme.md", "\nstale\n")
+
+	upon_running_cli(&w, "compact", "--db", "@db", "--keep-hot", "0")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Compacted ")
+	}
+
+	upon_running_cli(&w, "history", "--db", "@db", "--runs")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "ex-r1")
+		shows_stdout_contains(&w, out, "ex-r2")
+	}
+}
+
+@(test)
+spec_cli_invalid_invocations_return_nonzero_and_diagnostics_matrix :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 15)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+
+	cases := []CLI_Guard_Case {
+		cli_guard_case("unknown-cmd", []string{"bogus-cmd"}, "unknown command 'bogus-cmd'"),
+		cli_guard_case(
+			"ingest-no-files",
+			[]string{"ingest", "--db", "@db"},
+			"expected at least one input file",
+		),
+		cli_guard_case(
+			"ingest-missing-file",
+			[]string{"ingest", "--db", "@db", "@missing.hpk"},
+			"file not found",
+		),
+		cli_guard_case(
+			"compare-bad-range",
+			[]string{"compare", "--db", "@db", "--commits", "onlyone"},
+			"--commits requires <base>..<cand>",
+		),
+		cli_guard_case(
+			"compare-1v1-bad-langs",
+			[]string{"compare-1v1", "--db", "@db", "--langs", "odin"},
+			"--langs requires two comma-separated languages",
+		),
+		cli_guard_case(
+			"export-conflicting-scope",
+			[]string{"export", "--db", "@db", "--all-commits", "--all-runs", "--out", "@a.csv"},
+			"--all-commits and --all-runs cannot be combined",
+		),
+		cli_guard_case(
+			"export-missing-out",
+			[]string{"export", "--db", "@db", "--format", "csv"},
+			"--out <path>",
+		),
+		cli_guard_case(
+			"compact-negative-keep-hot",
+			[]string{"compact", "--db", "@db", "--keep-hot", "-2"},
+			"invalid --keep-hot",
+		),
+	}
+
+	for tc in cases {
+		upon_running_cli(&w, ..tc.args, loc = tc.loc)
+		if out, ok := viewing_cli_output(&w, loc = tc.loc); ok {
+			shows_exit_code(&w, out, 1, loc = tc.loc)
+			shows_stderr_contains(&w, out, tc.expected_stderr, loc = tc.loc)
+		}
+	}
+}

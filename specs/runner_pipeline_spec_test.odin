@@ -179,3 +179,30 @@ spec_suite_group_and_name_filters_mark_packet_selective :: proc(t: ^testing.T) {
 	then_suite_packet_is_selective(&w, true)
 	then_suite_recorded_benchmarks(&w, []string{"math::alpha", "kv_pipe::sum"})
 }
+
+@(test)
+spec_nested_phase_preserves_outer_zero_alloc_violation :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_suite(&w, "nested_alloc_spec", runs = 2, warmup = 0)
+	given_pipeline(
+		&w,
+		"outer_pipe",
+		[]Phase_Spec {
+			{name = "outer", ops = 1, zero_alloc = true, allocates = true},
+			{name = "inner", parent = "outer", ops = 1, zero_alloc = true, allocates = false},
+		},
+	)
+
+	upon_executing_suite(&w)
+
+	then_suite_failed_zero_alloc(&w, min_violations = 1)
+	if outer, ok := viewing_benchmark(&w, "outer_pipe::outer"); ok {
+		shows_failure_state(&w, outer, zero_alloc_failed = true, error = "")
+	}
+	if inner, ok := viewing_benchmark(&w, "outer_pipe::inner"); ok {
+		shows_failure_state(&w, inner, zero_alloc_failed = false, error = "")
+	}
+}

@@ -120,7 +120,7 @@ _apply_cli_flags :: proc(cfg: ^Suite_Config, args: []string) {
 		case "filter", "f":
 			cfg.name_filter = val
 		case "lang":
-			cfg.lang = strings.to_lower(val, context.temp_allocator)
+			cfg.lang = val
 		case "commit":
 			cfg.commit = val
 		case "run-id":
@@ -151,12 +151,6 @@ default_suite_config :: proc() -> Suite_Config {
 		// Micro-suite filtering happens on `Record` emission inside `Suite`, unless single-group.
 		cfg.obench_cfg.filter = cfg.name_filter
 	}
-	if cfg.commit == "" {
-		cfg.commit = resolve_git_commit(".", context.temp_allocator)
-	}
-	if cfg.run_id == "" {
-		cfg.run_id = default_run_id(context.temp_allocator)
-	}
 	return cfg
 }
 
@@ -164,9 +158,11 @@ default_suite_config :: proc() -> Suite_Config {
 _clone_suite_config_strings :: proc(cfg: ^Suite_Config, allocator: runtime.Allocator) {
 	cfg.groups_filter = strings.clone(cfg.groups_filter, allocator)
 	cfg.name_filter = strings.clone(cfg.name_filter, allocator)
-	cfg.lang = strings.clone(cfg.lang, allocator)
-	cfg.commit = strings.clone(cfg.commit, allocator)
-	cfg.run_id = strings.clone(cfg.run_id, allocator)
+	cfg.lang = strings.to_lower(cfg.lang, allocator)
+	cfg.commit =
+		cfg.commit != "" ? strings.clone(cfg.commit, allocator) : resolve_git_commit(".", allocator)
+	cfg.run_id =
+		cfg.run_id != "" ? strings.clone(cfg.run_id, allocator) : default_run_id(allocator)
 	cfg.packet_out_path = strings.clone(cfg.packet_out_path, allocator)
 }
 
@@ -193,19 +189,11 @@ suite_create :: proc(
 	loc := #caller_location,
 ) -> Suite {
 	cfg := config.? or_else default_suite_config()
-	if config != nil {
-		if cfg.runs <= 0 {
-			cfg.runs = 7
-		}
-		if cfg.lang == "" {
-			cfg.lang = "odin"
-		}
-		if cfg.commit == "" {
-			cfg.commit = resolve_git_commit(".", context.temp_allocator)
-		}
-		if cfg.run_id == "" {
-			cfg.run_id = default_run_id(context.temp_allocator)
-		}
+	if cfg.runs <= 0 {
+		cfg.runs = 7
+	}
+	if cfg.lang == "" {
+		cfg.lang = "odin"
 	}
 	_clone_suite_config_strings(&cfg, allocator)
 	if cfg.name_filter != "" {
@@ -238,7 +226,7 @@ suite_destroy :: proc(s: ^Suite) {
 	obench.suite_destroy(&s.obench_suite)
 	_delete_suite_config_strings(&s.config, s.allocator)
 	delete(s.name, s.allocator)
-	s.name = ""
+	s^ = {}
 }
 
 @(require_results)
@@ -444,7 +432,8 @@ suite_execute :: proc(s: ^Suite) -> bool {
 
 	// 1. Run matching obench micro-groups.
 	if len(s.obench_suite.groups) > 0 {
-		all_groups := make([dynamic]^Group, len(s.obench_suite.groups), context.temp_allocator)
+		all_groups := make([dynamic]^Group, len(s.obench_suite.groups), s.allocator)
+		defer delete(all_groups)
 		copy(all_groups[:], s.obench_suite.groups[:])
 		clear(&s.obench_suite.groups)
 		for g in all_groups {
@@ -481,7 +470,6 @@ suite_execute :: proc(s: ^Suite) -> bool {
 		for g in all_groups {
 			append(&s.obench_suite.groups, g)
 		}
-		delete(all_groups)
 	}
 
 	// 2. Run matching stateful Pipeline groups using a private scratch arena.

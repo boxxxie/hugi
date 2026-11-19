@@ -302,8 +302,12 @@ read_jsonl_packets :: proc(
 			recompute_record_stats_from_samples(&r)
 			refresh_record_throughput(&r, overwrite = false)
 		} else if med > 0 {
-			append(&r.samples_batch_ns, ns_f64_to_batch_ns(med, eff_ops))
-			recompute_record_stats_from_samples(&r)
+			if r.samples == 0 {
+				r.samples = 1
+			}
+			if r.cv_pct == 0 && r.mean_fs > 0 && r.std_dev_fs > 0 {
+				r.cv_pct = (f64(r.std_dev_fs) / f64(r.mean_fs)) * 100.0
+			}
 			refresh_record_throughput(&r, overwrite = false)
 		}
 		if row.pool_hits > 0 || row.pool_misses > 0 {

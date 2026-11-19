@@ -12,7 +12,7 @@
 
 `hugi` is a benchmark harness and historical performance database written in Odin. Instead of treating benchmarks as ephemeral terminal output or ad-hoc log files, `hugi` records every run against its Git commit SHA inside a compact, transactional `.hugidb` file—allowing you to track performance over the lifetime of a codebase, add or filter benchmarks arbitrarily without breaking schemas, audit regressions with statistical rigor, and export clean datasets or reports into standard analytics formats.
 
-> **Built on [`obench`](https://github.com/zeybek/obench):** `hugi` relies heavily on [`obench`](https://github.com/zeybek/obench) ([`deps/obench`](deps/obench)) as its core micro-benchmarking and measurement engine. Its `Bencher` / `Parallel_Bencher` / `Group` primitives, `step` loop, optimizer barriers (`black_box`, `clobber_memory`), calibrated platform clock timing, `Counting_Allocator` heap/temp tracking, and terminal report formatter are powered directly by `obench`, which `hugi` extends with stateful multi-phase `Pipeline` lifecycles, exact femtosecond storage, longitudinal `.hugidb` history, statistical regression gates, and dataset exports.
+> **Built on [`obench`](https://github.com/zeybek/obench):** `hugi` relies heavily on [`obench`](https://github.com/zeybek/obench) (`deps/obench`) as its core micro-benchmarking and measurement engine. Its `Bencher` / `Parallel_Bencher` / `Group` primitives, `step` loop, optimizer barriers (`black_box`, `clobber_memory`), calibrated platform clock timing, `Counting_Allocator` heap/temp tracking, and terminal report formatter are powered directly by `obench`, which `hugi` extends with stateful multi-phase `Pipeline` lifecycles, exact femtosecond storage, longitudinal `.hugidb` history, statistical regression gates, and dataset exports.
 
 ---
 
@@ -30,7 +30,7 @@ Most benchmarking workflows break down once a project grows past a handful of mi
 
 ## Key Capabilities
 
-* **Zero-Store Runner Isolation:** `hugi/` imports only `base:*`, `core:*`, and [`deps/obench/obench`](deps/obench/obench)—never `deps/xitdb` or `deps/skadi`—so benchmarked libraries (including `xitdb` and `skadi` themselves) never hit circular package dependencies.
+* **Zero-Store Runner Isolation:** `hugi/` imports only `base:*`, `core:*`, and `deps/obench/obench`—never `deps/xitdb` or `deps/skadi`—so benchmarked libraries (including `xitdb` and `skadi` themselves) never hit circular package dependencies.
 * **Micro-Benchmarks + Stateful Multi-Phase Pipelines:** Combines `obench` micro-benchmark loops (with vDSO `clock_gettime` on 64-bit Linux, ~42 ns timer overhead under `-o:speed`) with stateful `Pipeline` lifecycles (`insert -> lookup -> scan`) where shared state carries across phases, setup/teardown is excluded, and timed passes execute with **unwrapped allocators** (`0 ns` counting overhead) followed by a dedicated untimed `@zero_alloc` verification pass.
 * **Statistical Auditing & CI Gates:** Pools samples across repeated runs of the same commit and evaluates changes using the **Mann-Whitney U** non-parametric rank test (`p < 0.05`) alongside **Welch's `t`-test** with Student's `t` critical values and geometric mean deltas.
 * **Cross-Language 1v1 Audits (`compare-1v1`):** Compare implementations across languages (e.g., `odin` vs `zig` or `rust`) on matching benchmark names, automatically flagging domain memory/disk footprint discrepancies (`[MISMATCH]`) so speedups achieved by trading off memory are immediately visible.
@@ -416,7 +416,7 @@ Floating-point `f64` IEEE-754 significands have 53 bits of precision, which intr
 
 ### Multi-Tiered Compression (`xitdb v5` + `HCAT\x01` + `CZPK\x04` + `CZCH\x02` + `BU`)
 
-Parquet is a general-purpose row-group format that repeats column metadata per row group and treats sample arrays as generic nested lists or binary blobs. `.hugidb` (`v5`) is purpose-built for longitudinal benchmark histories on top of [`deps/xitdb`](deps/xitdb) Copy-on-Write transactions and [`deps/skadi`](deps/skadi) analytics/export:
+Parquet is a general-purpose row-group format that repeats column metadata per row group and treats sample arrays as generic nested lists or binary blobs. `.hugidb` (`v5`) is purpose-built for longitudinal benchmark histories on top of [`deps/xitdb`](https://github.com/boxxxie/odin-xitdb) Copy-on-Write transactions and [`deps/skadi`](https://github.com/boxxxie/skadi) analytics/export:
 
 1. **Consolidated Root Catalog (`HCAT\x01`):** Interns all repeated strings (suite names, groups, benchmark names, OS/arch, compiler flags, commit SHAs, custom metric units) and static benchmark descriptors (`_Bench_Desc`) once across the entire database history, alongside run metadata and a rank-preserving snapshot index.
 2. **Presence-Bitmasked Hot Packets (`CZPK\x04`):** Recent runs omit zero/default fields (such as zero allocations, zero errors, or sequential ranks) via compact varint bitmasks.
@@ -519,7 +519,7 @@ Run all formatting, static checks, unit/CLI tests, 4-layer ATDD specs, and relea
 make fmt && make fmt-check && make check && make test && make specs && make build
 ```
 
-[`deps/obench`](deps/obench) tracks [`boxxxie/obench`](https://github.com/boxxxie/obench) (`feat/integer-batch-samples`, [PR #21](https://github.com/zeybek/obench/pull/21) on `zeybek/obench` layered on upstream `v0.3.0` after PRs `#14`–`#17` merged).
+`deps/obench` tracks [`boxxxie/obench`](https://github.com/boxxxie/obench) (`feat/integer-batch-samples`, [PR #21](https://github.com/zeybek/obench/pull/21) on `zeybek/obench` layered on upstream `v0.3.0` after PRs `#14`–`#17` merged).
 
 ---
 

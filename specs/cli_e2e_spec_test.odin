@@ -169,6 +169,8 @@ spec_cli_run_no_db_and_overlay :: proc(t: ^testing.T) {
 		"--db",
 		"@db",
 		"--overlay",
+		"--lang",
+		"ODIN",
 		"--commit",
 		"trial01",
 		"--extra-build-flags",
@@ -181,6 +183,7 @@ spec_cli_run_no_db_and_overlay :: proc(t: ^testing.T) {
 	)
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "lang=odin")
 		shows_stdout_contains(&w, out, "disk untouched")
 	}
 

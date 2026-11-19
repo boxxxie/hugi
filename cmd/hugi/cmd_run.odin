@@ -366,9 +366,9 @@ _exec_run_binary :: proc(opts: _Run_Opts, bin_path, pkt_path: string) -> (run_ok
 	if opts.common.filter != "" {
 		append(&run_cmd, "--filter", opts.common.filter)
 	}
-	if opts.common.lang != "" {
-		run_lang, run_lang_owned := _normalize_lang(opts.common.lang)
-		defer if run_lang_owned {delete(run_lang)}
+	run_lang, run_lang_owned := _normalize_lang(opts.common.lang)
+	defer if run_lang_owned {delete(run_lang)}
+	if run_lang != "" {
 		append(&run_cmd, "--lang", run_lang)
 	}
 	if opts.common.commit != "" {
@@ -444,10 +444,10 @@ _ingest_and_compare_run_packet :: proc(opts: _Run_Opts, pkt: hugi.Run_Packet) ->
 	if opts.baseline_commit != "" {
 		base_lang, base_lang_owned := _normalize_lang(opts.common.lang)
 		defer if base_lang_owned {delete(base_lang)}
-		cand_lang := pkt.lang != "" ? pkt.lang : base_lang
+		cmp_lang := pkt.lang != "" ? pkt.lang : base_lang
 		base := store.store_load_pooled_records(
 			&st,
-			base_lang,
+			cmp_lang,
 			opts.baseline_commit,
 			"",
 			opts.common.filter,
@@ -456,7 +456,7 @@ _ingest_and_compare_run_packet :: proc(opts: _Run_Opts, pkt: hugi.Run_Packet) ->
 		defer store.pooled_records_destroy(base)
 		cand := store.store_load_pooled_records(
 			&st,
-			cand_lang,
+			cmp_lang,
 			pkt.commit,
 			"",
 			opts.common.filter,

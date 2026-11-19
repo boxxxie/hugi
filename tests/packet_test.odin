@@ -190,6 +190,25 @@ test_suite_create_syncs_programmatic_name_filter_to_obench :: proc(t: ^testing.T
 	s_multi := hugi.suite_create("filter_multi", cfg_multi)
 	defer hugi.suite_destroy(&s_multi)
 	testing.expect_value(t, s_multi.obench_suite.config.filter, "")
+
+	// Overriding cfg.name_filter after obench_cfg.filter was populated must sync cleanly.
+	cfg_ovr := hugi.default_suite_config()
+	cfg_ovr.obench_cfg.filter = "stale_old"
+	cfg_ovr.name_filter = "fnv1a"
+	cfg_ovr.quiet = true
+
+	s_ovr := hugi.suite_create("filter_override", cfg_ovr)
+	defer hugi.suite_destroy(&s_ovr)
+	testing.expect_value(t, s_ovr.obench_suite.config.filter, "fnv1a")
+
+	cfg_ovr_multi := hugi.default_suite_config()
+	cfg_ovr_multi.obench_cfg.filter = "stale_old"
+	cfg_ovr_multi.name_filter = "fnv1a|crc32"
+	cfg_ovr_multi.quiet = true
+
+	s_ovr_multi := hugi.suite_create("filter_override_multi", cfg_ovr_multi)
+	defer hugi.suite_destroy(&s_ovr_multi)
+	testing.expect_value(t, s_ovr_multi.obench_suite.config.filter, "")
 }
 
 @(test)

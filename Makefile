@@ -9,7 +9,7 @@ HUGI_FLAGS := -vet -vet-tabs -vet-style -vet-cast -strict-style -warnings-as-err
 FULL_FLAGS := -vet -strict-style -vet-tabs -warnings-as-errors -vet-packages:hugi,hugi_store,hugi_cli,hugi_tests,hugi_specs
 TEST_FLAGS ?= -define:ODIN_TEST_FANCY=false -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 
-SOURCES := $(shell find hugi store cmd examples tests specs -name '*.odin' | sort)
+SOURCES = $(shell find hugi store cmd examples tests specs -name '*.odin' | sort)
 
 BIN_DIR := bin
 HUGI_BIN := $(BIN_DIR)/hugi

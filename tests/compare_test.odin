@@ -118,10 +118,78 @@ test_compare_records_handles_zero_fs_baselines :: proc(t: ^testing.T) {
 	defer store.comparison_report_destroy(&rep_reg)
 	testing.expect_value(t, len(rep_reg.rows), 1)
 	testing.expect_value(t, rep_reg.regressions, 1)
+	testing.expect_value(t, rep_reg.geomean_delta, 0.0)
 	if len(rep_reg.rows) == 1 {
 		testing.expect_value(t, rep_reg.rows[0].verdict, store.Verdict.Regression)
 		testing.expect(t, rep_reg.rows[0].is_significant, "0 fs -> 50 ns must be significant")
 	}
+
+	// Mixing a 0 fs -> 50 ns row with an unchanged positive-median row must not distort geomean_delta.
+	base_mix := make([]store.Pooled_Record, 2)
+	base_mix[0] = store.Pooled_Record {
+		full_name  = strings.clone("simd::clamped_zero"),
+		samples    = 8,
+		p50_fs     = 0,
+		mean_fs    = 0,
+		samples_fs = make([dynamic]i64, 8),
+	}
+	base_mix[1] = store.Pooled_Record {
+		full_name  = strings.clone("simd::steady"),
+		samples    = 8,
+		p50_fs     = 100_000_000,
+		mean_fs    = 100_000_000,
+		samples_fs = make([dynamic]i64, 8),
+	}
+	for i in 0 ..< 8 {
+		base_mix[1].samples_fs[i] = 100_000_000
+	}
+	defer store.pooled_records_destroy(base_mix)
+
+	cand_mix := make([]store.Pooled_Record, 2)
+	cand_mix[0] = store.Pooled_Record {
+		full_name  = strings.clone("simd::clamped_zero"),
+		samples    = 8,
+		p50_fs     = 50_000_000,
+		mean_fs    = 50_000_000,
+		samples_fs = make([dynamic]i64, 8),
+	}
+	cand_mix[1] = store.Pooled_Record {
+		full_name  = strings.clone("simd::steady"),
+		samples    = 8,
+		p50_fs     = 100_000_000,
+		mean_fs    = 100_000_000,
+		samples_fs = make([dynamic]i64, 8),
+	}
+	for i in 0 ..< 8 {
+		cand_mix[0].samples_fs[i] = 50_000_000 + i64(i) * 1_000
+		cand_mix[1].samples_fs[i] = 100_000_000
+	}
+	defer store.pooled_records_destroy(cand_mix)
+
+	rep_mix := store.compare_records(base_mix, cand_mix, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_mix)
+	testing.expect_value(t, len(rep_mix.rows), 2)
+	testing.expect_value(t, rep_mix.regressions, 1)
+	testing.expect(
+		t,
+		math.abs(rep_mix.geomean_delta) < 1e-9,
+		"asymmetric 0-fs row must not distort geomean_delta",
+	)
+
+	// Unmeasured/errored row (p50_fs == 0 and samples == 0) must still be skipped.
+	base_err := make([]store.Pooled_Record, 1)
+	base_err[0] = store.Pooled_Record {
+		full_name  = strings.clone("simd::clamped_zero"),
+		samples    = 0,
+		p50_fs     = 0,
+		mean_fs    = 0,
+		samples_fs = make([dynamic]i64, 0),
+	}
+	defer store.pooled_records_destroy(base_err)
+
+	rep_err := store.compare_records(base_err, cand_reg, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_err)
+	testing.expect_value(t, len(rep_err.rows), 0)
 
 	cand_same := make([]store.Pooled_Record, 1)
 	cand_same[0] = store.Pooled_Record {

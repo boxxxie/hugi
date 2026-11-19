@@ -616,7 +616,11 @@ compare_records :: proc(
 
 	for b in base {
 		c, matched := cand_by_name[b.full_name]
-		if !matched || b.p50_fs < 0 || c.p50_fs < 0 {
+		if !matched ||
+		   b.p50_fs < 0 ||
+		   c.p50_fs < 0 ||
+		   (b.p50_fs == 0 && b.samples <= 0) ||
+		   (c.p50_fs == 0 && c.samples <= 0) {
 			continue
 		}
 
@@ -672,9 +676,10 @@ compare_records :: proc(
 			rep.unchanged += 1
 		}
 
-		ratio := c_med / b_med
-		if ratio > 0 {
-			log_sum += math.ln(ratio)
+		if b.p50_fs > 0 && c.p50_fs > 0 {
+			log_sum += math.ln(f64(c.p50_fs) / f64(b.p50_fs))
+			log_cnt += 1
+		} else if b.p50_fs == 0 && c.p50_fs == 0 {
 			log_cnt += 1
 		}
 

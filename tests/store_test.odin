@@ -294,6 +294,24 @@ test_commit_prefix_matching_ignores_short_tag_false_positives :: proc(t: ^testin
 	if len(q_short_sha) == 3 {
 		testing.expect_value(t, q_short_sha[0].commit, "deadbeef1234")
 	}
+
+	q_upper_full := store.store_load_pooled_records(
+		&st,
+		"odin",
+		"DEADBEEF1234567890ABCDEF1234567890ABCDEF",
+	)
+	defer store.pooled_records_destroy(q_upper_full)
+	testing.expect_value(t, len(q_upper_full), 3)
+	if len(q_upper_full) == 3 {
+		testing.expect_value(t, q_upper_full[0].commit, "deadbeef1234")
+	}
+
+	q_upper_short := store.store_load_pooled_records(&st, "odin", "DEADBEE")
+	defer store.pooled_records_destroy(q_upper_short)
+	testing.expect_value(t, len(q_upper_short), 3)
+	if len(q_upper_short) == 3 {
+		testing.expect_value(t, q_upper_short[0].commit, "deadbeef1234")
+	}
 }
 
 @(test)

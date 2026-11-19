@@ -114,10 +114,15 @@ _match_commit_prefix :: proc(candidate, query: string) -> bool {
 	if strings.has_prefix(candidate, query) {
 		return true
 	}
-	// Allow a longer hex SHA query (e.g., 40-char GITHUB_SHA) to match a stored 12-char Git SHA
-	// without allowing arbitrary short tags like "v1" to match "--commit v10".
-	if _is_hex_sha(candidate) && _is_hex_sha(query) && len(query) > len(candidate) {
-		return strings.has_prefix(query, candidate)
+	// Allow hex SHA prefix matching in either length direction and either letter case
+	// (e.g., 40-char GITHUB_SHA against stored 12-char SHA) without letting short non-hex
+	// tags like "v1" match "--commit v10".
+	if _is_hex_sha(candidate) && _is_hex_sha(query) {
+		short, long := candidate, query
+		if len(query) < len(candidate) {
+			short, long = query, candidate
+		}
+		return strings.equal_fold(long[:len(short)], short)
 	}
 	return false
 }

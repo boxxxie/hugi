@@ -1,7 +1,7 @@
 [submodule "deps/obench"]
 	path = deps/obench
 	url = https://github.com/boxxxie/obench.git
-	branch = feat/integer-batch-samples
+	branch = main
 [submodule "deps/xitdb"]
 	path = deps/xitdb
 	url = https://github.com/boxxxie/odin-xitdb.git

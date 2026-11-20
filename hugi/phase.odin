@@ -402,8 +402,7 @@ _execute_pipeline :: proc(
 		warmup = 1
 	}
 
-	clock_ov_fs :=
-		s.obench_suite.clock.overhead_fs > 0 ? s.obench_suite.clock.overhead_fs : ns_f64_to_fs(s.obench_suite.clock.overhead_ns)
+	clock_ov_fs := ns_f64_to_fs(s.obench_suite.clock.overhead_ns)
 	p := Pipeline {
 		group_name            = def.group_name,
 		param                 = def.param,

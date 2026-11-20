@@ -559,7 +559,7 @@ Run all formatting, static checks, unit/CLI tests, 4-layer ATDD specs, and relea
 make fmt && make fmt-check && make check && make test && make specs && make build
 ```
 
-`deps/obench` tracks [`boxxxie/obench`](https://github.com/boxxxie/obench) (`feat/integer-batch-samples`, [PR #21](https://github.com/zeybek/obench/pull/21) on `zeybek/obench` layered on upstream `v0.3.0` after PRs `#14`–`#17` merged).
+`deps/obench` tracks [`boxxxie/obench`](https://github.com/boxxxie/obench) (`main`, synced with `zeybek/obench` upstream).
 
 ---
 

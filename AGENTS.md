@@ -94,4 +94,4 @@ New user-facing features or bugfixes must include black-box behavioral coverage 
 
 ## 6. Upstream `obench` Dependency
 
-`deps/obench` currently pins `feat/integer-batch-samples` (open PR `#21` on `zeybek/obench`, layered on upstream `v0.3.0` `374340c` after PRs `#14`–`#17` merged). Never edit files inside `deps/*` directly from `hugi`; make upstream changes in `boxxxie/obench` on feature branches and update the submodule pointer deliberately.
+`deps/obench` tracks `boxxxie/obench` (`main`, synced with `zeybek/obench` upstream). Never edit files inside `deps/*` directly from `hugi`; make upstream changes in `boxxxie/obench` on feature branches and update the submodule pointer deliberately.

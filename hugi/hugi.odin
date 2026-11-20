@@ -544,10 +544,7 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 		ODIN_ARCH_STRING,
 		ODIN_OPTIMIZATION_MODE,
 		s.last_packet.commit,
-		format_duration_fs(
-			s.obench_suite.clock.overhead_fs > 0 ? s.obench_suite.clock.overhead_fs : ns_f64_to_fs(s.obench_suite.clock.overhead_ns),
-			context.temp_allocator,
-		),
+		format_duration_fs(ns_f64_to_fs(s.obench_suite.clock.overhead_ns), context.temp_allocator),
 	)
 	fmt.sbprintln(
 		sb,

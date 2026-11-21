@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-21
+
+### Changed
+
+- **Dependencies (`deps/xitdb`):**
+  - Updated vendored `deps/xitdb` submodule to [`v2.1.0`](https://github.com/boxxxie/odin-xitdb/releases/tag/v2.1.0) (`9ad5d10`), bringing Odin `dev-2026-11a+` escape-analysis and ARM64 `-vet` compatibility, hardened B-tree/HAMT/cursor/wire bounds validation, in-place iterator initialization, and pooled Lua/DSL iterators.
+
 ## [0.1.2] - 2026-11-21
 
 ### Fixed

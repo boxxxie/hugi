@@ -15,7 +15,7 @@ spec_cli_version_help_ingest_history_and_inspect_workflow :: proc(t: ^testing.T)
 	upon_running_cli(&w, "version")
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
-		shows_stdout_contains(&w, out, "hugi 0.1.2")
+		shows_stdout_contains(&w, out, "hugi 0.1.3")
 	}
 
 	upon_running_cli(&w, "help")

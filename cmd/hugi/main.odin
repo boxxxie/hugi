@@ -3,7 +3,7 @@ package hugi_cli
 import "core:fmt"
 import "core:os"
 
-VERSION :: "hugi 0.1.0"
+VERSION :: "hugi 0.1.1"
 
 @(private)
 _print_help :: proc() {

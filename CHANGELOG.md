@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-21
+
+### Fixed
+
+- **Statistical Comparison & 1v1 Reporting (`store/`):**
+  - Compute `lag1_autocorrelation`, `effective_sample_count`, `sample_trend`, and `count_modes` per individual `Record` inside `_pool_raw_group` rather than across concatenated multi-run sample slices, preventing steady ambient clock shifts between runs from triggering false drift/multimodal warnings or collapsing `effective_samples` and `ci95_fs`.
+  - Pass `adjust_for_autocorrelation = false` when comparing independent `--by-run` medians (`run_medians_fs`), align `--by-run` deltas and geometric means with per-run medians under unequal sample counts, and tighten sub-`0.5%` 1v1 ties when `threshold_pct = 0`.
+  - Adjust Mann-Whitney U `p_value` for autocorrelation alongside `_hodges_lehmann_shift_eff` when `n > 20` on either side so `p_value` and 95% Hodges-Lehmann confidence intervals stay consistent.
+  - Orient 1v1 Hodges-Lehmann shifts in `compare_1v1_langs` by pairwise HL shift direction (rather than raw sample median order) so skewed/bimodal distributions never emit negative `shift_pct` or contradict `faster_lang`.
+  - Surface HL shift bounds and `used_shift_ci` across `format_1v1_table` (`Test / p-value` column and `(ns)` non-significant marker), `format_1v1_json`, and `format_1v1_csv`.
+- **Runner, Pipelines & Importers (`hugi/`):**
+  - Calibrate hardware counter bracket overhead once per suite (`_calibrate_counter_overhead`) and propagate `_nested_hw_brackets` across nested pipeline phases; skip `pin_thread` and `counter_group_open` when no pipelines match `groups_filter`, and pre-size pipeline `samples_batch_ns`, `samples_cycles`, and `samples_hw` buffers to avoid mid-pass heap reallocations.
+  - Clear stale `obench_suite` state when `groups_filter` skips microbenchmarks, track `failed_packet_io` independently of `obench_suite.failed_io`, filter `name_filter` exclusions before tallying microbenchmark failures and assigning contiguous `Record.rank` values, and initialize zero-valued `[dynamic]Metric` allocators in `_append_counter_metric`.
+  - Preserve explicit zero-valued `branch_misses/op` and `cache_misses/op` hardware counter metrics, and retain `std_dev`, `ci95`, `cv`, `iqr`, and `mad` metadata on imported `obench` JSON reports when raw samples are absent.
+- **CLI & Diagnostics (`cmd/hugi/`):**
+  - Add `--by-run` to `hugi help`, distinguish known `0.00` load averages from unsupported platforms or non-finite values in `hugi doctor` (`null` in JSON, `unknown` in text), and emit a prioritized `Sample-Shape Warnings` banner in `hugi inspect` when suites exceed 25 benchmarks.
+
+### Tests
+
+- Expanded leak-checked verification (`-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true`) to **32** unit/codec/store tests (`tests/`), **8** CLI tests (`cmd/hugi/`), and **41** 4-layer ATDD specifications and seeded property tests (`specs/`).
+
 ## [0.1.0] - 2026-11-21
 
 Initial release of **`hugi`** — a Git-native Odin benchmark runner, compressed transactional `.hugidb` history store, statistical auditor, and multi-format analytics exporter.

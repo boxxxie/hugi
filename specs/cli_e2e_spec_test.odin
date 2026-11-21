@@ -193,6 +193,31 @@ spec_cli_run_no_db_and_overlay :: proc(t: ^testing.T) {
 		shows_stdout_contains(&w, out, "base00")
 		shows_stdout_does_not_contain(&w, out, "trial01")
 	}
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@clean-pkg",
+		"--db",
+		"@db",
+		"--overlay",
+		"--commit",
+		"byr01",
+		"--baseline-commit",
+		"base00",
+		"--by-run",
+		"--extra-build-flags",
+		"-o:none",
+		"--quiet",
+		"--runs",
+		"2",
+		"--warmup",
+		"0",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "fell back to pooled sample comparison for --by-run")
+	}
 }
 
 @(test)
@@ -459,7 +484,70 @@ spec_cli_compare_commits_runs_and_last_fallback :: proc(t: ^testing.T) {
 		shows_exit_code(&w, out, 0)
 	}
 	then_file_contains(&w, "cmp.csv", "baseline,candidate,full_name,")
+	then_file_contains(
+		&w,
+		"cmp.csv",
+		",shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,used_run_medians",
+	)
 	then_file_contains(&w, "cmp.csv", "base01,fast02,core::scan,")
+
+	// Verify hugi inspect sample-shape annotations ([drifts ...], [N modes], [r1=..., n_eff=...]).
+	given_packet_file(
+		&w,
+		"pkt-shape",
+		commit = "shp01",
+		lang = "odin",
+		run_id = "r-shp01",
+		benches = []Bench_Observation {
+			{
+				name = "drift",
+				ops_per_sample = 100,
+				exact_batch_ns = []u64{10000, 10800, 11600, 12400, 13200, 14000, 14800, 15600},
+			},
+			{
+				name = "bimodal",
+				ops_per_sample = 100,
+				exact_batch_ns = []u64 {
+					5000,
+					5020,
+					4990,
+					5010,
+					5000,
+					5030,
+					4980,
+					5000,
+					5010,
+					4990,
+					5020,
+					5000,
+					20000,
+					20020,
+					19990,
+					20010,
+					20000,
+					20030,
+					19980,
+					20000,
+					20010,
+					19990,
+					20020,
+					20000,
+				},
+			},
+		},
+	)
+	upon_running_cli(&w, "ingest", "--db", "@shape-db", "@pkt-shape")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+	upon_running_cli(&w, "inspect", "--db", "@shape-db")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "[drifts +")
+		shows_stdout_contains(&w, out, "[2 modes]")
+		shows_stdout_contains(&w, out, "[r1=")
+		shows_stdout_contains(&w, out, "n_eff=")
+	}
 
 	// Verify --by-run on multi-run commits via CLI.
 	byrun_b := [4]string{"cli-br0", "cli-br1", "cli-br2", "cli-br3"}
@@ -576,6 +664,11 @@ spec_cli_compare_1v1_reports_winner_mismatch_and_unmatched :: proc(t: ^testing.T
 		shows_exit_code(&w, out, 0)
 		shows_stdout_contains(&w, out, `"lang_a": "odin"`)
 		shows_stdout_contains(&w, out, `"footprint_mismatches": 1`)
+		shows_stdout_contains(&w, out, `"drifting_rows":`)
+		shows_stdout_contains(&w, out, `"multimodal_rows":`)
+		shows_stdout_contains(&w, out, `"shift_pct":`)
+		shows_stdout_contains(&w, out, `"shift_low_pct":`)
+		shows_stdout_contains(&w, out, `"shift_high_pct":`)
 		shows_stdout_contains(&w, out, `"only_in_a": ["core::odin_only"]`)
 	}
 

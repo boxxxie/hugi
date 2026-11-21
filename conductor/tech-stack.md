@@ -12,7 +12,7 @@
 - **`examples/micro_and_phases/` & `tests/` (`package hugi_tests`):** Example suite and leak-checked unit/integration tests.
 
 ## Submodule Dependencies (`deps/*`)
-- **`deps/obench`:** Tracks `boxxxie/obench` (`feat/rational-batch-and-femtoseconds` layered atop `odin-bench`) providing exact `overhead_fs`, raw `samples_batch_ns`, untimed zero-alloc validation, and Linux vDSO timing.
+- **`deps/obench`:** Tracks upstream `zeybek/obench` (`main`) providing calibrated micro-benchmarking, raw `samples_batch_ns`, untimed zero-alloc validation, and Linux vDSO timing.
 - **`deps/xitdb`:** Pure-Odin append-only Copy-on-Write MVCC database (`Array_List`, `Hash_Map`, `Core_Overlay`, `database_compact`).
 - **`deps/skadi`:** Columnar table engine (`feat/ipc-lz4-body-compression`) providing Arrow IPC / Feather v2 serialization with `LZ4_FRAME` body compression and native `Decimal64_Type` / `Decimal128_Type`.
 

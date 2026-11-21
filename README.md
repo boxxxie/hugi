@@ -559,7 +559,7 @@ Run all formatting, static checks, unit/CLI tests, 4-layer ATDD specs, and relea
 make fmt && make fmt-check && make check && make test && make specs && make build
 ```
 
-`deps/obench` tracks [`boxxxie/obench`](https://github.com/boxxxie/obench) (`main`, synced with `zeybek/obench` upstream).
+`deps/obench` tracks upstream [`zeybek/obench`](https://github.com/zeybek/obench) (`main`).
 
 ---
 

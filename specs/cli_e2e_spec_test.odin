@@ -922,6 +922,17 @@ spec_cli_doctor_hugi_json_and_ingest_provenance :: proc(t: ^testing.T) {
 		shows_stdout_contains(&w, out, `"pkg_dir": "cfg-pkg"`)
 	}
 
+	upon_running_cli(&w, "doctor")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Logical cores:")
+		shows_stdout_contains(&w, out, "SMT:")
+		shows_stdout_contains(&w, out, "Load average:")
+		shows_stdout_contains(&w, out, "Power:")
+		shows_stdout_contains(&w, out, "Virtual machine:")
+		shows_stdout_does_not_contain(&w, out, "the CPU governor is")
+	}
+
 	upon_running_cli(&w, "run", "--commit", "cfg001", "--quiet")
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
@@ -1061,6 +1072,24 @@ spec_cli_run_test_mode_and_pin_counters :: proc(t: ^testing.T) {
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
 		shows_stdout_contains(&w, out, "--test ran every pipeline once")
+	}
+	then_store_file_does_not_exist(&w, "testdb")
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@ok-pkg",
+		"--test",
+		"--db",
+		"@testdb",
+		"--baseline-commit",
+		"base00",
+		"--extra-build-flags",
+		"-o:none",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stderr_contains(&w, out, "--test does not measure")
 	}
 	then_store_file_does_not_exist(&w, "testdb")
 

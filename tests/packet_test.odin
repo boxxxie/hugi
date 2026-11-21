@@ -844,16 +844,29 @@ test_suite_test_mode_pin_and_counters_no_leaks :: proc(t: ^testing.T) {
 	cfg_hw.quiet = true
 	cfg_hw.runs = 2
 	cfg_hw.warmup = 0
+	cfg_hw.obench_cfg.sample_count = 5
+	cfg_hw.obench_cfg.warmup_time = 0
+	cfg_hw.obench_cfg.fixed_batch_size = 1
 	cfg_hw.obench_cfg.pin_cpu = 0
 	cfg_hw.obench_cfg.counters = true
 
 	s_hw := hugi.suite_create("pin_counters_suite", cfg_hw)
 	defer hugi.suite_destroy(&s_hw)
 
+	hugi.bench(&s_hw, "micro_step", proc(b: ^hugi.Bencher) {
+		for hugi.step(b) {
+			acc := 0
+			for i in 0 ..< 1000 {
+				acc += i
+			}
+			_ = hugi.black_box(acc)
+		}
+	})
+
 	hugi.group_pipeline(&s_hw, "pipe", proc(p: ^hugi.Pipeline) {
 			_ = hugi.scoped_phase(p, "step", ops = 1)
 			acc := 0
-			for i in 0 ..< 16 {
+			for i in 0 ..< 1000 {
 				acc += i
 			}
 			_ = hugi.black_box(acc)
@@ -861,13 +874,41 @@ test_suite_test_mode_pin_and_counters_no_leaks :: proc(t: ^testing.T) {
 
 	hw_ok := hugi.suite_execute(&s_hw)
 	testing.expect(t, hw_ok, "pin_cpu + counters suite must succeed")
-	if s_hw.counters_unavailable != "" {
-		sb_hw := strings.builder_make(context.temp_allocator)
-		hugi.write_terminal_summary(&sb_hw, &s_hw)
-		testing.expect(
-			t,
-			strings.contains(strings.to_string(sb_hw), "--counters: no hardware counters here"),
-			"unavailable hardware counters should emit a clear note",
-		)
+	testing.expect_value(t, len(s_hw.last_packet.records), 2)
+	if s_hw.counters_unavailable == "" && len(s_hw.last_packet.records) == 2 {
+		for rec in s_hw.last_packet.records {
+			saw_insn := false
+			for m in rec.metrics {
+				if m.unit == "instructions/op" && m.value > 0 {
+					saw_insn = true
+					break
+				}
+			}
+			testing.expectf(
+				t,
+				saw_insn,
+				"record %q should include instructions/op metric when counters are open",
+				rec.full_name,
+			)
+		}
 	}
+
+	// Deterministic terminal note rendering for unavailable pipeline counters (and cleanup).
+	s_note := hugi.suite_create("counters_note_suite", cfg_hw)
+	defer hugi.suite_destroy(&s_note)
+	hugi.group_pipeline(&s_note, "pipe", proc(p: ^hugi.Pipeline) {
+			_ = hugi.scoped_phase(p, "step", ops = 1)
+			_ = hugi.black_box(1)
+		}, runs = 2, warmup = 0)
+	testing.expect(t, hugi.suite_execute(&s_note))
+	if s_note.counters_unavailable == "" {
+		s_note.counters_unavailable = strings.clone("perf_event denied", s_note.allocator)
+	}
+	sb_note := strings.builder_make(context.temp_allocator)
+	hugi.write_terminal_summary(&sb_note, &s_note)
+	testing.expect(
+		t,
+		strings.contains(strings.to_string(sb_note), "--counters: no hardware counters here"),
+		"unavailable hardware counters should emit a clear note",
+	)
 }

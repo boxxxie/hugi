@@ -36,6 +36,7 @@ _Run_Opts :: struct {
 	has_extra_flags:   bool,
 	quiet:             bool,
 	overlay:           bool,
+	by_run:            bool,
 }
 
 @(private = "file")
@@ -233,6 +234,8 @@ _parse_run_args :: proc(args: []string) -> (opts: _Run_Opts, exit_code: int, don
 			opts.quiet = true
 		case "fail-on-regression":
 			opts.fail_on_reg = true
+		case "by-run":
+			opts.by_run = true
 		case "runs":
 			v, ok := _consume_value(args, &i, inline_val, key)
 			if !ok {return opts, 1, true}
@@ -480,7 +483,13 @@ _ingest_and_compare_run_packet :: proc(opts: _Run_Opts, pkt: hugi.Run_Packet) ->
 			)
 			return 1
 		}
-		rep := store.compare_records(base, cand, opts.common.threshold_pct, context.allocator)
+		rep := store.compare_records(
+			base,
+			cand,
+			opts.common.threshold_pct,
+			context.allocator,
+			use_run_medians = opts.by_run,
+		)
 		defer store.comparison_report_destroy(&rep)
 		fmt.print(
 			store.format_comparison_table(

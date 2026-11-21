@@ -367,7 +367,16 @@ format_comparison_table :: proc(
 		base_str := hugi.format_duration_fs(r.base_p50_fs, context.temp_allocator)
 		cand_str := hugi.format_duration_fs(r.cand_p50_fs, context.temp_allocator)
 		test_str := ""
-		if r.used_rank_test {
+		if r.used_shift_ci {
+			suffix := " (runs)" if r.used_run_medians else ""
+			test_str = fmt.tprintf(
+				"HL [%+.1f%%, %+.1f%%] p=%.4f%s",
+				r.shift_low_pct,
+				r.shift_high_pct,
+				r.p_value,
+				suffix,
+			)
+		} else if r.used_rank_test {
 			if min(r.base_samples, r.cand_samples) >= 4 {
 				test_str = fmt.tprintf("MWU p=%.4f", r.p_value)
 			} else if r.welch_df > 0 {
@@ -412,12 +421,14 @@ format_comparison_json :: proc(
 	_write_json_f64(&sb, "%.4f", rep.geomean_delta)
 	fmt.sbprintf(
 		&sb,
-		",\n  \"improvements\": %d,\n  \"regressions\": %d,\n  \"unchanged\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"warnings\": ",
+		",\n  \"improvements\": %d,\n  \"regressions\": %d,\n  \"unchanged\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"drifting_rows\": %d,\n  \"multimodal_rows\": %d,\n  \"warnings\": ",
 		rep.improvements,
 		rep.regressions,
 		rep.unchanged,
 		rep.underpowered_rows,
 		rep.high_cv_rows,
+		rep.drifting_rows,
+		rep.multimodal_rows,
 	)
 	_write_json_str_array(&sb, rep.warnings[:])
 	strings.write_string(&sb, ",\n  \"rows\": [")
@@ -452,6 +463,16 @@ format_comparison_json :: proc(
 		_write_json_bool(&sb, r.used_rank_test)
 		strings.write_string(&sb, ",\n      \"p_value\": ")
 		_write_json_f64(&sb, "%.6f", r.p_value)
+		strings.write_string(&sb, ",\n      \"shift_pct\": ")
+		_write_json_f64(&sb, "%.4f", r.shift_pct)
+		strings.write_string(&sb, ",\n      \"shift_low_pct\": ")
+		_write_json_f64(&sb, "%.4f", r.shift_low_pct)
+		strings.write_string(&sb, ",\n      \"shift_high_pct\": ")
+		_write_json_f64(&sb, "%.4f", r.shift_high_pct)
+		strings.write_string(&sb, ",\n      \"used_shift_ci\": ")
+		_write_json_bool(&sb, r.used_shift_ci)
+		strings.write_string(&sb, ",\n      \"used_run_medians\": ")
+		_write_json_bool(&sb, r.used_run_medians)
 		strings.write_string(&sb, ",\n      \"is_significant\": ")
 		_write_json_bool(&sb, r.is_significant)
 		strings.write_string(&sb, ",\n      \"verdict\": ")
@@ -492,7 +513,7 @@ format_comparison_csv :: proc(
 	sb := strings.builder_make(allocator)
 	strings.write_string(
 		&sb,
-		"baseline,candidate,full_name,base_p50_ns,cand_p50_ns,base_std_dev_ns,cand_std_dev_ns,base_samples,cand_samples,delta_pct,speedup,welch_t,welch_df,used_rank_test,p_value,is_significant,verdict,base_allocs_per_op,cand_allocs_per_op,base_alloc_bytes_per_op,cand_alloc_bytes_per_op,base_footprint_bytes,cand_footprint_bytes\n",
+		"baseline,candidate,full_name,base_p50_ns,cand_p50_ns,base_std_dev_ns,cand_std_dev_ns,base_samples,cand_samples,delta_pct,speedup,welch_t,welch_df,used_rank_test,p_value,is_significant,verdict,base_allocs_per_op,cand_allocs_per_op,base_alloc_bytes_per_op,cand_alloc_bytes_per_op,base_footprint_bytes,cand_footprint_bytes,shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,used_run_medians\n",
 	)
 	for r in rep.rows {
 		_write_delimited_str(&sb, base_label, ',')
@@ -532,7 +553,17 @@ format_comparison_csv :: proc(
 		_write_json_f64(&sb, "%.2f", r.base_alloc_bytes)
 		strings.write_byte(&sb, ',')
 		_write_json_f64(&sb, "%.2f", r.cand_alloc_bytes)
-		fmt.sbprintf(&sb, ",%d,%d\n", r.base_footprint, r.cand_footprint)
+		fmt.sbprintf(&sb, ",%d,%d,", r.base_footprint, r.cand_footprint)
+		_write_json_f64(&sb, "%.4f", r.shift_pct)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.shift_low_pct)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.shift_high_pct)
+		strings.write_byte(&sb, ',')
+		_write_json_bool(&sb, r.used_shift_ci)
+		strings.write_byte(&sb, ',')
+		_write_json_bool(&sb, r.used_run_medians)
+		strings.write_byte(&sb, '\n')
 	}
 	return strings.to_string(sb)
 }
@@ -646,13 +677,15 @@ format_1v1_json :: proc(rep: Cross_Lang_Report, allocator := context.allocator) 
 	_write_json_str(&sb, rep.b_commit)
 	fmt.sbprintf(
 		&sb,
-		",\n  \"a_wins\": %d,\n  \"b_wins\": %d,\n  \"ties\": %d,\n  \"footprint_mismatches\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"warnings\": ",
+		",\n  \"a_wins\": %d,\n  \"b_wins\": %d,\n  \"ties\": %d,\n  \"footprint_mismatches\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"drifting_rows\": %d,\n  \"multimodal_rows\": %d,\n  \"warnings\": ",
 		rep.a_wins,
 		rep.b_wins,
 		rep.ties,
 		rep.footprint_mismatches,
 		rep.underpowered_rows,
 		rep.high_cv_rows,
+		rep.drifting_rows,
+		rep.multimodal_rows,
 	)
 	_write_json_str_array(&sb, rep.warnings[:])
 	strings.write_string(&sb, ",\n  \"only_in_a\": ")
@@ -686,6 +719,12 @@ format_1v1_json :: proc(rep: Cross_Lang_Report, allocator := context.allocator) 
 		_write_json_bool(&sb, r.is_significant)
 		strings.write_string(&sb, ",\n      \"p_value\": ")
 		_write_json_f64(&sb, "%.6f", r.p_value)
+		strings.write_string(&sb, ",\n      \"shift_pct\": ")
+		_write_json_f64(&sb, "%.4f", r.shift_pct)
+		strings.write_string(&sb, ",\n      \"shift_low_pct\": ")
+		_write_json_f64(&sb, "%.4f", r.shift_low_pct)
+		strings.write_string(&sb, ",\n      \"shift_high_pct\": ")
+		_write_json_f64(&sb, "%.4f", r.shift_high_pct)
 		strings.write_string(&sb, ",\n      \"welch_t\": ")
 		_write_json_f64(&sb, "%.4f", r.welch_t)
 		fmt.sbprintf(

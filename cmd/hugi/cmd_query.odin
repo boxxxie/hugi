@@ -213,8 +213,23 @@ _cmd_inspect :: proc(args: []string) -> int {
 	if len(records) <= 25 {
 		fmt.println("\nQuantile Breakdown:")
 		for r in records {
+			extras := strings.builder_make(context.temp_allocator)
+			if r.trend_pct != 0 {
+				fmt.sbprintf(&extras, " [drifts %+.0f%%]", r.trend_pct)
+			}
+			if r.modes > 1 {
+				fmt.sbprintf(&extras, " [%d modes]", r.modes)
+			}
+			if r.autocorrelation > 0.25 {
+				fmt.sbprintf(
+					&extras,
+					" [r1=%.2f, n_eff=%.1f]",
+					r.autocorrelation,
+					r.effective_samples,
+				)
+			}
 			fmt.printfln(
-				"  %-36s min=%s p25=%s p50=%s p75=%s p95=%s p99=%s ci95=±%s iqr=%s mad=%s allocs=%.1f footprint=%s",
+				"  %-36s min=%s p25=%s p50=%s p75=%s p95=%s p99=%s ci95=±%s iqr=%s mad=%s allocs=%.1f footprint=%s%s",
 				r.full_name,
 				hugi.format_duration_fs(r.min_fs, context.temp_allocator),
 				hugi.format_duration_fs(r.p25_fs, context.temp_allocator),
@@ -227,6 +242,7 @@ _cmd_inspect :: proc(args: []string) -> int {
 				hugi.format_duration_fs(r.mad_fs, context.temp_allocator),
 				r.allocs_per_op,
 				obench.format_bytes(f64(r.footprint_bytes), context.temp_allocator),
+				strings.to_string(extras),
 			)
 		}
 	}
@@ -244,6 +260,7 @@ _cmd_compare :: proc(args: []string) -> int {
 	format_arg := ""
 	out_path := ""
 	fail_on_reg := false
+	by_run := false
 
 	allowed := _Common_Flag_Set{.DB, .Lang, .Filter, .Threshold}
 	i := 0
@@ -284,6 +301,8 @@ _cmd_compare :: proc(args: []string) -> int {
 		// Default behavior when neither --commits nor --runs is provided.
 		case "fail-on-regression":
 			fail_on_reg = true
+		case "by-run":
+			by_run = true
 		case:
 			fmt.eprintfln("hugi compare: unknown flag '--%s'", key)
 			return 1
@@ -409,6 +428,7 @@ _cmd_compare :: proc(args: []string) -> int {
 		cand_records,
 		common.threshold_pct,
 		context.allocator,
+		use_run_medians = by_run,
 	)
 	defer store.comparison_report_destroy(&rep)
 	text := ""

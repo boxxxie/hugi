@@ -685,9 +685,14 @@ compute_stats_fs :: proc(
 	if n > 1 {
 		std_f := math.sqrt(var_sum / f64(n - 1))
 		st.std_dev_fs = i64(math.round(std_f))
-		st.ci95_fs = i64(
-			math.round(obench.t_critical_975(f64(n - 1)) * (std_f / math.sqrt(f64(n)))),
-		)
+		samples_f64 := make([]f64, n, allocator)
+		defer delete(samples_f64, allocator)
+		for v, i in samples_fs {
+			samples_f64[i] = f64(v)
+		}
+		r1 := obench.lag1_autocorrelation(samples_f64)
+		eff := obench.effective_sample_count(n, r1)
+		st.ci95_fs = i64(math.round(obench.t_critical_975(eff - 1) * (std_f / math.sqrt(eff))))
 		st.cv_pct = st.mean_fs > 0 ? (std_f / f64(st.mean_fs)) * 100.0 : 0.0
 	}
 

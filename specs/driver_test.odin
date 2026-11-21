@@ -588,12 +588,19 @@ _driver_compare_commits :: proc(
 	lang, base_commit, cand_commit: string,
 	threshold_pct := 5.0,
 	allocator := context.allocator,
+	use_run_medians := false,
 ) -> store.Comparison_Report {
 	base := store.store_load_pooled_records(st, lang, base_commit, "", "", context.temp_allocator)
 	defer store.pooled_records_destroy(base, context.temp_allocator)
 	cand := store.store_load_pooled_records(st, lang, cand_commit, "", "", context.temp_allocator)
 	defer store.pooled_records_destroy(cand, context.temp_allocator)
-	return store.compare_records(base, cand, threshold_pct, allocator)
+	return store.compare_records(
+		base,
+		cand,
+		threshold_pct,
+		allocator,
+		use_run_medians = use_run_medians,
+	)
 }
 
 @(private)

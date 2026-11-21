@@ -460,6 +460,57 @@ spec_cli_compare_commits_runs_and_last_fallback :: proc(t: ^testing.T) {
 	}
 	then_file_contains(&w, "cmp.csv", "baseline,candidate,full_name,")
 	then_file_contains(&w, "cmp.csv", "base01,fast02,core::scan,")
+
+	// Verify --by-run on multi-run commits via CLI.
+	byrun_b := [4]string{"cli-br0", "cli-br1", "cli-br2", "cli-br3"}
+	byrun_b_args := [4]string{"@cli-br0", "@cli-br1", "@cli-br2", "@cli-br3"}
+	byrun_c := [4]string{"cli-cr0", "cli-cr1", "cli-cr2", "cli-cr3"}
+	byrun_c_args := [4]string{"@cli-cr0", "@cli-cr1", "@cli-cr2", "@cli-cr3"}
+	for idx in 0 ..< 4 {
+		given_packet_file(
+			&w,
+			byrun_b[idx],
+			commit = "byr1",
+			lang = "odin",
+			run_id = byrun_b[idx],
+			benches = []Bench_Observation {
+				{name = "scan", median_ns = 100.0 + f64(idx), samples = 6, spread_ns = 0.1},
+			},
+		)
+		given_packet_file(
+			&w,
+			byrun_c[idx],
+			commit = "byr2",
+			lang = "odin",
+			run_id = byrun_c[idx],
+			benches = []Bench_Observation {
+				{name = "scan", median_ns = 140.0 + f64(idx), samples = 6, spread_ns = 0.1},
+			},
+		)
+		upon_running_cli(&w, "ingest", "--db", "@byrun-db", byrun_b_args[idx], byrun_c_args[idx])
+		if out, ok := viewing_cli_output(&w); ok {
+			shows_exit_code(&w, out, 0)
+		}
+	}
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@byrun-db",
+		"--commits",
+		"byr1..byr2",
+		"--by-run",
+		"--format",
+		"json",
+		"--out",
+		"-",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, `"used_run_medians": true`)
+		shows_stdout_contains(&w, out, `"used_shift_ci": true`)
+		shows_stdout_contains(&w, out, `"verdict": "regression"`)
+	}
 }
 
 @(test)

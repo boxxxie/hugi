@@ -732,10 +732,12 @@ compare_records :: proc(
 			}
 		}
 
-		b_med := f64(max(b.p50_fs, 1))
-		c_med := f64(max(c.p50_fs, 1))
-		delta_pct := (f64(c.p50_fs - b.p50_fs) / b_med) * 100.0
-		speedup := b_med / c_med
+		row_base_p50_fs := b.p50_fs
+		row_cand_p50_fs := c.p50_fs
+		row_base_std_fs := b.std_dev_fs
+		row_cand_std_fs := c.std_dev_fs
+		row_base_cv_pct := b.cv_pct
+		row_cand_cv_pct := c.cv_pct
 		sig: _Significance_Result
 		row_used_run_medians := false
 		row_base_samples := b.samples
@@ -743,6 +745,12 @@ compare_records :: proc(
 		if use_run_medians && len(b.run_medians_fs) >= 2 && len(c.run_medians_fs) >= 2 {
 			b_run_st := hugi.compute_stats_fs(b.run_medians_fs[:], context.temp_allocator)
 			c_run_st := hugi.compute_stats_fs(c.run_medians_fs[:], context.temp_allocator)
+			row_base_p50_fs = b_run_st.p50_fs
+			row_cand_p50_fs = c_run_st.p50_fs
+			row_base_std_fs = b_run_st.std_dev_fs
+			row_cand_std_fs = c_run_st.std_dev_fs
+			row_base_cv_pct = b_run_st.cv_pct
+			row_cand_cv_pct = c_run_st.cv_pct
 			row_base_samples = len(b.run_medians_fs)
 			row_cand_samples = len(c.run_medians_fs)
 			sig = _compare_significance(
@@ -772,11 +780,16 @@ compare_records :: proc(
 			)
 		}
 
+		b_med := f64(max(row_base_p50_fs, 1))
+		c_med := f64(max(row_cand_p50_fs, 1))
+		delta_pct := (f64(row_cand_p50_fs - row_base_p50_fs) / b_med) * 100.0
+		speedup := b_med / c_med
+
 		underpowered := min(row_base_samples, row_cand_samples) < 5
 		if underpowered {
 			rep.underpowered_rows += 1
 		}
-		if b.cv_pct > 25.0 || c.cv_pct > 25.0 {
+		if row_base_cv_pct > 25.0 || row_cand_cv_pct > 25.0 {
 			rep.high_cv_rows += 1
 		}
 		if b.trend_pct != 0 || c.trend_pct != 0 {
@@ -813,10 +826,10 @@ compare_records :: proc(
 			}
 		}
 
-		if b.p50_fs > 0 && c.p50_fs > 0 {
-			log_sum += math.ln(f64(c.p50_fs) / f64(b.p50_fs))
+		if row_base_p50_fs > 0 && row_cand_p50_fs > 0 {
+			log_sum += math.ln(f64(row_cand_p50_fs) / f64(row_base_p50_fs))
 			log_cnt += 1
-		} else if b.p50_fs == 0 && c.p50_fs == 0 {
+		} else if row_base_p50_fs == 0 && row_cand_p50_fs == 0 {
 			log_cnt += 1
 		}
 
@@ -824,12 +837,12 @@ compare_records :: proc(
 			&rep.rows,
 			Comparison_Row {
 				full_name = strings.clone(b.full_name, allocator),
-				base_p50_fs = b.p50_fs,
-				cand_p50_fs = c.p50_fs,
-				base_std_fs = b.std_dev_fs,
-				cand_std_fs = c.std_dev_fs,
-				base_cv_pct = b.cv_pct,
-				cand_cv_pct = c.cv_pct,
+				base_p50_fs = row_base_p50_fs,
+				cand_p50_fs = row_cand_p50_fs,
+				base_std_fs = row_base_std_fs,
+				cand_std_fs = row_cand_std_fs,
+				base_cv_pct = row_base_cv_pct,
+				cand_cv_pct = row_cand_cv_pct,
 				base_samples = row_base_samples,
 				cand_samples = row_cand_samples,
 				underpowered = underpowered,
@@ -1061,47 +1074,36 @@ compare_1v1_langs :: proc(
 
 		a_med := f64(max(a.p50_fs, 1))
 		b_med := f64(max(b.p50_fs, 1))
-		sig := _compare_significance(
-			a.mean_fs,
-			a.std_dev_fs,
-			a.samples,
-			a.samples_fs[:],
-			b.mean_fs,
-			b.std_dev_fs,
-			b.samples,
-			b.samples_fs[:],
-		)
+		sig: _Significance_Result
+		welch_t := 0.0
+		if a_med <= b_med {
+			sig = _compare_significance(
+				b.mean_fs,
+				b.std_dev_fs,
+				b.samples,
+				b.samples_fs[:],
+				a.mean_fs,
+				a.std_dev_fs,
+				a.samples,
+				a.samples_fs[:],
+			)
+			welch_t = sig.welch_t == 0 ? 0.0 : -sig.welch_t
+		} else {
+			sig = _compare_significance(
+				a.mean_fs,
+				a.std_dev_fs,
+				a.samples,
+				a.samples_fs[:],
+				b.mean_fs,
+				b.std_dev_fs,
+				b.samples,
+				b.samples_fs[:],
+			)
+			welch_t = sig.welch_t
+		}
 
 		hl_shift, hl_low, hl_high := sig.shift_pct, sig.shift_low_pct, sig.shift_high_pct
 		hl_used_ci := sig.used_shift_ci
-		if hl_used_ci && len(a.samples_fs) >= 4 && len(b.samples_fs) >= 4 {
-			a_f64 := _samples_fs_as_f64(a.samples_fs[:], context.temp_allocator)
-			b_f64 := _samples_fs_as_f64(b.samples_fs[:], context.temp_allocator)
-			defer delete(a_f64, context.temp_allocator)
-			defer delete(b_f64, context.temp_allocator)
-			s_pct, l_pct, h_pct: f64
-			s_ok: bool
-			if a_med <= b_med {
-				s_pct, l_pct, h_pct, s_ok = obench.hodges_lehmann_shift(
-					b_f64,
-					a_f64,
-					adjust_for_autocorrelation = true,
-					allocator = context.temp_allocator,
-				)
-			} else {
-				s_pct, l_pct, h_pct, s_ok = obench.hodges_lehmann_shift(
-					a_f64,
-					b_f64,
-					adjust_for_autocorrelation = true,
-					allocator = context.temp_allocator,
-				)
-			}
-			if s_ok {
-				hl_shift, hl_low, hl_high = s_pct, l_pct, h_pct
-			} else {
-				hl_used_ci = false
-			}
-		}
 
 		rel_diff := abs(a_med - b_med) / min(a_med, b_med) * 100.0
 		is_sig :=
@@ -1110,6 +1112,7 @@ compare_1v1_langs :: proc(
 		faster := "tie"
 		ratio := 1.0
 		if rel_diff < 0.5 {
+			is_sig = false
 			rep.ties += 1
 		} else if a_med < b_med {
 			faster = lang_a
@@ -1148,7 +1151,7 @@ compare_1v1_langs :: proc(
 				shift_low_pct = hl_low,
 				shift_high_pct = hl_high,
 				used_shift_ci = hl_used_ci,
-				welch_t = sig.welch_t,
+				welch_t = welch_t,
 				a_footprint = a.footprint_bytes,
 				b_footprint = b.footprint_bytes,
 				footprint_mismatch = fp_mismatch,

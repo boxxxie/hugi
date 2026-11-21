@@ -427,12 +427,14 @@ _obench_result_to_record :: proc(
 			"branch_misses/op",
 			st.counters.branch_misses,
 			allocator,
+			allow_zero = true,
 		)
 		_append_counter_metric(
 			&rec.metrics,
 			"cache_misses/op",
 			st.counters.cache_misses,
 			allocator,
+			allow_zero = true,
 		)
 	}
 	return rec
@@ -476,6 +478,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 	populate_packet_env(&pkt, allocator = s.allocator)
 
 	rank := 0
+	ran_obench := false
 
 	// 1. Run matching obench micro-groups.
 	if len(s.obench_suite.groups) > 0 {
@@ -496,6 +499,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 			if strings.contains_any(s.config.name_filter, "|,") {
 				s.obench_suite.config.filter = ""
 			}
+			ran_obench = true
 			_ = obench.suite_execute(&s.obench_suite)
 			s.obench_suite.config.filter = saved_filter
 
@@ -522,24 +526,34 @@ suite_execute :: proc(s: ^Suite) -> bool {
 	}
 
 	// 2. Run matching stateful Pipeline groups using a private scratch arena.
-	if len(s.pipelines) > 0 {
+	has_matching_pipeline := false
+	for pdef in s.pipelines {
+		if should_run_group(s.config.groups_filter, pdef.group_name) {
+			has_matching_pipeline = true
+			break
+		}
+	}
+	if has_matching_pipeline {
 		pinned: obench.Thread_Pin
 		if cpu, pin := s.obench_suite.config.pin_cpu.?; pin {
 			p_ok: bool
 			p_why: string
 			pinned, p_ok, p_why = obench.pin_thread(cpu)
-			if !p_ok && len(s.obench_suite.results) == 0 {
+			if !p_ok && !s.config.quiet && !ran_obench {
 				fmt.eprintfln("hugi: warning: not pinned to CPU %d: %s", cpu, p_why)
 			}
 		}
 		defer obench.unpin_thread(pinned)
 
 		counter_group: obench.Counter_Group
+		counter_overhead: obench.Counter_Values
 		if s.obench_suite.config.counters {
 			c_ok: bool
 			c_why: string
 			counter_group, c_ok, c_why = obench.counter_group_open()
-			if !c_ok {
+			if c_ok {
+				counter_overhead = _calibrate_counter_overhead(&counter_group)
+			} else {
 				s.counters_unavailable = strings.clone(c_why, s.allocator)
 			}
 		}
@@ -554,7 +568,14 @@ suite_execute :: proc(s: ^Suite) -> bool {
 			if !should_run_group(s.config.groups_filter, pdef.group_name) {
 				continue
 			}
-			recs, viols := _execute_pipeline(s, pdef, &rank, &temp_arena, &counter_group)
+			recs, viols := _execute_pipeline(
+				s,
+				pdef,
+				&rank,
+				&temp_arena,
+				&counter_group,
+				counter_overhead,
+			)
 			for r in recs {
 				append(&pkt.records, r)
 			}

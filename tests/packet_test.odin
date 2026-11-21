@@ -474,14 +474,9 @@ test_jsonl_summary_only_preserves_stats :: proc(t: ^testing.T) {
 
 @(test)
 test_obench_v6_json_importer_maps_metadata_and_preserves_legacy_v3 :: proc(t: ^testing.T) {
-	tmp, mk_err := os.make_directory_temp("", "hugi-obench-v6-*", context.allocator)
-	testing.expectf(t, mk_err == nil && tmp != "", "create temp dir: %v", mk_err)
-	if mk_err != nil || tmp == "" {
+	tmp, tmp_ok := _make_temp_dir(t, "hugi-obench-v6-*")
+	if !tmp_ok {
 		return
-	}
-	defer {
-		_ = os.remove_all(tmp)
-		delete(tmp)
 	}
 
 	v6_path := strings.concatenate({tmp, "/v6.json"}, context.temp_allocator)
@@ -574,6 +569,35 @@ test_obench_v6_json_importer_maps_metadata_and_preserves_legacy_v3 :: proc(t: ^t
 	testing.expect(t, off_ok, "read_obench_json_packets boost=off should succeed")
 	if off_ok && len(pkts_off) == 1 {
 		testing.expect_value(t, pkts_off[0].env.boost_state, i8(-1))
+		testing.expect_value(t, pkts_off[0].env.build_flags, "-o:speed")
+		if len(pkts_off[0].records) == 1 {
+			testing.expect_value(t, len(pkts_off[0].records[0].metrics), 0)
+		}
+	}
+
+	// Active hardware counters preserve explicit 0.0 branch_misses/cache_misses metrics.
+	v6_zero_miss_path := strings.concatenate({tmp, "/v6_zero_miss.json"}, context.temp_allocator)
+	v6_zero_miss_json := `{"format_version":6,"suite_name":"v6_zm","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev-2026-10","machine":{"cpu":"CPU","cores":4},"benchmarks":[{"suite_name":"v6_zm","group_name":"g","name":"b","full_name":"g::b","samples":3,"batch_size":1,"min_ns":10.0,"p50_ns":10.0,"p95_ns":10.0,"p99_ns":10.0,"max_ns":10.0,"mean_ns":10.0,"instructions":80.0,"cycles":25.0,"branch_misses":0.0,"cache_misses":0.0}]}`
+	testing.expect(
+		t,
+		os.write_entire_file(v6_zero_miss_path, transmute([]u8)v6_zero_miss_json) == nil,
+	)
+	pkts_zm, zm_ok := hugi.read_obench_json_packets(v6_zero_miss_path)
+	defer hugi.packets_destroy(pkts_zm)
+	testing.expect(t, zm_ok, "read_obench_json_packets zero misses should succeed")
+	if zm_ok && len(pkts_zm) == 1 && len(pkts_zm[0].records) == 1 {
+		ms := pkts_zm[0].records[0].metrics
+		testing.expect_value(t, len(ms), 4)
+		if len(ms) == 4 {
+			testing.expect_value(t, ms[0].unit, "instructions/op")
+			testing.expect_value(t, ms[0].value, 80.0)
+			testing.expect_value(t, ms[1].unit, "cycles/op")
+			testing.expect_value(t, ms[1].value, 25.0)
+			testing.expect_value(t, ms[2].unit, "branch_misses/op")
+			testing.expect_value(t, ms[2].value, 0.0)
+			testing.expect_value(t, ms[3].unit, "cache_misses/op")
+			testing.expect_value(t, ms[3].value, 0.0)
+		}
 	}
 
 	// Legacy v3 report without machine/build metadata must leave pkt.env empty.
@@ -590,14 +614,9 @@ test_obench_v6_json_importer_maps_metadata_and_preserves_legacy_v3 :: proc(t: ^t
 
 @(test)
 test_suite_failure_messages_and_host_warned_dedup :: proc(t: ^testing.T) {
-	tmp, mk_err := os.make_directory_temp("", "hugi-fail-msgs-*", context.allocator)
-	testing.expectf(t, mk_err == nil && tmp != "", "create temp dir: %v", mk_err)
-	if mk_err != nil || tmp == "" {
+	tmp, tmp_ok := _make_temp_dir(t, "hugi-fail-msgs-*")
+	if !tmp_ok {
 		return
-	}
-	defer {
-		_ = os.remove_all(tmp)
-		delete(tmp)
 	}
 
 	// 1. Per-benchmark failure messages for micro + pipeline @zero_alloc and host_warned governor dedup.
@@ -876,12 +895,25 @@ test_suite_test_mode_pin_and_counters_no_leaks :: proc(t: ^testing.T) {
 	testing.expect(t, hw_ok, "pin_cpu + counters suite must succeed")
 	testing.expect_value(t, len(s_hw.last_packet.records), 2)
 	if s_hw.counters_unavailable == "" && len(s_hw.last_packet.records) == 2 {
-		for rec in s_hw.last_packet.records {
+		for rec, rec_idx in s_hw.last_packet.records {
 			saw_insn := false
+			saw_bmiss := false
+			saw_cmiss := false
 			for m in rec.metrics {
+				testing.expectf(
+					t,
+					m.value >= 0.0,
+					"record %q metric %q must be non-negative (got %v)",
+					rec.full_name,
+					m.unit,
+					m.value,
+				)
 				if m.unit == "instructions/op" && m.value > 0 {
 					saw_insn = true
-					break
+				} else if m.unit == "branch_misses/op" {
+					saw_bmiss = true
+				} else if m.unit == "cache_misses/op" {
+					saw_cmiss = true
 				}
 			}
 			testing.expectf(
@@ -890,8 +922,61 @@ test_suite_test_mode_pin_and_counters_no_leaks :: proc(t: ^testing.T) {
 				"record %q should include instructions/op metric when counters are open",
 				rec.full_name,
 			)
+			if rec_idx == 0 {
+				testing.expectf(
+					t,
+					saw_bmiss && saw_cmiss,
+					"micro record %q should include branch_misses/op and cache_misses/op even when 0.0",
+					rec.full_name,
+				)
+			}
 		}
 	}
+
+	// Nested pipeline phases propagate inner counter bracket overhead cleanly.
+	s_nested := hugi.suite_create("nested_counters_suite", cfg_hw)
+	defer hugi.suite_destroy(&s_nested)
+	hugi.group_pipeline(&s_nested, "nested", proc(p: ^hugi.Pipeline) {
+			_ = hugi.scoped_phase(p, "outer", ops = 1)
+			{
+				_ = hugi.scoped_phase(p, "inner", ops = 1)
+				acc := 0
+				for i in 0 ..< 500 {
+					acc += i
+				}
+				_ = hugi.black_box(acc)
+			}
+			acc := 0
+			for i in 0 ..< 500 {
+				acc += i
+			}
+			_ = hugi.black_box(acc)
+		}, runs = 2, warmup = 0)
+	testing.expect(t, hugi.suite_execute(&s_nested), "nested counters pipeline should succeed")
+	testing.expect_value(t, len(s_nested.last_packet.records), 2)
+	for rec in s_nested.last_packet.records {
+		for m in rec.metrics {
+			testing.expect(t, m.value >= 0.0, "nested counter metrics must stay non-negative")
+		}
+	}
+
+	// Quiet pipeline-only suite suppresses stderr pin warnings when pin_cpu is invalid.
+	cfg_pin_quiet := hugi.default_suite_config()
+	cfg_pin_quiet.quiet = true
+	cfg_pin_quiet.runs = 1
+	cfg_pin_quiet.warmup = 0
+	cfg_pin_quiet.obench_cfg.pin_cpu = 999
+	s_pin_quiet := hugi.suite_create("pin_quiet_suite", cfg_pin_quiet)
+	defer hugi.suite_destroy(&s_pin_quiet)
+	hugi.group_pipeline(&s_pin_quiet, "pipe", proc(p: ^hugi.Pipeline) {
+			_ = hugi.scoped_phase(p, "step", ops = 1)
+			_ = hugi.black_box(1)
+		}, runs = 1, warmup = 0)
+	testing.expect(
+		t,
+		hugi.suite_execute(&s_pin_quiet),
+		"quiet pipeline suite with unpinnable CPU should still execute cleanly",
+	)
 
 	// Deterministic terminal note rendering for unavailable pipeline counters (and cleanup).
 	s_note := hugi.suite_create("counters_note_suite", cfg_hw)

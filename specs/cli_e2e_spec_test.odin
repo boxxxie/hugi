@@ -22,6 +22,11 @@ spec_cli_version_help_ingest_history_and_inspect_workflow :: proc(t: ^testing.T)
 		shows_exit_code(&w, out, 0)
 		shows_stdout_contains(&w, out, "USAGE:")
 		shows_stdout_contains(&w, out, "COMMANDS:")
+		shows_stdout_contains(
+			&w,
+			out,
+			"  --last                 Compare the last two commits (or last two runs)\n  --by-run               Compare per-run medians",
+		)
 	}
 
 	given_packet_file(

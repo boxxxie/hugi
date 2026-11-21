@@ -2,7 +2,42 @@ package hugi_tests
 
 import hugi "../hugi"
 import "core:fmt"
+import "core:os"
 import "core:strings"
+import "core:testing"
+
+@(private = "file")
+_Temp_Dir_Guard :: struct {
+	path: string,
+}
+
+@(private = "file")
+_cleanup_temp_dir_guard :: proc(raw: rawptr) {
+	if raw == nil {
+		return
+	}
+	guard := (^_Temp_Dir_Guard)(raw)
+	if guard.path != "" {
+		_ = os.remove_all(guard.path)
+		delete(guard.path)
+	}
+	free(guard)
+}
+
+@(private, require_results)
+_make_temp_dir :: proc(t: ^testing.T, pattern: string, loc := #caller_location) -> (string, bool) {
+	dir, err := os.make_directory_temp("", pattern, context.allocator)
+	if !testing.expectf(t, err == nil && dir != "", "create temp dir: %v", err, loc = loc) {
+		if dir != "" {
+			delete(dir)
+		}
+		return "", false
+	}
+	guard := new(_Temp_Dir_Guard)
+	guard.path = dir
+	testing.cleanup(t, _cleanup_temp_dir_guard, guard)
+	return dir, true
+}
 
 @(private)
 _make_packet :: proc(

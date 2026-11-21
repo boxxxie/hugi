@@ -519,4 +519,102 @@ spec_hodges_lehmann_ci_gating_shape_warnings_and_by_run_comparison :: proc(t: ^t
 		shows_verdict(&w, row, .Regression)
 		shows_significance(&w, row, true, max_p_value = 0.05)
 	}
+
+	// Unequal per-run sample counts under --by-run must align delta_pct and geomean with run medians.
+	heavy_200 := [20]u64 {
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+		20000,
+	}
+	small_100 := [2]u64{10000, 10000}
+	cand_220 := [4]u64{22000, 22000, 22000, 22000}
+	uneq_b_rids := [4]string{"ub-0", "ub-1", "ub-2", "ub-3"}
+	uneq_c_rids := [4]string{"uc-0", "uc-1", "uc-2", "uc-3"}
+	for idx in 0 ..< 4 {
+		given_recorded_run(
+			&w,
+			commit = "byrun_uneq_b",
+			lang = "odin",
+			run_id = uneq_b_rids[idx],
+			bench = Bench_Observation {
+				name = "core::uneq",
+				ops_per_sample = 100,
+				exact_batch_ns = heavy_200[:] if idx == 0 else small_100[:],
+			},
+		)
+		given_recorded_run(
+			&w,
+			commit = "byrun_uneq_c",
+			lang = "odin",
+			run_id = uneq_c_rids[idx],
+			bench = Bench_Observation {
+				name = "core::uneq",
+				ops_per_sample = 100,
+				exact_batch_ns = cand_220[:],
+			},
+		)
+	}
+	upon_comparing_commits(
+		&w,
+		"byrun_uneq_b",
+		"byrun_uneq_c",
+		lang = "odin",
+		threshold_pct = 5.0,
+		use_run_medians = true,
+	)
+	then_comparison_geomean_between(&w, 119.0, 121.0)
+	if row, ok := viewing_comparison_row(&w, "core::uneq"); ok {
+		shows_shift_ci(&w, row, expect_used_ci = true, expect_by_run = true)
+		shows_positive_regression_delta(&w, row, min_delta_pct = 110.0)
+		shows_verdict(&w, row, .Regression)
+	}
+
+	// 1v1 ties below 0.5% stay non-significant even with threshold_pct = 0.0.
+	tie_a := [10]u64{10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000}
+	tie_b := [10]u64{10040, 10040, 10040, 10040, 10040, 10040, 10040, 10040, 10040, 10040}
+	given_recorded_run(
+		&w,
+		commit = "tie01",
+		lang = "odin",
+		run_id = "r-tie-o",
+		bench = Bench_Observation {
+			name = "core::tie_zero_thresh",
+			ops_per_sample = 100,
+			exact_batch_ns = tie_a[:],
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "tie01",
+		lang = "zig",
+		run_id = "r-tie-z",
+		bench = Bench_Observation {
+			name = "core::tie_zero_thresh",
+			ops_per_sample = 100,
+			exact_batch_ns = tie_b[:],
+		},
+	)
+	upon_comparing_1v1(&w, "odin", "zig", commit = "tie01", threshold_pct = 0.0)
+	then_1v1_summary(&w, a_wins = 0, b_wins = 0, ties = 1, footprint_mismatches = 0)
+	if row, ok := viewing_1v1_row(&w, "core::tie_zero_thresh"); ok {
+		shows_winner(&w, row, "tie")
+		shows_1v1_significance(&w, row, false)
+	}
 }

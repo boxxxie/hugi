@@ -1,5 +1,6 @@
 package hugi_tests
 
+import obench "../deps/obench/obench"
 import hugi "../hugi"
 import store "../store"
 import "core:fmt"
@@ -364,7 +365,8 @@ test_compare_env_mismatch_underpowered_and_1v1_commit_warnings :: proc(t: ^testi
 
 @(test)
 test_hodges_lehmann_ci_gating_and_ar1_ci95_widening :: proc(t: ^testing.T) {
-	// 1. Positively autocorrelated ramp widens ci95_fs compared to alternating permutation.
+	// 1. Positively autocorrelated ramp widens ci95_fs compared to alternating permutation
+	// (osc has r1 < 0, which obench.effective_sample_count clamps to 0 so eff == n).
 	ramp := [12]i64 {
 		10_000_000,
 		12_000_000,
@@ -397,13 +399,30 @@ test_hodges_lehmann_ci_gating_and_ar1_ci95_widening :: proc(t: ^testing.T) {
 	st_osc := hugi.compute_stats_fs(osc[:])
 	testing.expect_value(t, st_ramp.p50_fs, st_osc.p50_fs)
 	testing.expect_value(t, st_ramp.std_dev_fs, st_osc.std_dev_fs)
+
+	osc_var_sum := 0.0
+	for v in osc {
+		d := f64(v - st_osc.mean_fs)
+		osc_var_sum += d * d
+	}
+	osc_std_f := math.sqrt(osc_var_sum / f64(len(osc) - 1))
+	expected_unadj_ci95 := i64(
+		math.round(
+			obench.t_critical_975(f64(len(osc) - 1)) * (osc_std_f / math.sqrt(f64(len(osc)))),
+		),
+	)
+	testing.expect_value(t, st_osc.ci95_fs, expected_unadj_ci95)
 	testing.expectf(
 		t,
 		st_ramp.ci95_fs > st_osc.ci95_fs,
-		"expected AR(1) ci95_fs (%d) > unautocorrelated (%d)",
+		"expected AR(1) ci95_fs (%d) > clamped r1<0 unadjusted (%d)",
 		st_ramp.ci95_fs,
 		st_osc.ci95_fs,
 	)
+
+	pair := [2]i64{10_000_000, 20_000_000}
+	st_pair := hugi.compute_stats_fs(pair[:])
+	testing.expect(t, st_pair.ci95_fs > 0, "expected n=2 ci95_fs to remain finite and positive")
 
 	// 2. HL CI gating rejects noisy shifts whose 95% CI straddles threshold_pct.
 	make_rec :: proc(name: string, ns_vals: []f64) -> store.Pooled_Record {
@@ -788,6 +807,13 @@ test_compare_1v1_hl_ci_symmetry_and_shape_diagnostics :: proc(t: ^testing.T) {
 		math.abs(row_ofast.shift_high_pct - row_zfast.shift_high_pct) < 1e-6,
 		"1v1 HL shift_high_pct must be symmetric between a<b and a>b",
 	)
+	testing.expect(t, row_ofast.welch_t < 0, "a < b must preserve negative welch_t sign")
+	testing.expect(t, row_zfast.welch_t > 0, "a > b must preserve positive welch_t sign")
+	testing.expect(
+		t,
+		math.abs(row_ofast.welch_t + row_zfast.welch_t) < 1e-9,
+		"1v1 welch_t must be antisymmetric between a<b and a>b",
+	)
 
 	js := store.format_1v1_json(rep, context.temp_allocator)
 	testing.expect(t, strings.contains(js, `"drifting_rows": 1`))
@@ -795,4 +821,226 @@ test_compare_1v1_hl_ci_symmetry_and_shape_diagnostics :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(js, `"shift_pct":`))
 	testing.expect(t, strings.contains(js, `"shift_low_pct":`))
 	testing.expect(t, strings.contains(js, `"shift_high_pct":`))
+
+	// Ties below 0.5% relative diff must stay non-significant even when threshold_pct = 0.0.
+	st_tie, ok_tie := store.store_open(":memory:")
+	testing.expect(t, ok_tie)
+	if ok_tie {
+		defer store.store_close(&st_tie)
+		tight_a := [10]f64{100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0}
+		tight_b := [10]f64{100.4, 100.4, 100.4, 100.4, 100.4, 100.4, 100.4, 100.4, 100.4, 100.4}
+		pta := make_lang_pkt("odin")
+		defer hugi.packet_destroy(&pta)
+		add_bench(&pta, 1, "tight_tie", tight_a[:])
+		ptb := make_lang_pkt("zig")
+		defer hugi.packet_destroy(&ptb)
+		add_bench(&ptb, 1, "tight_tie", tight_b[:])
+		testing.expect(t, store.store_ingest_packet(&st_tie, pta))
+		testing.expect(t, store.store_ingest_packet(&st_tie, ptb))
+		rep_tie := store.compare_1v1_langs(&st_tie, "odin", "zig", "c1v1", threshold_pct = 0.0)
+		defer store.cross_lang_report_destroy(&rep_tie)
+		testing.expect_value(t, rep_tie.ties, 1)
+		testing.expect_value(t, len(rep_tie.rows), 1)
+		if len(rep_tie.rows) == 1 {
+			testing.expect_value(t, rep_tie.rows[0].faster_lang, "tie")
+			testing.expect(
+				t,
+				!rep_tie.rows[0].is_significant,
+				"tie below 0.5% must not report is_significant=true when threshold_pct=0",
+			)
+		}
+	}
+}
+
+@(test)
+test_compare_by_run_aligns_medians_delta_geomean_and_fallback_gate :: proc(t: ^testing.T) {
+	make_pkt :: proc(commit, run_id: string, name: string, ns_vals: []f64) -> hugi.Run_Packet {
+		pkt := hugi.Run_Packet {
+			suite_name     = strings.clone("byrun_suite"),
+			lang           = strings.clone("odin"),
+			commit         = strings.clone(commit),
+			run_id         = strings.clone(run_id),
+			os             = strings.clone("linux"),
+			arch           = strings.clone("amd64"),
+			optimization   = strings.clone("Speed"),
+			odin_version   = strings.clone("test"),
+			timestamp_unix = 1770000000,
+			records        = make([dynamic]hugi.Record, 0, 1),
+		}
+		samples := make([dynamic]u64, len(ns_vals))
+		for v, i in ns_vals {
+			samples[i] = hugi.ns_f64_to_batch_ns(v, 100)
+		}
+		r := hugi.Record {
+			rank             = 1,
+			group_name       = strings.clone("core"),
+			name             = strings.clone(name),
+			full_name        = strings.concatenate({"core::", name}),
+			ops_per_sample   = 100,
+			samples          = len(ns_vals),
+			samples_batch_ns = samples,
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		hugi.recompute_record_stats_from_samples(&r)
+		hugi.refresh_record_throughput(&r)
+		append(&pkt.records, r)
+		return pkt
+	}
+
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	// 1. 4-run unequal-sample case:
+	// Base pooled: 20x 200ns + 6x 100ns => pooled p50=200ns, pooled CV=24.3% (<25%).
+	// Base run medians: [200, 100, 100, 100]ns => run p50=100ns, run CV=40.0% (>25%).
+	heavy_200 := [20]f64 {
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+		200,
+	}
+	small_100 := [2]f64{100, 100}
+	cand_140 := [4]f64{140, 140, 140, 140}
+	cand_220 := [4]f64{220, 220, 220, 220}
+
+	p_b0 := make_pkt("c4_base", "r-b0", "op", heavy_200[:])
+	defer hugi.packet_destroy(&p_b0)
+	testing.expect(t, store.store_ingest_packet(&st, p_b0))
+	for i in 1 ..< 4 {
+		pb := make_pkt("c4_base", fmt.tprintf("r-b%d", i), "op", small_100[:])
+		defer hugi.packet_destroy(&pb)
+		testing.expect(t, store.store_ingest_packet(&st, pb))
+	}
+	for i in 0 ..< 4 {
+		p140 := make_pkt("c4_140", fmt.tprintf("r-140-%d", i), "op", cand_140[:])
+		defer hugi.packet_destroy(&p140)
+		testing.expect(t, store.store_ingest_packet(&st, p140))
+
+		p220 := make_pkt("c4_220", fmt.tprintf("r-220-%d", i), "op", cand_220[:])
+		defer hugi.packet_destroy(&p220)
+		testing.expect(t, store.store_ingest_packet(&st, p220))
+	}
+
+	b4 := store.store_load_pooled_records(&st, "odin", "c4_base")
+	defer store.pooled_records_destroy(b4)
+	c4_140 := store.store_load_pooled_records(&st, "odin", "c4_140")
+	defer store.pooled_records_destroy(c4_140)
+	c4_220 := store.store_load_pooled_records(&st, "odin", "c4_220")
+	defer store.pooled_records_destroy(c4_220)
+
+	// 140ns vs base run p50=100ns flips sign from pooled (-30%) to run-median (+40%) and flags run CV>25%.
+	rep_140 := store.compare_records(b4, c4_140, threshold_pct = 5.0, use_run_medians = true)
+	defer store.comparison_report_destroy(&rep_140)
+	testing.expect_value(t, len(rep_140.rows), 1)
+	testing.expect_value(t, rep_140.high_cv_rows, 1)
+	testing.expect(t, math.abs(rep_140.geomean_delta - 40.0) < 0.01)
+	if len(rep_140.rows) == 1 {
+		r := rep_140.rows[0]
+		testing.expect(t, r.used_run_medians)
+		testing.expect_value(t, r.base_p50_fs, i64(100_000_000))
+		testing.expect_value(t, r.cand_p50_fs, i64(140_000_000))
+		testing.expect(t, math.abs(r.delta_pct - 40.0) < 0.01)
+		testing.expect(t, math.abs(r.speedup - (100.0 / 140.0)) < 1e-6)
+		testing.expect(t, r.base_cv_pct > 25.0)
+	}
+
+	// 220ns vs base run medians [200, 100, 100, 100] keeps HL shift_low_pct >= +10% => Regression.
+	rep_220 := store.compare_records(b4, c4_220, threshold_pct = 5.0, use_run_medians = true)
+	defer store.comparison_report_destroy(&rep_220)
+	testing.expect_value(t, len(rep_220.rows), 1)
+	testing.expect_value(t, rep_220.high_cv_rows, 1)
+	testing.expect(t, math.abs(rep_220.geomean_delta - 120.0) < 0.01)
+	if len(rep_220.rows) == 1 {
+		r := rep_220.rows[0]
+		testing.expect(t, r.used_run_medians)
+		testing.expect(t, r.used_shift_ci)
+		testing.expect_value(t, r.base_p50_fs, i64(100_000_000))
+		testing.expect_value(t, r.cand_p50_fs, i64(220_000_000))
+		testing.expect(t, math.abs(r.delta_pct - 120.0) < 0.01)
+		testing.expect(t, math.abs(r.speedup - (100.0 / 220.0)) < 1e-6)
+		testing.expect_value(t, r.verdict, store.Verdict.Regression)
+	}
+
+	// 2. 3-run Welch fallback path (used_shift_ci == false):
+	// Base pooled p50=101ns (+4.46% vs 105.5ns, below 5% gate), run medians [100, 100, 101] => run p50=100ns (+5.5% >= 5% gate).
+	heavy_101 := [20]f64 {
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+		101,
+	}
+	small_100_3 := [3]f64{100, 100, 100}
+	cand_1055 := [3]f64{105.5, 105.5, 105.5}
+
+	p3_b0 := make_pkt("c3_base", "r3-b0", "op", heavy_101[:])
+	defer hugi.packet_destroy(&p3_b0)
+	p3_b1 := make_pkt("c3_base", "r3-b1", "op", small_100_3[:])
+	defer hugi.packet_destroy(&p3_b1)
+	p3_b2 := make_pkt("c3_base", "r3-b2", "op", small_100_3[:])
+	defer hugi.packet_destroy(&p3_b2)
+	testing.expect(t, store.store_ingest_packet(&st, p3_b0))
+	testing.expect(t, store.store_ingest_packet(&st, p3_b1))
+	testing.expect(t, store.store_ingest_packet(&st, p3_b2))
+
+	for i in 0 ..< 3 {
+		pc := make_pkt("c3_cand", fmt.tprintf("r3-c%d", i), "op", cand_1055[:])
+		defer hugi.packet_destroy(&pc)
+		testing.expect(t, store.store_ingest_packet(&st, pc))
+	}
+
+	b3 := store.store_load_pooled_records(&st, "odin", "c3_base")
+	defer store.pooled_records_destroy(b3)
+	c3 := store.store_load_pooled_records(&st, "odin", "c3_cand")
+	defer store.pooled_records_destroy(c3)
+
+	rep3 := store.compare_records(b3, c3, threshold_pct = 5.0, use_run_medians = true)
+	defer store.comparison_report_destroy(&rep3)
+	testing.expect_value(t, len(rep3.rows), 1)
+	testing.expect(t, math.abs(rep3.geomean_delta - 5.5) < 0.01)
+	if len(rep3.rows) == 1 {
+		r := rep3.rows[0]
+		testing.expect(t, r.used_run_medians)
+		testing.expect(t, !r.used_shift_ci)
+		testing.expect_value(t, r.base_p50_fs, i64(100_000_000))
+		testing.expect_value(t, r.cand_p50_fs, i64(105_500_000))
+		testing.expect(t, math.abs(r.delta_pct - 5.5) < 0.01)
+		testing.expect(t, r.is_significant)
+		testing.expect_value(t, r.verdict, store.Verdict.Regression)
+	}
 }

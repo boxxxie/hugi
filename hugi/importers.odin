@@ -4,6 +4,7 @@ import obench "../deps/obench/obench"
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:strings"
 import "core:time"
@@ -26,7 +27,7 @@ _obench_doc_run_env :: proc(doc: obench.Export_Document, allocator: runtime.Allo
 		boost = -1
 	}
 	build_flags := ""
-	if doc.build.microarch != "" || doc.build.bounds_checks != "" {
+	if doc.optimization != "" || doc.build.microarch != "" || doc.build.bounds_checks != "" {
 		parts := make([dynamic]string, context.temp_allocator)
 		if doc.optimization != "" {
 			append(
@@ -40,7 +41,9 @@ _obench_doc_run_env :: proc(doc: obench.Export_Document, allocator: runtime.Allo
 		if doc.build.bounds_checks == "off" {
 			append(&parts, "-no-bounds-check")
 		}
-		build_flags = strings.join(parts[:], " ", allocator)
+		if len(parts) > 0 {
+			build_flags = strings.join(parts[:], " ", allocator)
+		}
 	}
 	return Run_Env {
 		cpu_model = strings.clone(doc.machine.cpu, allocator),
@@ -57,8 +60,10 @@ _append_counter_metric :: proc(
 	unit: string,
 	value: f64,
 	allocator: runtime.Allocator,
+	allow_zero := false,
 ) {
-	if !(value > 0) || len(metrics^) >= MAX_METRICS {
+	valid := (value >= 0) if allow_zero else (value > 0)
+	if !valid || math.is_inf(value, 0) || len(metrics^) >= MAX_METRICS {
 		return
 	}
 	for m in metrics^ {
@@ -66,7 +71,8 @@ _append_counter_metric :: proc(
 			return
 		}
 	}
-	append(metrics, Metric{unit = strings.clone(unit, allocator), value = value})
+	v := 0.0 if value == 0 else value
+	append(metrics, Metric{unit = strings.clone(unit, allocator), value = v})
 }
 
 /*
@@ -189,10 +195,23 @@ read_obench_json_packets :: proc(
 			}
 			append(&r.metrics, Metric{unit = strings.clone(m.unit, allocator), value = m.value})
 		}
+		has_counters := e.instructions > 0 || e.cycles > 0
 		_append_counter_metric(&r.metrics, "instructions/op", e.instructions, allocator)
 		_append_counter_metric(&r.metrics, "cycles/op", e.cycles, allocator)
-		_append_counter_metric(&r.metrics, "branch_misses/op", e.branch_misses, allocator)
-		_append_counter_metric(&r.metrics, "cache_misses/op", e.cache_misses, allocator)
+		_append_counter_metric(
+			&r.metrics,
+			"branch_misses/op",
+			e.branch_misses,
+			allocator,
+			allow_zero = has_counters,
+		)
+		_append_counter_metric(
+			&r.metrics,
+			"cache_misses/op",
+			e.cache_misses,
+			allocator,
+			allow_zero = has_counters,
+		)
 		if r.mean_fs > 0 {
 			r.cv_pct = (f64(r.std_dev_fs) / f64(r.mean_fs)) * 100.0
 		}

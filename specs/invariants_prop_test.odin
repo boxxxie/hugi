@@ -633,6 +633,8 @@ prop_femtosecond_stats_monotonicity_and_permutation_invariance :: proc(t: ^testi
 			unadj_ci95 := i64(
 				math.round(obench.t_critical_975(f64(n - 1)) * (std_f / math.sqrt(f64(n)))),
 			)
+			// `obench.effective_sample_count` clamps lag-1 autocorrelation to [0, 0.95] and
+			// floors `eff` at 2.0 (so df >= 1.0), ensuring `eff <= n` and `ci95_fs >= unadj_ci95`.
 			if !testing.expectf(
 				t,
 				st.ci95_fs >= unadj_ci95,

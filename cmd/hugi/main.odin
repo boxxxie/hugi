@@ -57,6 +57,7 @@ COMPARE / EXPORT / COMPACT OPTIONS:
   --commits <a..b>       Compare commit <a> against commit <b>
   --runs <a..b>          Compare run_id <a> against run_id <b>
   --last                 Compare the last two commits (or last two runs)
+  --by-run               Compare per-run medians across multi-run commits (fallback to pooled if < 2 runs)
   --langs <a,b>          Languages for compare-1v1 (default: odin,zig)
   --all-commits          Export longitudinal commit-by-commit series (instead of latest snapshot)
   --all-runs             Export every stored run individually (unpooled longitudinal series)

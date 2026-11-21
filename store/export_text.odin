@@ -593,7 +593,7 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 	strings.write_byte(&sb, '\n')
 	fmt.sbprintf(
 		&sb,
-		"| Benchmark | %s p50 (CV%%) | %s p50 (CV%%) | Winner | Speedup | p-value | Footprint |\n",
+		"| Benchmark | %s p50 (CV%%) | %s p50 (CV%%) | Winner | Speedup | Test / p-value | Footprint |\n",
 		rep.lang_a,
 		rep.lang_b,
 	)
@@ -609,6 +609,23 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 			hugi.format_duration_fs(r.b_p50_fs, context.temp_allocator),
 			r.b_cv_pct,
 		)
+		winner_str := r.faster_lang
+		if !r.is_significant && r.faster_lang != "tie" {
+			winner_str = fmt.tprintf("%s (ns)", r.faster_lang)
+		}
+		test_str := ""
+		if r.used_shift_ci {
+			test_str = fmt.tprintf(
+				"HL [%+.1f%%, %+.1f%%] p=%.4f",
+				r.shift_low_pct,
+				r.shift_high_pct,
+				r.p_value,
+			)
+		} else if r.welch_t != 0 && r.p_value == 1.0 {
+			test_str = fmt.tprintf("Welch t=%.2f", r.welch_t)
+		} else {
+			test_str = fmt.tprintf("MWU p=%.4f", r.p_value)
+		}
 		foot_str := "ok"
 		if r.a_footprint > 0 || r.b_footprint > 0 {
 			foot_str = fmt.tprintf(
@@ -622,13 +639,13 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 		}
 		fmt.sbprintf(
 			&sb,
-			"| `%s` | %s | %s | %s | %.2fx | %.4f | %s |\n",
+			"| `%s` | %s | %s | %s | %.2fx | %s | %s |\n",
 			r.full_name,
 			a_str,
 			b_str,
-			r.faster_lang,
+			winner_str,
 			r.speedup_ratio,
-			r.p_value,
+			test_str,
 			foot_str,
 		)
 	}
@@ -725,6 +742,8 @@ format_1v1_json :: proc(rep: Cross_Lang_Report, allocator := context.allocator) 
 		_write_json_f64(&sb, "%.4f", r.shift_low_pct)
 		strings.write_string(&sb, ",\n      \"shift_high_pct\": ")
 		_write_json_f64(&sb, "%.4f", r.shift_high_pct)
+		strings.write_string(&sb, ",\n      \"used_shift_ci\": ")
+		_write_json_bool(&sb, r.used_shift_ci)
 		strings.write_string(&sb, ",\n      \"welch_t\": ")
 		_write_json_f64(&sb, "%.4f", r.welch_t)
 		fmt.sbprintf(
@@ -756,7 +775,7 @@ format_1v1_csv :: proc(rep: Cross_Lang_Report, allocator := context.allocator) -
 	sb := strings.builder_make(allocator)
 	strings.write_string(
 		&sb,
-		"lang_a,lang_b,full_name,ops,a_p50_ns,a_std_dev_ns,b_p50_ns,b_std_dev_ns,a_cv_pct,b_cv_pct,faster_lang,speedup_ratio,is_significant,p_value,welch_t,a_footprint_bytes,b_footprint_bytes,footprint_mismatch,a_allocs_per_op,b_allocs_per_op\n",
+		"lang_a,lang_b,full_name,ops,a_p50_ns,a_std_dev_ns,b_p50_ns,b_std_dev_ns,a_cv_pct,b_cv_pct,faster_lang,speedup_ratio,is_significant,p_value,welch_t,a_footprint_bytes,b_footprint_bytes,footprint_mismatch,a_allocs_per_op,b_allocs_per_op,shift_pct,shift_low_pct,shift_high_pct,used_shift_ci\n",
 	)
 	for r in rep.rows {
 		_write_delimited_str(&sb, rep.lang_a, ',')
@@ -792,6 +811,14 @@ format_1v1_csv :: proc(rep: Cross_Lang_Report, allocator := context.allocator) -
 		_write_json_f64(&sb, "%.4f", r.a_allocs)
 		strings.write_byte(&sb, ',')
 		_write_json_f64(&sb, "%.4f", r.b_allocs)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.shift_pct)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.shift_low_pct)
+		strings.write_byte(&sb, ',')
+		_write_json_f64(&sb, "%.4f", r.shift_high_pct)
+		strings.write_byte(&sb, ',')
+		_write_json_bool(&sb, r.used_shift_ci)
 		strings.write_byte(&sb, '\n')
 	}
 	return strings.to_string(sb)

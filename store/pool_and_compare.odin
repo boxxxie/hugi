@@ -5,6 +5,7 @@ import hugi "../hugi"
 import "base:runtime"
 import "core:fmt"
 import "core:math"
+import "core:slice"
 import "core:strings"
 
 Pooled_Record :: struct {
@@ -113,6 +114,13 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 	sum_temp_bytes := 0.0
 	max_peak := last.peak_heap_bytes
 
+	sum_eff := 0.0
+	weighted_r1 := 0.0
+	total_diag_samples := 0
+	best_trend := 0.0
+	max_modes := 1
+	has_raw_samples := false
+
 	for &rec in g.records {
 		if rec.p50_fs > 0 || rec.samples > 0 {
 			append(&run_medians, rec.p50_fs)
@@ -121,16 +129,39 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 			same_ops = false
 		}
 		if len(rec.samples_batch_ns) > 0 {
+			has_raw_samples = true
 			ops := max(rec.ops_per_sample, 1)
-			for b in rec.samples_batch_ns {
-				append(&pooled_fs, hugi.batch_ns_to_op_fs(b, ops))
+			rec_n := len(rec.samples_batch_ns)
+			rec_f64 := make([]f64, rec_n, context.temp_allocator)
+			for b, idx in rec.samples_batch_ns {
+				op_fs := hugi.batch_ns_to_op_fs(b, ops)
+				append(&pooled_fs, op_fs)
+				rec_f64[idx] = f64(op_fs)
 			}
 			if same_ops {
 				append(&pooled_batches, ..rec.samples_batch_ns[:])
 			}
+			r1 := obench.lag1_autocorrelation(rec_f64)
+			sum_eff += obench.effective_sample_count(rec_n, r1)
+			if rec_n >= 3 {
+				weighted_r1 += r1 * f64(rec_n)
+				total_diag_samples += rec_n
+			}
+			trend, trend_z := obench.sample_trend(rec_f64, context.temp_allocator)
+			if abs(trend_z) > 2.576 &&
+			   abs(trend) >= obench.TREND_MIN_PCT &&
+			   abs(trend) > abs(best_trend) {
+				best_trend = trend
+			}
+			m := obench.count_modes(rec_f64, context.temp_allocator)
+			if m > max_modes {
+				max_modes = m
+			}
+			delete(rec_f64, context.temp_allocator)
 		} else if len(g.records) > 1 && rec.p50_fs > 0 {
 			append(&pooled_fs, rec.p50_fs)
 			same_ops = false
+			sum_eff += 1.0
 		}
 		if rec.footprint_bytes > footprint {
 			footprint = rec.footprint_bytes
@@ -210,15 +241,34 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 		pr.iqr_fs = st.iqr_fs
 		pr.mad_fs = st.mad_fs
 
-		samples_f64 := _samples_fs_as_f64(pr.samples_fs[:], context.temp_allocator)
-		defer delete(samples_f64, context.temp_allocator)
-		pr.autocorrelation = obench.lag1_autocorrelation(samples_f64)
-		pr.effective_samples = obench.effective_sample_count(len(samples_f64), pr.autocorrelation)
-		trend, trend_z := obench.sample_trend(samples_f64, context.temp_allocator)
-		if abs(trend_z) > 2.576 && abs(trend) >= obench.TREND_MIN_PCT {
-			pr.trend_pct = trend
+		if !has_raw_samples {
+			pr.autocorrelation = 0
+			pr.effective_samples = f64(pr.samples)
+			pr.trend_pct = 0
+			pr.modes = 1
+			if pr.samples > 1 {
+				eff := f64(pr.samples)
+				pr.ci95_fs = i64(
+					math.round(
+						obench.t_critical_975(eff - 1) * (f64(st.std_dev_fs) / math.sqrt(eff)),
+					),
+				)
+			}
+		} else {
+			pr.autocorrelation =
+				total_diag_samples > 0 ? weighted_r1 / f64(total_diag_samples) : 0.0
+			pr.effective_samples = sum_eff
+			pr.trend_pct = best_trend
+			pr.modes = max_modes
+			if len(g.records) > 1 && pr.samples > 1 {
+				eff := clamp(pr.effective_samples, 2.0, f64(pr.samples))
+				pr.ci95_fs = i64(
+					math.round(
+						obench.t_critical_975(eff - 1) * (f64(st.std_dev_fs) / math.sqrt(eff)),
+					),
+				)
+			}
 		}
-		pr.modes = obench.count_modes(samples_f64, context.temp_allocator)
 
 		if pr.p50_fs > 0 {
 			ops_s, _, mb_s := hugi.compute_throughput_from_p50(pr.p50_fs, pr.bytes_per_op)
@@ -618,6 +668,91 @@ _Significance_Result :: struct {
 	stat_diff:      bool,
 }
 
+@(private = "file", require_results)
+_hodges_lehmann_shift_eff :: proc(
+	current, baseline: []f64,
+	eff_cur, eff_base: f64,
+	adjust_for_autocorrelation: bool,
+	allocator := context.temp_allocator,
+) -> (
+	shift_pct, low_pct, high_pct: f64,
+	ok: bool,
+) {
+	n, m := len(current), len(baseline)
+	if n < 2 || m < 2 {
+		return
+	}
+	if !adjust_for_autocorrelation || (n <= 20 && m <= 20) {
+		return obench.hodges_lehmann_shift(
+			current,
+			baseline,
+			adjust_for_autocorrelation = false,
+			allocator = allocator,
+		)
+	}
+
+	FLOOR :: 1e-6
+	MAX_PAIRS :: 1_000_000
+	Z_975 :: 1.959963984540054
+
+	logs := proc(values: []f64, alloc: runtime.Allocator) -> []f64 {
+		out := make([]f64, len(values), alloc)
+		for v, i in values {
+			out[i] = math.ln(max(v, FLOOR))
+		}
+		slice.sort(out)
+		return out
+	}
+	thin := proc(values: []f64, limit: int, alloc: runtime.Allocator) -> []f64 {
+		if len(values) <= limit {
+			return values
+		}
+		out := make([]f64, limit, alloc)
+		for i in 0 ..< limit {
+			out[i] = values[i * (len(values) - 1) / (limit - 1)]
+		}
+		return out
+	}
+
+	lx := logs(current, allocator)
+	defer delete(lx, allocator)
+	ly := logs(baseline, allocator)
+	defer delete(ly, allocator)
+	tx, ty := lx, ly
+	if n * m > MAX_PAIRS {
+		side := int(math.sqrt(f64(MAX_PAIRS)))
+		tx = thin(lx, side, allocator)
+		ty = thin(ly, side, allocator)
+	}
+	defer if len(tx) != len(lx) {delete(tx, allocator)}
+	defer if len(ty) != len(ly) {delete(ty, allocator)}
+
+	diffs := make([]f64, len(tx) * len(ty), allocator)
+	defer delete(diffs, allocator)
+	for x, i in tx {
+		for y, j in ty {
+			diffs[i * len(ty) + j] = x - y
+		}
+	}
+	slice.sort(diffs)
+	total := len(diffs)
+	median := (diffs[(total - 1) / 2] + diffs[total / 2]) / 2
+
+	ne := max(f64(len(tx)) * clamp(eff_cur / f64(n), 0.0, 1.0), 2.0)
+	me := max(f64(len(ty)) * clamp(eff_base / f64(m), 0.0, 1.0), 2.0)
+	big_n := f64(total)
+	k := clamp(
+		int(math.floor(big_n / 2 - Z_975 * big_n * math.sqrt((ne + me + 1) / (12 * ne * me)))),
+		1,
+		total / 2,
+	)
+
+	pct :: proc "contextless" (log_ratio: f64) -> f64 {
+		return (math.exp(log_ratio) - 1) * 100
+	}
+	return pct(median), pct(diffs[k - 1]), pct(diffs[total - k]), true
+}
+
 @(private, require_results)
 _compare_significance :: proc(
 	mean_a, std_a: i64,
@@ -626,6 +761,9 @@ _compare_significance :: proc(
 	mean_b, std_b: i64,
 	n_b: int,
 	samples_b: []i64,
+	eff_a: f64 = 0,
+	eff_b: f64 = 0,
+	adjust_for_autocorrelation := true,
 ) -> _Significance_Result {
 	wt, wdf := obench.welch_test(f64(mean_a), f64(std_a), n_a, f64(mean_b), f64(std_b), n_b)
 	welch_sig := wdf > 0 && abs(wt) >= obench.t_critical_975(wdf)
@@ -640,12 +778,37 @@ _compare_significance :: proc(
 		b_f64 := _samples_fs_as_f64(samples_b, context.temp_allocator)
 		defer delete(a_f64, context.temp_allocator)
 		defer delete(b_f64, context.temp_allocator)
-		_, _, p_val = obench.mann_whitney_u(a_f64, b_f64, context.temp_allocator)
-		shift, low, high, shift_ok := obench.hodges_lehmann_shift(
+
+		ne_eff := f64(len(samples_a))
+		me_eff := f64(len(samples_b))
+		if adjust_for_autocorrelation {
+			ne_eff =
+				eff_a > 0 ? clamp(eff_a, 2.0, f64(len(samples_a))) : obench.effective_sample_count(len(samples_a), obench.lag1_autocorrelation(a_f64))
+			me_eff =
+				eff_b > 0 ? clamp(eff_b, 2.0, f64(len(samples_b))) : obench.effective_sample_count(len(samples_b), obench.lag1_autocorrelation(b_f64))
+		}
+
+		_, z_raw, raw_p := obench.mann_whitney_u(a_f64, b_f64, context.temp_allocator)
+		p_val = raw_p
+		if adjust_for_autocorrelation && (len(samples_a) > 20 || len(samples_b) > 20) {
+			fa, fb := f64(len(samples_a)), f64(len(samples_b))
+			if ne_eff < fa || me_eff < fb {
+				var_scale :=
+					((ne_eff + me_eff + 1.0) * fa * fb) / ((fa + fb + 1.0) * ne_eff * me_eff)
+				if var_scale > 1.0 {
+					z_adj := z_raw / math.sqrt(var_scale)
+					p_val = math.erfc(abs(z_adj) / math.SQRT_TWO)
+				}
+			}
+		}
+
+		shift, low, high, shift_ok := _hodges_lehmann_shift_eff(
 			a_f64,
 			b_f64,
-			adjust_for_autocorrelation = true,
-			allocator = context.temp_allocator,
+			ne_eff,
+			me_eff,
+			adjust_for_autocorrelation,
+			context.temp_allocator,
 		)
 		if shift_ok {
 			shift_pct = shift
@@ -762,6 +925,7 @@ compare_records :: proc(
 				b_run_st.std_dev_fs,
 				row_base_samples,
 				b.run_medians_fs[:],
+				adjust_for_autocorrelation = false,
 			)
 			row_used_run_medians = true
 		} else {
@@ -777,6 +941,9 @@ compare_records :: proc(
 				b.std_dev_fs,
 				b.samples,
 				b.samples_fs[:],
+				eff_a = c.effective_samples,
+				eff_b = b.effective_samples,
+				adjust_for_autocorrelation = true,
 			)
 		}
 
@@ -1074,36 +1241,50 @@ compare_1v1_langs :: proc(
 
 		a_med := f64(max(a.p50_fs, 1))
 		b_med := f64(max(b.p50_fs, 1))
-		sig: _Significance_Result
-		welch_t := 0.0
-		if a_med <= b_med {
-			sig = _compare_significance(
-				b.mean_fs,
-				b.std_dev_fs,
-				b.samples,
-				b.samples_fs[:],
-				a.mean_fs,
-				a.std_dev_fs,
-				a.samples,
-				a.samples_fs[:],
-			)
-			welch_t = sig.welch_t == 0 ? 0.0 : -sig.welch_t
-		} else {
-			sig = _compare_significance(
-				a.mean_fs,
-				a.std_dev_fs,
-				a.samples,
-				a.samples_fs[:],
-				b.mean_fs,
-				b.std_dev_fs,
-				b.samples,
-				b.samples_fs[:],
-			)
-			welch_t = sig.welch_t
-		}
+		sig := _compare_significance(
+			a.mean_fs,
+			a.std_dev_fs,
+			a.samples,
+			a.samples_fs[:],
+			b.mean_fs,
+			b.std_dev_fs,
+			b.samples,
+			b.samples_fs[:],
+			eff_a = a.effective_samples,
+			eff_b = b.effective_samples,
+			adjust_for_autocorrelation = true,
+		)
+		welch_t := sig.welch_t
 
 		hl_shift, hl_low, hl_high := sig.shift_pct, sig.shift_low_pct, sig.shift_high_pct
 		hl_used_ci := sig.used_shift_ci
+		hl_faster := ""
+		if sig.used_rank_test {
+			invert_hl_pct :: proc "contextless" (pct: f64) -> f64 {
+				denom := 1.0 + pct / 100.0
+				if denom <= 0 {
+					return 0.0
+				}
+				return (1.0 / denom - 1.0) * 100.0
+			}
+			flip_to_b_vs_a := false
+			if hl_shift < 0 {
+				flip_to_b_vs_a = true
+				hl_faster = lang_a
+			} else if hl_shift > 0 {
+				hl_faster = lang_b
+			} else if a_med < b_med || (a_med == b_med && hl_high < -hl_low) {
+				flip_to_b_vs_a = true
+				hl_faster = lang_a
+			} else {
+				hl_faster = lang_b
+			}
+			if flip_to_b_vs_a {
+				hl_shift = invert_hl_pct(sig.shift_pct)
+				hl_low = invert_hl_pct(sig.shift_high_pct)
+				hl_high = invert_hl_pct(sig.shift_low_pct)
+			}
+		}
 
 		rel_diff := abs(a_med - b_med) / min(a_med, b_med) * 100.0
 		is_sig :=
@@ -1111,9 +1292,18 @@ compare_1v1_langs :: proc(
 
 		faster := "tie"
 		ratio := 1.0
-		if rel_diff < 0.5 {
+		if rel_diff < 0.5 && !(hl_used_ci && is_sig && hl_low > max(threshold_pct, 0.5)) {
 			is_sig = false
 			rep.ties += 1
+		} else if hl_used_ci && is_sig && hl_faster != "" {
+			faster = hl_faster
+			if hl_faster == lang_a {
+				ratio = b_med / a_med
+				rep.a_wins += 1
+			} else {
+				ratio = a_med / b_med
+				rep.b_wins += 1
+			}
 		} else if a_med < b_med {
 			faster = lang_a
 			ratio = b_med / a_med

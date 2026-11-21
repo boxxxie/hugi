@@ -558,6 +558,24 @@ test_obench_v6_json_importer_maps_metadata_and_preserves_legacy_v3 :: proc(t: ^t
 		}
 	}
 
+	// commit_override takes precedence over doc.git.commit, and boost="off" maps to -1.
+	pkts_ovr, ovr_ok := hugi.read_obench_json_packets(v6_path, commit_override = "override999")
+	defer hugi.packets_destroy(pkts_ovr)
+	testing.expect(t, ovr_ok, "read_obench_json_packets with commit_override should succeed")
+	if ovr_ok && len(pkts_ovr) == 1 {
+		testing.expect_value(t, pkts_ovr[0].commit, "override999")
+	}
+
+	v6_off_path := strings.concatenate({tmp, "/v6_off.json"}, context.temp_allocator)
+	v6_off_json := `{"format_version":6,"suite_name":"v6_off","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev-2026-10","machine":{"cpu":"CPU","cores":4,"governor":"powersave","boost":"off"},"benchmarks":[{"suite_name":"v6_off","group_name":"g","name":"b","full_name":"g::b","samples":3,"batch_size":1,"min_ns":10.0,"p50_ns":10.0,"p95_ns":10.0,"p99_ns":10.0,"max_ns":10.0,"mean_ns":10.0}]}`
+	testing.expect(t, os.write_entire_file(v6_off_path, transmute([]u8)v6_off_json) == nil)
+	pkts_off, off_ok := hugi.read_obench_json_packets(v6_off_path)
+	defer hugi.packets_destroy(pkts_off)
+	testing.expect(t, off_ok, "read_obench_json_packets boost=off should succeed")
+	if off_ok && len(pkts_off) == 1 {
+		testing.expect_value(t, pkts_off[0].env.boost_state, i8(-1))
+	}
+
 	// Legacy v3 report without machine/build metadata must leave pkt.env empty.
 	v3_path := strings.concatenate({tmp, "/v3.json"}, context.temp_allocator)
 	v3_json := `{"format_version":3,"suite_name":"v3_suite","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev","benchmarks":[{"suite_name":"v3_suite","group_name":"math","name":"mul","full_name":"math::mul","samples":3,"batch_size":10,"min_ns":10.0,"p50_ns":10.1,"p95_ns":10.2,"p99_ns":10.2,"max_ns":10.2,"mean_ns":10.1,"samples_batch_ns":[100,101,102]}]}`
@@ -685,4 +703,97 @@ test_suite_failure_messages_and_host_warned_dedup :: proc(t: ^testing.T) {
 	bl_ok := hugi.suite_execute(&s_bl)
 	testing.expect(t, !bl_ok, "mismatched baseline must fail suite_execute")
 	testing.expect(t, s_bl.failed_baseline > 0, "failed_baseline must be forwarded to hugi.Suite")
+
+	// 3. Packet write I/O failure produces a suite_failure_messages entry.
+	cfg_io := hugi.default_suite_config()
+	cfg_io.quiet = true
+	cfg_io.obench_cfg.sample_count = 5
+	cfg_io.obench_cfg.warmup_time = 0
+	cfg_io.obench_cfg.fixed_batch_size = 1
+	cfg_io.packet_out_path = strings.concatenate(
+		{tmp, "/missing_dir/out.hpk"},
+		context.temp_allocator,
+	)
+	s_io := hugi.suite_create("io_fail_suite", cfg_io)
+	defer hugi.suite_destroy(&s_io)
+	hugi.bench(&s_io, "work", proc(b: ^hugi.Bencher) {
+		for hugi.step(b) {
+			_ = hugi.black_box(1)
+		}
+	})
+	io_ok := hugi.suite_execute(&s_io)
+	testing.expect(t, !io_ok, "unwritable packet_out_path must fail suite_execute")
+	testing.expect_value(t, s_io.failed_io, 1)
+	io_msgs := hugi.suite_failure_messages(&s_io, context.allocator)
+	defer {
+		for m in io_msgs {
+			delete(m)
+		}
+		delete(io_msgs)
+	}
+	saw_io := false
+	for m in io_msgs {
+		if strings.contains(m, "could not write packet") {
+			saw_io = true
+		}
+	}
+	testing.expect(t, saw_io, "suite_failure_messages should report packet write failure")
+
+	// 4. Forward failed_alloc_regressions from obench into hugi.Suite.
+	alloc_base_path := strings.concatenate({tmp, "/alloc_base.json"}, context.temp_allocator)
+	cfg_ab := hugi.default_suite_config()
+	cfg_ab.quiet = true
+	cfg_ab.obench_cfg.sample_count = 5
+	cfg_ab.obench_cfg.warmup_time = 0
+	cfg_ab.obench_cfg.fixed_batch_size = 1
+	cfg_ab.obench_cfg.baseline_save_path = alloc_base_path
+	{
+		s_ab := hugi.suite_create("alloc_reg_suite", cfg_ab)
+		defer hugi.suite_destroy(&s_ab)
+		hugi.bench(&s_ab, "work", proc(b: ^hugi.Bencher) {
+			for hugi.step(b) {
+				acc := u64(1)
+				for k in 0 ..< 512 {
+					acc = acc * 6364136223846793005 + u64(k)
+				}
+				_ = hugi.black_box(acc)
+			}
+		})
+		testing.expect(t, hugi.suite_execute(&s_ab), "baseline save run should succeed")
+	}
+
+	cfg_ac := cfg_ab
+	cfg_ac.obench_cfg.baseline_save_path = ""
+	cfg_ac.obench_cfg.baseline_load_path = alloc_base_path
+	cfg_ac.obench_cfg.fail_on_alloc_regression = true
+	s_alloc := hugi.suite_create("alloc_reg_suite", cfg_ac)
+	defer hugi.suite_destroy(&s_alloc)
+	hugi.bench(&s_alloc, "work", proc(b: ^hugi.Bencher) {
+		for hugi.step(b) {
+			buf := make([]u8, 32)
+			acc := u64(1)
+			for k in 0 ..< 512 {
+				acc = acc * 6364136223846793005 + u64(k)
+			}
+			_ = hugi.black_box(u64(buf[0]) + acc)
+			delete(buf)
+		}
+	})
+	alloc_ok := hugi.suite_execute(&s_alloc)
+	testing.expect(t, !alloc_ok, "alloc regression with fail_on_alloc_regression must fail suite")
+	testing.expect_value(t, s_alloc.failed_alloc_regressions, 1)
+	alloc_msgs := hugi.suite_failure_messages(&s_alloc, context.allocator)
+	defer {
+		for m in alloc_msgs {
+			delete(m)
+		}
+		delete(alloc_msgs)
+	}
+	saw_alloc_reg := false
+	for m in alloc_msgs {
+		if strings.contains(m, "work") && strings.contains(m, "allocates more") {
+			saw_alloc_reg = true
+		}
+	}
+	testing.expect(t, saw_alloc_reg, "suite_failure_messages should report allocation regression")
 }

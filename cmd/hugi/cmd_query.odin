@@ -130,6 +130,19 @@ _cmd_history :: proc(args: []string) -> int {
 	return 0
 }
 
+@(private = "file")
+_append_sample_shape_badges :: proc(sb: ^strings.Builder, r: store.Pooled_Record) {
+	if r.trend_pct != 0 {
+		fmt.sbprintf(sb, " [drifts %+.0f%%]", r.trend_pct)
+	}
+	if r.modes > 1 {
+		fmt.sbprintf(sb, " [%d modes]", r.modes)
+	}
+	if r.autocorrelation > 0.25 {
+		fmt.sbprintf(sb, " [r1=%.2f, n_eff=%.1f]", r.autocorrelation, r.effective_samples)
+	}
+}
+
 @(private)
 _cmd_inspect :: proc(args: []string) -> int {
 	common := _Common_Opts {
@@ -214,20 +227,7 @@ _cmd_inspect :: proc(args: []string) -> int {
 		fmt.println("\nQuantile Breakdown:")
 		for r in records {
 			extras := strings.builder_make(context.temp_allocator)
-			if r.trend_pct != 0 {
-				fmt.sbprintf(&extras, " [drifts %+.0f%%]", r.trend_pct)
-			}
-			if r.modes > 1 {
-				fmt.sbprintf(&extras, " [%d modes]", r.modes)
-			}
-			if r.autocorrelation > 0.25 {
-				fmt.sbprintf(
-					&extras,
-					" [r1=%.2f, n_eff=%.1f]",
-					r.autocorrelation,
-					r.effective_samples,
-				)
-			}
+			_append_sample_shape_badges(&extras, r)
 			fmt.printfln(
 				"  %-36s min=%s p25=%s p50=%s p75=%s p95=%s p99=%s ci95=±%s iqr=%s mad=%s allocs=%.1f footprint=%s%s",
 				r.full_name,
@@ -244,6 +244,61 @@ _cmd_inspect :: proc(args: []string) -> int {
 				obench.format_bytes(f64(r.footprint_bytes), context.temp_allocator),
 				strings.to_string(extras),
 			)
+		}
+	} else {
+		drifting_cnt, multimodal_cnt, autocorr_cnt, flagged_cnt := 0, 0, 0, 0
+		for r in records {
+			flagged := false
+			if r.trend_pct != 0 {
+				drifting_cnt += 1
+				flagged = true
+			}
+			if r.modes > 1 {
+				multimodal_cnt += 1
+				flagged = true
+			}
+			if r.autocorrelation > 0.25 {
+				autocorr_cnt += 1
+				flagged = true
+			}
+			if flagged {
+				flagged_cnt += 1
+			}
+		}
+		if flagged_cnt > 0 {
+			fmt.printfln(
+				"\nWARNING: Sample-Shape Warnings (%d/%d benchmarks; drifting=%d, multimodal=%d, r1>0.25=%d; narrow with --filter for full quantiles):",
+				flagged_cnt,
+				len(records),
+				drifting_cnt,
+				multimodal_cnt,
+				autocorr_cnt,
+			)
+			shown := 0
+			for pass in 0 ..< 2 {
+				for r in records {
+					has_shape_warn := r.trend_pct != 0 || r.modes > 1
+					if pass == 0 && !has_shape_warn {
+						continue
+					}
+					if pass == 1 && (has_shape_warn || r.autocorrelation <= 0.25) {
+						continue
+					}
+					if shown >= 25 {
+						break
+					}
+					extras := strings.builder_make(context.temp_allocator)
+					_append_sample_shape_badges(&extras, r)
+					fmt.printfln("  %-36s%s", r.full_name, strings.to_string(extras))
+					shown += 1
+				}
+				if shown >= 25 {
+					break
+				}
+			}
+			if flagged_cnt > shown {
+				fmt.printfln("  ... and %d more flagged benchmark(s)", flagged_cnt - shown)
+			}
 		}
 	}
 	return 0

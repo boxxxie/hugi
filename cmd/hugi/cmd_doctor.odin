@@ -3,6 +3,7 @@ package hugi_cli
 import obench "../../deps/obench/obench"
 import hugi "../../hugi"
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:strings"
 import "core:sys/info"
@@ -32,6 +33,20 @@ _doctor_write_json_str :: proc(sb: ^strings.Builder, s: string) {
 		}
 	}
 	strings.write_byte(sb, '"')
+}
+
+@(private)
+_doctor_load_avg_known :: proc(load_avg: f64, source_available: bool) -> bool {
+	return source_available && !math.is_nan(load_avg) && !math.is_inf(load_avg, 0) && load_avg >= 0
+}
+
+@(private)
+_doctor_write_load_avg_json :: proc(sb: ^strings.Builder, load_avg: f64, known: bool) {
+	if !known || math.is_nan(load_avg) || math.is_inf(load_avg, 0) {
+		strings.write_string(sb, "null")
+		return
+	}
+	fmt.sbprintf(sb, "%.2f", load_avg)
 }
 
 @(private)
@@ -103,6 +118,13 @@ _cmd_doctor :: proc(args: []string) -> int {
 	}
 
 	_, cfg_path, cfg, has_cfg := _read_nearest_project_config(".")
+	load_source_available := false
+	when ODIN_OS == .Linux {
+		load_source_available = os.exists("/proc/loadavg")
+	} else when ODIN_OS == .Darwin {
+		load_source_available = true
+	}
+	load_known := _doctor_load_avg_known(mstate.load_avg, load_source_available)
 
 	if rep_fmt == "json" {
 		sb := strings.builder_make(context.temp_allocator)
@@ -121,11 +143,15 @@ _cmd_doctor :: proc(args: []string) -> int {
 		_doctor_write_json_str(&sb, mstate.smt)
 		fmt.sbprintf(
 			&sb,
-			",\n  \"scaling_max_khz\": %d,\n  \"cpuinfo_max_khz\": %d,\n  \"boost_state\": %d,\n  \"load_avg\": %.2f,\n  \"on_battery\": %s,\n  \"vm\": %s,\n  \"config_path\": ",
+			",\n  \"scaling_max_khz\": %d,\n  \"cpuinfo_max_khz\": %d,\n  \"boost_state\": %d,\n  \"load_avg\": ",
 			env.scaling_max_khz,
 			env.cpuinfo_max_khz,
 			env.boost_state,
-			mstate.load_avg,
+		)
+		_doctor_write_load_avg_json(&sb, mstate.load_avg, load_known)
+		fmt.sbprintf(
+			&sb,
+			",\n  \"on_battery\": %s,\n  \"vm\": %s,\n  \"config_path\": ",
 			mstate.on_battery ? "true" : "false",
 			mstate.vm ? "true" : "false",
 		)
@@ -192,7 +218,7 @@ _cmd_doctor :: proc(args: []string) -> int {
 		boost_label = "disabled"
 	}
 	fmt.printfln("  Boost / turbo:    %s", boost_label)
-	if mstate.load_avg > 0 {
+	if load_known {
 		fmt.printfln("  Load average:     %.2f", mstate.load_avg)
 	} else {
 		fmt.println("  Load average:     unknown")

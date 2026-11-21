@@ -797,3 +797,77 @@ test_suite_failure_messages_and_host_warned_dedup :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, saw_alloc_reg, "suite_failure_messages should report allocation regression")
 }
+
+@(test)
+test_suite_test_mode_pin_and_counters_no_leaks :: proc(t: ^testing.T) {
+	// 1. test_mode runs pipelines once (warmup=0, samples=1) and still enforces @zero_alloc.
+	cfg_test := hugi.default_suite_config()
+	cfg_test.quiet = true
+	cfg_test.obench_cfg.test_mode = true
+
+	s_test := hugi.suite_create("test_mode_suite", cfg_test)
+	defer hugi.suite_destroy(&s_test)
+
+	hugi.group_pipeline(&s_test, "pipe", proc(p: ^hugi.Pipeline) {
+			{
+				_ = hugi.scoped_phase(p, "clean", ops = 1, zero_alloc = true)
+				_ = hugi.black_box(42)
+			}
+			{
+				_ = hugi.scoped_phase(p, "leaker", ops = 1, zero_alloc = true)
+				buf := make([]u8, 32)
+				_ = hugi.black_box(len(buf))
+				delete(buf)
+			}
+		}, runs = 5, warmup = 2)
+
+	ok := hugi.suite_execute(&s_test)
+	testing.expect(t, !ok, "test_mode must still catch @zero_alloc pipeline violations")
+	testing.expect_value(t, s_test.failed_zero_alloc, 1)
+	testing.expect_value(t, len(s_test.last_packet.records), 2)
+	if len(s_test.last_packet.records) == 2 {
+		testing.expect_value(t, s_test.last_packet.records[0].samples, 1)
+		testing.expect_value(t, s_test.last_packet.records[0].warmup, 0)
+		testing.expect(t, !s_test.last_packet.records[0].zero_alloc_failed)
+		testing.expect(t, s_test.last_packet.records[1].zero_alloc_failed)
+	}
+	sb_test := strings.builder_make(context.temp_allocator)
+	hugi.write_terminal_summary(&sb_test, &s_test)
+	testing.expect(
+		t,
+		strings.contains(strings.to_string(sb_test), "--test ran every pipeline once"),
+		"terminal summary should note --test mode for pipeline-only suites",
+	)
+
+	// 2. pin_cpu + counters run cleanly without leaks even when counters are unavailable.
+	cfg_hw := hugi.default_suite_config()
+	cfg_hw.quiet = true
+	cfg_hw.runs = 2
+	cfg_hw.warmup = 0
+	cfg_hw.obench_cfg.pin_cpu = 0
+	cfg_hw.obench_cfg.counters = true
+
+	s_hw := hugi.suite_create("pin_counters_suite", cfg_hw)
+	defer hugi.suite_destroy(&s_hw)
+
+	hugi.group_pipeline(&s_hw, "pipe", proc(p: ^hugi.Pipeline) {
+			_ = hugi.scoped_phase(p, "step", ops = 1)
+			acc := 0
+			for i in 0 ..< 16 {
+				acc += i
+			}
+			_ = hugi.black_box(acc)
+		}, runs = 2, warmup = 0)
+
+	hw_ok := hugi.suite_execute(&s_hw)
+	testing.expect(t, hw_ok, "pin_cpu + counters suite must succeed")
+	if s_hw.counters_unavailable != "" {
+		sb_hw := strings.builder_make(context.temp_allocator)
+		hugi.write_terminal_summary(&sb_hw, &s_hw)
+		testing.expect(
+			t,
+			strings.contains(strings.to_string(sb_hw), "--counters: no hardware counters here"),
+			"unavailable hardware counters should emit a clear note",
+		)
+	}
+}

@@ -1,8 +1,11 @@
 package hugi_cli
 
+import obench "../../deps/obench/obench"
 import hugi "../../hugi"
 import "core:fmt"
+import "core:os"
 import "core:strings"
+import "core:sys/info"
 
 @(private = "file")
 _doctor_write_json_str :: proc(sb: ^strings.Builder, s: string) {
@@ -77,6 +80,28 @@ _cmd_doctor :: proc(args: []string) -> int {
 		delete(warnings)
 	}
 
+	mstate := obench.read_machine_state(context.allocator)
+	defer obench.machine_state_destroy(&mstate, context.allocator)
+	_, cores, _ := info.cpu_core_count()
+	if cores <= 0 {
+		cores = os.get_processor_core_count()
+	}
+	mnotes := obench.machine_notes(mstate, cores, context.temp_allocator)
+	notes := make([dynamic]string, context.temp_allocator)
+	for n in mnotes {
+		if n.warning {
+			// Avoid duplicating the governor warning already emitted by hugi.check_host_env.
+			if env.governor != "" &&
+			   env.governor != "performance" &&
+			   strings.contains(n.text, "CPU governor") {
+				continue
+			}
+			append(&warnings, strings.clone(n.text, context.allocator))
+		} else {
+			append(&notes, n.text)
+		}
+	}
+
 	_, cfg_path, cfg, has_cfg := _read_nearest_project_config(".")
 
 	if rep_fmt == "json" {
@@ -89,14 +114,20 @@ _cmd_doctor :: proc(args: []string) -> int {
 		_doctor_write_json_str(&sb, ODIN_VERSION)
 		strings.write_string(&sb, ",\n  \"cpu_model\": ")
 		_doctor_write_json_str(&sb, env.cpu_model)
+		fmt.sbprintf(&sb, ",\n  \"cores\": %d", cores)
 		strings.write_string(&sb, ",\n  \"governor\": ")
 		_doctor_write_json_str(&sb, env.governor)
+		strings.write_string(&sb, ",\n  \"smt\": ")
+		_doctor_write_json_str(&sb, mstate.smt)
 		fmt.sbprintf(
 			&sb,
-			",\n  \"scaling_max_khz\": %d,\n  \"cpuinfo_max_khz\": %d,\n  \"boost_state\": %d,\n  \"config_path\": ",
+			",\n  \"scaling_max_khz\": %d,\n  \"cpuinfo_max_khz\": %d,\n  \"boost_state\": %d,\n  \"load_avg\": %.2f,\n  \"on_battery\": %s,\n  \"vm\": %s,\n  \"config_path\": ",
 			env.scaling_max_khz,
 			env.cpuinfo_max_khz,
 			env.boost_state,
+			mstate.load_avg,
+			mstate.on_battery ? "true" : "false",
+			mstate.vm ? "true" : "false",
 		)
 		_doctor_write_json_str(&sb, has_cfg ? cfg_path : "")
 		strings.write_string(&sb, ",\n  \"config\": {\n    \"db\": ")
@@ -117,6 +148,13 @@ _cmd_doctor :: proc(args: []string) -> int {
 			}
 			_doctor_write_json_str(&sb, w)
 		}
+		strings.write_string(&sb, "],\n  \"notes\": [")
+		for note, idx in notes {
+			if idx > 0 {
+				strings.write_string(&sb, ", ")
+			}
+			_doctor_write_json_str(&sb, note)
+		}
 		strings.write_string(&sb, "],\n  \"ok\": ")
 		strings.write_string(&sb, len(warnings) == 0 ? "true" : "false")
 		strings.write_string(&sb, "\n}\n")
@@ -131,7 +169,9 @@ _cmd_doctor :: proc(args: []string) -> int {
 		ODIN_VERSION,
 	)
 	fmt.printfln("  CPU model:        %s", env.cpu_model != "" ? env.cpu_model : "unknown")
+	fmt.printfln("  Logical cores:    %d", cores)
 	fmt.printfln("  Governor:         %s", env.governor != "" ? env.governor : "unknown")
+	fmt.printfln("  SMT:              %s", mstate.smt != "" ? mstate.smt : "unknown")
 	if env.scaling_max_khz > 0 && env.cpuinfo_max_khz > 0 {
 		pct := f64(env.scaling_max_khz) / f64(env.cpuinfo_max_khz) * 100.0
 		fmt.printfln(
@@ -152,6 +192,13 @@ _cmd_doctor :: proc(args: []string) -> int {
 		boost_label = "disabled"
 	}
 	fmt.printfln("  Boost / turbo:    %s", boost_label)
+	if mstate.load_avg > 0 {
+		fmt.printfln("  Load average:     %.2f", mstate.load_avg)
+	} else {
+		fmt.println("  Load average:     unknown")
+	}
+	fmt.printfln("  Power:            %s", mstate.on_battery ? "battery" : "AC / unknown")
+	fmt.printfln("  Virtual machine:  %s", mstate.vm ? "yes" : "no")
 	if has_cfg {
 		fmt.printfln(
 			"  Project config:   %s (db=%q, pkg_dir=%q, runs=%d, warmup=%d, extra_build_flags=%q)",
@@ -172,6 +219,9 @@ _cmd_doctor :: proc(args: []string) -> int {
 		for w in warnings {
 			fmt.printfln("WARNING: %s", w)
 		}
+	}
+	for note in notes {
+		fmt.printfln("NOTE: %s", note)
 	}
 
 	if strict && len(warnings) > 0 {

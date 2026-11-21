@@ -62,6 +62,7 @@ Suite :: struct {
 	failed_regressions:       int,
 	failed_io:                int,
 	failed_baseline:          int,
+	counters_unavailable:     string,
 	allocator:                runtime.Allocator,
 }
 
@@ -79,6 +80,14 @@ _apply_cli_flags :: proc(cfg: ^Suite_Config, args: []string) {
 			cfg.host_warned = true
 			continue
 		}
+		if arg == "--test" || arg == "-test" {
+			cfg.obench_cfg.test_mode = true
+			continue
+		}
+		if arg == "--counters" || arg == "-counters" {
+			cfg.obench_cfg.counters = true
+			continue
+		}
 		if !strings.has_prefix(arg, "-") {
 			continue
 		}
@@ -94,6 +103,7 @@ _apply_cli_flags :: proc(cfg: ^Suite_Config, args: []string) {
 		switch key {
 		case "runs",
 		     "warmup",
+		     "pin",
 		     "groups",
 		     "group",
 		     "filter",
@@ -121,6 +131,10 @@ _apply_cli_flags :: proc(cfg: ^Suite_Config, args: []string) {
 			if v, ok := strconv.parse_int(val); ok && v >= 0 {
 				cfg.warmup = v
 				cfg.obench_cfg.warmup_time = time.Duration(v) * time.Millisecond
+			}
+		case "pin":
+			if v, ok := strconv.parse_int(val); ok && v >= 0 {
+				cfg.obench_cfg.pin_cpu = v
 			}
 		case "groups", "group":
 			cfg.groups_filter = val
@@ -231,6 +245,7 @@ suite_destroy :: proc(s: ^Suite) {
 	delete(s.violations)
 	packet_destroy(&s.last_packet, s.allocator)
 	obench.suite_destroy(&s.obench_suite)
+	delete(s.counters_unavailable, s.allocator)
 	_delete_suite_config_strings(&s.config, s.allocator)
 	delete(s.name, s.allocator)
 	s^ = {}
@@ -399,6 +414,27 @@ _obench_result_to_record :: proc(
 			value = st.custom_metrics[i].value,
 		}
 	}
+	if st.has_counters {
+		_append_counter_metric(
+			&rec.metrics,
+			"instructions/op",
+			st.counters.instructions,
+			allocator,
+		)
+		_append_counter_metric(&rec.metrics, "cycles/op", st.counters.cycles, allocator)
+		_append_counter_metric(
+			&rec.metrics,
+			"branch_misses/op",
+			st.counters.branch_misses,
+			allocator,
+		)
+		_append_counter_metric(
+			&rec.metrics,
+			"cache_misses/op",
+			st.counters.cache_misses,
+			allocator,
+		)
+	}
 	return rec
 }
 
@@ -414,6 +450,8 @@ suite_execute :: proc(s: ^Suite) -> bool {
 	s.failed_regressions = 0
 	s.failed_io = 0
 	s.failed_baseline = 0
+	delete(s.counters_unavailable, s.allocator)
+	s.counters_unavailable = ""
 	for &v in s.violations {
 		delete(v.full_name, s.allocator)
 	}
@@ -485,6 +523,28 @@ suite_execute :: proc(s: ^Suite) -> bool {
 
 	// 2. Run matching stateful Pipeline groups using a private scratch arena.
 	if len(s.pipelines) > 0 {
+		pinned: obench.Thread_Pin
+		if cpu, pin := s.obench_suite.config.pin_cpu.?; pin {
+			p_ok: bool
+			p_why: string
+			pinned, p_ok, p_why = obench.pin_thread(cpu)
+			if !p_ok && len(s.obench_suite.results) == 0 {
+				fmt.eprintfln("hugi: warning: not pinned to CPU %d: %s", cpu, p_why)
+			}
+		}
+		defer obench.unpin_thread(pinned)
+
+		counter_group: obench.Counter_Group
+		if s.obench_suite.config.counters {
+			c_ok: bool
+			c_why: string
+			counter_group, c_ok, c_why = obench.counter_group_open()
+			if !c_ok {
+				s.counters_unavailable = strings.clone(c_why, s.allocator)
+			}
+		}
+		defer obench.counter_group_close(&counter_group)
+
 		temp_arena := runtime.Arena {
 			backing_allocator = s.allocator,
 		}
@@ -494,7 +554,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 			if !should_run_group(s.config.groups_filter, pdef.group_name) {
 				continue
 			}
-			recs, viols := _execute_pipeline(s, pdef, &rank, &temp_arena)
+			recs, viols := _execute_pipeline(s, pdef, &rank, &temp_arena, &counter_group)
 			for r in recs {
 				append(&pkt.records, r)
 			}
@@ -568,6 +628,21 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 		s.last_packet.commit,
 		format_duration_fs(ns_f64_to_fs(s.obench_suite.clock.overhead_ns), context.temp_allocator),
 	)
+	if len(s.obench_suite.results) == 0 {
+		if s.obench_suite.config.counters && s.counters_unavailable != "" {
+			fmt.sbprintf(
+				sb,
+				"note: --counters: no hardware counters here (%s)\n",
+				s.counters_unavailable,
+			)
+		}
+		if s.obench_suite.config.test_mode {
+			fmt.sbprintln(
+				sb,
+				"note: --test ran every pipeline once (warmup=0, runs=1), so the times aren't measurements.",
+			)
+		}
+	}
 	fmt.sbprintln(
 		sb,
 		"──────────────────────────────────────────────────────────────────────────────────────────────────────────────────",

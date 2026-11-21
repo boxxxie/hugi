@@ -21,7 +21,7 @@ _Ols_File :: struct {
 	checker_args: string `json:"checker_args"`,
 }
 
-@(private = "file")
+@(private)
 _Run_Opts :: struct {
 	pkg_dir:           string,
 	has_pkg:           bool,
@@ -37,6 +37,10 @@ _Run_Opts :: struct {
 	quiet:             bool,
 	overlay:           bool,
 	by_run:            bool,
+	pin_cpu:           int,
+	has_pin:           bool,
+	counters:          bool,
+	test_mode:         bool,
 }
 
 @(private = "file")
@@ -193,7 +197,7 @@ _has_opt_flag :: proc(flags: []string) -> bool {
 	return false
 }
 
-@(private = "file")
+@(private)
 _parse_run_args :: proc(args: []string) -> (opts: _Run_Opts, exit_code: int, done: bool) {
 	opts.pkg_dir = "."
 	opts.common.lang = "odin"
@@ -236,6 +240,17 @@ _parse_run_args :: proc(args: []string) -> (opts: _Run_Opts, exit_code: int, don
 			opts.fail_on_reg = true
 		case "by-run":
 			opts.by_run = true
+		case "counters":
+			opts.counters = true
+		case "test":
+			opts.test_mode = true
+		case "pin":
+			n, ok := _parse_nonneg_int_flag("run", key, args, &i, inline_val)
+			if !ok {
+				return opts, 1, true
+			}
+			opts.pin_cpu = n
+			opts.has_pin = true
 		case "runs":
 			v, ok := _consume_value(args, &i, inline_val, key)
 			if !ok {return opts, 1, true}
@@ -371,6 +386,15 @@ _exec_run_binary :: proc(
 	}
 	if opts.groups != "" {
 		append(&run_cmd, "--groups", opts.groups)
+	}
+	if opts.has_pin {
+		append(&run_cmd, "--pin", fmt.tprintf("%d", opts.pin_cpu))
+	}
+	if opts.counters {
+		append(&run_cmd, "--counters")
+	}
+	if opts.test_mode {
+		append(&run_cmd, "--test")
 	}
 	if opts.common.filter != "" {
 		append(&run_cmd, "--filter", opts.common.filter)
@@ -576,7 +600,14 @@ _cmd_run :: proc(args: []string) -> int {
 		allocator = context.allocator,
 	)
 
-	if !opts.no_db {
+	if opts.test_mode {
+		if opts.baseline_commit != "" {
+			fmt.eprintfln(
+				"hugi run: --test does not measure, so store ingestion and baseline '%s' comparison are skipped",
+				opts.baseline_commit,
+			)
+		}
+	} else if !opts.no_db {
 		if code := _ingest_and_compare_run_packet(opts, pkt); code != 0 {
 			return code
 		}

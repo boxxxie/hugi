@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:sys/info"
 
 Run_Env :: struct {
 	cpu_model:       string,
@@ -175,8 +176,11 @@ collect_host_env :: proc(allocator := context.allocator) -> Run_Env {
 				env.boost_state = -1
 			}
 		}
-	} else {
-		_ = allocator
+	}
+	if env.cpu_model == "" {
+		if name := strings.trim_space(info.cpu_name()); name != "" {
+			env.cpu_model = strings.clone(name, allocator)
+		}
 	}
 	return env
 }

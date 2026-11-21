@@ -393,3 +393,23 @@ test_open_store_or_err_db_path_survives_temp_allocator_reset :: proc(t: ^testing
 
 	testing.expect_value(t, db_path, expected_path)
 }
+
+@(test)
+test_cli_run_args_pin_counters_test_and_by_run :: proc(t: ^testing.T) {
+	opts, code, done := _parse_run_args(
+		[]string{"bench_pkg", "--pin", "0", "--counters", "--test", "--by-run"},
+	)
+	testing.expect(t, !done && code == 0, "valid run flags should parse cleanly")
+	testing.expect_value(t, opts.pkg_dir, "bench_pkg")
+	testing.expect(t, opts.has_pin, "--pin should set has_pin")
+	testing.expect_value(t, opts.pin_cpu, 0)
+	testing.expect(t, opts.counters, "--counters should set counters")
+	testing.expect(t, opts.test_mode, "--test should set test_mode")
+	testing.expect(t, opts.by_run, "--by-run should set by_run")
+
+	_, neg_code, neg_done := _parse_run_args([]string{"--pin=-1"})
+	testing.expect(t, neg_done && neg_code == 1, "negative --pin must fail parsing")
+
+	_, bad_code, bad_done := _parse_run_args([]string{"--pin", "abc"})
+	testing.expect(t, bad_done && bad_code == 1, "non-integer --pin must fail parsing")
+}

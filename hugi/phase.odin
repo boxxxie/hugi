@@ -78,20 +78,22 @@ _snap_merge_counter :: proc "contextless" (
 }
 
 Phase :: struct {
-	pipeline:        ^Pipeline,
-	slot_idx:        int,
-	name:            string,
-	ops:             int,
-	bytes_per_op:    u64,
-	zero_alloc:      bool,
-	start_ts:        obench.Timestamp,
-	footprint_bytes: u64,
-	metrics:         [MAX_METRICS]Metric,
-	metrics_count:   int,
-	_metric_buf:     [MAX_METRICS][obench.MAX_METRIC_UNIT_LEN]u8,
-	_heap_acc:       _Alloc_Counter_Snap,
-	_temp_acc:       _Alloc_Counter_Snap,
-	active:          bool,
+	pipeline:         ^Pipeline,
+	slot_idx:         int,
+	name:             string,
+	ops:              int,
+	bytes_per_op:     u64,
+	zero_alloc:       bool,
+	start_ts:         obench.Timestamp,
+	footprint_bytes:  u64,
+	metrics:          [MAX_METRICS]Metric,
+	metrics_count:    int,
+	_metric_buf:      [MAX_METRICS][obench.MAX_METRIC_UNIT_LEN]u8,
+	_heap_acc:        _Alloc_Counter_Snap,
+	_temp_acc:        _Alloc_Counter_Snap,
+	_counters_before: obench.Counter_Values,
+	_counters_ok:     bool,
+	active:           bool,
 }
 
 @(private)
@@ -105,6 +107,7 @@ _Phase_Accum :: struct {
 	metrics_count:      int,
 	samples_batch_ns:   [dynamic]u64,
 	samples_cycles:     [dynamic]f64,
+	samples_hw:         [4][dynamic]f64,
 	allocs_per_op:      f64,
 	resizes_per_op:     f64,
 	alloc_bytes_per_op: f64,
@@ -130,6 +133,7 @@ Pipeline :: struct {
 	_stack_depth:          int,
 	_heap_counter:         ^obench.Counting_Allocator,
 	_temp_counter:         ^obench.Counting_Allocator,
+	_counters:             ^obench.Counter_Group,
 	_enforce_zero_alloc:   bool,
 	_allocator:            runtime.Allocator,
 }
@@ -156,17 +160,20 @@ phase_begin :: proc(
 	eff_zero := zero_alloc || p._enforce_zero_alloc
 
 	if slot >= len(p._accums) {
-		append(
-			&p._accums,
-			_Phase_Accum {
-				name = strings.clone(name, p._allocator),
-				ops = eff_ops,
-				bytes_per_op = bytes_per_op,
-				zero_alloc = eff_zero,
-				samples_batch_ns = make([dynamic]u64, p._allocator),
-				samples_cycles = make([dynamic]f64, p._allocator),
-			},
-		)
+		acc := _Phase_Accum {
+			name             = strings.clone(name, p._allocator),
+			ops              = eff_ops,
+			bytes_per_op     = bytes_per_op,
+			zero_alloc       = eff_zero,
+			samples_batch_ns = make([dynamic]u64, p._allocator),
+			samples_cycles   = make([dynamic]f64, p._allocator),
+		}
+		if p._counters != nil && p._counters.open {
+			for k in 0 ..< 4 {
+				acc.samples_hw[k] = make([dynamic]f64, p._allocator)
+			}
+		}
+		append(&p._accums, acc)
 	} else {
 		acc := &p._accums[slot]
 		fmt.assertf(
@@ -212,6 +219,9 @@ phase_begin :: proc(
 		obench.counting_allocator_set_paused(p._heap_counter, false)
 		obench.counting_allocator_set_paused(p._temp_counter, false)
 	case .Timed:
+		if p._counters != nil && p._counters.open {
+			ph._counters_before, ph._counters_ok = obench.counter_group_read(p._counters)
+		}
 		obench.clobber_memory()
 		ph.start_ts = obench.clock_now()
 	}
@@ -227,9 +237,14 @@ phase_end :: proc(ph: ^Phase) {
 	}
 	p := ph.pipeline
 	end_ts: obench.Timestamp
+	counters_after: obench.Counter_Values
+	counters_after_ok: bool
 	if p._mode == .Timed {
 		end_ts = obench.clock_now()
 		obench.clobber_memory()
+		if ph._counters_ok && p._counters != nil && p._counters.open {
+			counters_after, counters_after_ok = obench.counter_group_read(p._counters)
+		}
 	} else if p._mode == .Alloc_Check {
 		obench.counting_allocator_set_paused(p._heap_counter, true)
 		obench.counting_allocator_set_paused(p._temp_counter, true)
@@ -256,6 +271,26 @@ phase_end :: proc(ph: ^Phase) {
 		adj_batch_ns := u64(max(i128(ns) - ov_ns, 0))
 		append(&acc.samples_batch_ns, adj_batch_ns)
 		append(&acc.samples_cycles, max(f64(cyc) - p.clock_overhead_cycles, 0.0) / f64(ph.ops))
+		if ph._counters_ok && counters_after_ok {
+			per_op := f64(max(ph.ops, 1))
+			append(
+				&acc.samples_hw[0],
+				max(counters_after.instructions - ph._counters_before.instructions, 0.0) / per_op,
+			)
+			append(
+				&acc.samples_hw[1],
+				max(counters_after.cycles - ph._counters_before.cycles, 0.0) / per_op,
+			)
+			append(
+				&acc.samples_hw[2],
+				max(counters_after.branch_misses - ph._counters_before.branch_misses, 0.0) /
+				per_op,
+			)
+			append(
+				&acc.samples_hw[3],
+				max(counters_after.cache_misses - ph._counters_before.cache_misses, 0.0) / per_op,
+			)
+		}
 	case .Alloc_Check:
 		_snap_merge_counter(&ph._heap_acc, p._heap_counter)
 		_snap_merge_counter(&ph._temp_acc, p._temp_counter)
@@ -377,6 +412,9 @@ _destroy_phase_accums :: proc(accums: []_Phase_Accum, allocator: runtime.Allocat
 		}
 		delete(acc.samples_batch_ns)
 		delete(acc.samples_cycles)
+		for k in 0 ..< 4 {
+			delete(acc.samples_hw[k])
+		}
 	}
 }
 
@@ -386,6 +424,7 @@ _execute_pipeline :: proc(
 	def: _Pipeline_Def,
 	base_rank: ^int,
 	temp_arena: ^runtime.Arena,
+	counters: ^obench.Counter_Group = nil,
 ) -> (
 	records: [dynamic]Record,
 	violations: [dynamic]Phase_Violation,
@@ -401,6 +440,10 @@ _execute_pipeline :: proc(
 	if warmup < 0 {
 		warmup = 1
 	}
+	if s.obench_suite.config.test_mode {
+		warmup = 0
+		runs = 1
+	}
 
 	clock_ov_fs := ns_f64_to_fs(s.obench_suite.clock.overhead_ns)
 	p := Pipeline {
@@ -411,6 +454,7 @@ _execute_pipeline :: proc(
 		clock_overhead_fs     = clock_ov_fs,
 		clock_overhead_cycles = s.obench_suite.clock.overhead_cycles,
 		_accums               = make([dynamic]_Phase_Accum, s.allocator),
+		_counters             = counters,
 		_enforce_zero_alloc   = s.obench_suite.config.enforce_zero_allocs,
 		_allocator            = s.allocator,
 	}
@@ -541,6 +585,24 @@ _execute_pipeline :: proc(
 			cyc := slice.clone(acc.samples_cycles[:], context.temp_allocator)
 			slice.sort(cyc)
 			r.median_cycles = obench.percentile_sorted(cyc, 0.50)
+		}
+		if len(acc.samples_hw[0]) > 0 {
+			hw_units := [4]string {
+				"instructions/op",
+				"cycles/op",
+				"branch_misses/op",
+				"cache_misses/op",
+			}
+			for k in 0 ..< 4 {
+				vals := slice.clone(acc.samples_hw[k][:], context.temp_allocator)
+				slice.sort(vals)
+				_append_counter_metric(
+					&r.metrics,
+					hw_units[k],
+					obench.percentile_sorted(vals, 0.50),
+					s.allocator,
+				)
+			}
 		}
 
 		append(&records, r)

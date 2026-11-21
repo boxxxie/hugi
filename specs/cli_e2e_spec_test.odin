@@ -875,6 +875,7 @@ spec_cli_invalid_invocations_return_nonzero_and_diagnostics_matrix :: proc(t: ^t
 			[]string{"compact", "--db", "@db", "--keep-hot", "-2"},
 			"invalid --keep-hot",
 		),
+		cli_guard_case("run-negative-pin", []string{"run", "--pin", "-1"}, "invalid --pin"),
 	}
 
 	for tc in cases {
@@ -911,7 +912,13 @@ spec_cli_doctor_hugi_json_and_ingest_provenance :: proc(t: ^testing.T) {
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
 		shows_stdout_contains(&w, out, `"cpu_model":`)
+		shows_stdout_contains(&w, out, `"cores":`)
+		shows_stdout_contains(&w, out, `"smt":`)
 		shows_stdout_contains(&w, out, `"scaling_max_khz":`)
+		shows_stdout_contains(&w, out, `"load_avg":`)
+		shows_stdout_contains(&w, out, `"on_battery":`)
+		shows_stdout_contains(&w, out, `"vm":`)
+		shows_stdout_contains(&w, out, `"notes":`)
 		shows_stdout_contains(&w, out, `"pkg_dir": "cfg-pkg"`)
 	}
 
@@ -1027,5 +1034,69 @@ spec_cli_ingest_obench_v6_preserves_git_timestamp_provenance_and_heap_peak :: pr
 		shows_exit_code(&w, out, 0)
 		shows_stdout_contains(&w, out, `"peak_heap_bytes": 8192`)
 		shows_stdout_contains(&w, out, `"timestamp_unix": 1795163400`)
+	}
+}
+
+@(test)
+spec_cli_run_test_mode_and_pin_counters :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 90)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_cli_bench_package(&w, "ok-pkg", work_iters = 16)
+	given_cli_bench_package(&w, "bad-pkg", work_iters = 16, violate_zero_alloc = true)
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@ok-pkg",
+		"--test",
+		"--db",
+		"@testdb",
+		"--extra-build-flags",
+		"-o:none",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "--test ran every pipeline once")
+	}
+	then_store_file_does_not_exist(&w, "testdb")
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@bad-pkg",
+		"--test",
+		"--db",
+		"@testdb",
+		"--extra-build-flags",
+		"-o:none",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 1)
+		shows_stdout_contains(&w, out, "[FAIL: @zero_alloc]")
+	}
+	then_store_file_does_not_exist(&w, "testdb")
+
+	upon_running_cli(
+		&w,
+		"run",
+		"@ok-pkg",
+		"--pin",
+		"0",
+		"--counters",
+		"--no-db",
+		"--quiet",
+		"--runs",
+		"2",
+		"--warmup",
+		"0",
+		"--extra-build-flags",
+		"-o:none",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
 	}
 }

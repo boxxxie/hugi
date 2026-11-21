@@ -22,7 +22,7 @@ COMMANDS:
   compare-1v1            Cross-language 1v1 comparison (e.g., odin vs zig) with footprint checks
   export                 Export pooled benchmarks to Arrow IPC, Parquet, JSON, JSONL, CSV, TSV, or Markdown
   compact                Compact the xitdb store and reclaim dead pages
-  doctor                 Inspect CPU scaling, governor, boost state, and nearest hugi.json
+  doctor                 Inspect CPU, cores, SMT, load, power, VM state, and nearest hugi.json
   help                   Show this help message
   version                Print version information
 
@@ -37,6 +37,9 @@ RUN OPTIONS:
   --runs <N>             Measured pipeline runs (default: hugi.json 'runs' or 7)
   --warmup <N>           Warmup iterations / milliseconds (default: hugi.json 'warmup' or 1)
   --groups <g1,g2>       Comma-separated group filter
+  --pin <cpu>            Pin benchmark execution thread to logical CPU <cpu>
+  --counters             Collect Linux perf_event hardware counters per operation
+  --test                 Smoke-run each benchmark/pipeline once (skips store & baseline check)
   --baseline-commit <c>  Compare run immediately against baseline commit <c>
   --by-run               Compare per-run medians across multi-run commits (fallback to pooled if < 2 runs)
   --fail-on-regression   Exit non-zero if statistical regressions are detected

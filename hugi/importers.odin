@@ -51,7 +51,7 @@ _obench_doc_run_env :: proc(doc: obench.Export_Document, allocator: runtime.Allo
 	}
 }
 
-@(private = "file")
+@(private)
 _append_counter_metric :: proc(
 	metrics: ^[dynamic]Metric,
 	unit: string,

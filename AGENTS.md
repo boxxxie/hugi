@@ -94,4 +94,4 @@ New user-facing features or bugfixes must include black-box behavioral coverage 
 
 ## 6. Upstream `obench` Dependency
 
-`deps/obench` tracks `boxxxie/obench` (`main`, synced with `zeybek/obench` upstream). Never edit files inside `deps/*` directly from `hugi`; make upstream changes in `boxxxie/obench` on feature branches and update the submodule pointer deliberately.
+`deps/obench` tracks upstream `zeybek/obench` (`main`). Never edit files inside `deps/*` directly from `hugi`; submit upstream changes to `zeybek/obench` and update the submodule pointer deliberately.

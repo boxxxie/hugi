@@ -1,6 +1,6 @@
 [submodule "deps/obench"]
 	path = deps/obench
-	url = https://github.com/boxxxie/obench.git
+	url = https://github.com/zeybek/obench.git
 	branch = main
 [submodule "deps/xitdb"]
 	path = deps/xitdb

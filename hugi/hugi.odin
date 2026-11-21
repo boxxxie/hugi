@@ -61,6 +61,7 @@ Suite :: struct {
 	failed_errors:            int,
 	failed_regressions:       int,
 	failed_io:                int,
+	failed_packet_io:         bool,
 	failed_baseline:          int,
 	counters_unavailable:     string,
 	allocator:                runtime.Allocator,
@@ -440,6 +441,36 @@ _obench_result_to_record :: proc(
 	return rec
 }
 
+@(private = "file")
+_destroy_obench_result :: proc(allocator: runtime.Allocator, r: ^obench.Result) {
+	delete(r.full_name, allocator)
+	delete(r.stats.samples_ns, allocator)
+	delete(r.stats.samples_batch_ns, allocator)
+	for i in 0 ..< r.stats.custom_metrics_count {
+		delete(r.stats.custom_metrics[i].unit, allocator)
+	}
+}
+
+@(private = "file")
+_clear_obench_results :: proc(osuite: ^obench.Suite) {
+	for &r in osuite.results {
+		_destroy_obench_result(osuite.allocator, &r)
+	}
+	clear(&osuite.results)
+	clear(&osuite.complexities)
+	osuite.summary = {}
+	osuite.failed_zero_alloc = 0
+	osuite.failed_regressions = 0
+	osuite.failed_alloc_regressions = 0
+	osuite.failed_errors = 0
+	osuite.failed_io = 0
+	osuite.failed_baseline = 0
+	obench.machine_state_destroy(&osuite.machine_state, osuite.allocator)
+	osuite.empty_loop_ns = 0
+	delete(osuite.counters_unavailable, osuite.allocator)
+	osuite.counters_unavailable = ""
+}
+
 /*
 Executes all matching `obench` micro groups and stateful `Pipeline` groups silently,
 populating `s.last_packet` and writing `--packet-out` if configured.
@@ -451,6 +482,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 	s.failed_errors = 0
 	s.failed_regressions = 0
 	s.failed_io = 0
+	s.failed_packet_io = false
 	s.failed_baseline = 0
 	delete(s.counters_unavailable, s.allocator)
 	s.counters_unavailable = ""
@@ -498,31 +530,59 @@ suite_execute :: proc(s: ^Suite) -> bool {
 			saved_filter := s.obench_suite.config.filter
 			if strings.contains_any(s.config.name_filter, "|,") {
 				s.obench_suite.config.filter = ""
+			} else {
+				s.obench_suite.config.filter = s.config.name_filter
 			}
 			ran_obench = true
 			_ = obench.suite_execute(&s.obench_suite)
 			s.obench_suite.config.filter = saved_filter
 
-			s.failed_zero_alloc += s.obench_suite.failed_zero_alloc
-			s.failed_alloc_regressions += s.obench_suite.failed_alloc_regressions
-			s.failed_errors += s.obench_suite.failed_errors
-			s.failed_regressions += s.obench_suite.failed_regressions
-			s.failed_io += s.obench_suite.failed_io
-			s.failed_baseline += s.obench_suite.failed_baseline
-
-			for r in s.obench_suite.results {
-				rank += 1
+			// Filter out microbenchmarks excluded by `matches_name_filter` before
+			// tallying failures or assigning contiguous `Record.rank` values.
+			kept := 0
+			filtered_any := false
+			for &r, res_idx in s.obench_suite.results {
 				if !matches_name_filter(s.config.name_filter, r.full_name) {
+					_destroy_obench_result(s.obench_suite.allocator, &r)
+					filtered_any = true
 					continue
+				}
+				if kept != res_idx {
+					s.obench_suite.results[kept] = r
+				}
+				kept += 1
+				rank += 1
+				if r.error != .None {
+					s.failed_errors += 1
+				} else {
+					if r.zero_alloc_failed {
+						s.failed_zero_alloc += 1
+					}
+					if r.diff.is_regression && s.obench_suite.config.fail_on_regression {
+						s.failed_regressions += 1
+					}
+					if r.diff.allocs_grew && s.obench_suite.config.fail_on_alloc_regression {
+						s.failed_alloc_regressions += 1
+					}
 				}
 				append(&pkt.records, _obench_result_to_record(r, rank, s.allocator))
 			}
+			if filtered_any {
+				resize(&s.obench_suite.results, kept)
+				s.obench_suite.summary = obench.compute_suite_summary(s.obench_suite.results[:])
+			}
+			s.failed_io += s.obench_suite.failed_io
+			s.failed_baseline += s.obench_suite.failed_baseline
+		} else {
+			_clear_obench_results(&s.obench_suite)
 		}
 
 		clear(&s.obench_suite.groups)
 		for g in all_groups {
 			append(&s.obench_suite.groups, g)
 		}
+	} else {
+		_clear_obench_results(&s.obench_suite)
 	}
 
 	// 2. Run matching stateful Pipeline groups using a private scratch arena.
@@ -593,6 +653,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 		if err := write_packet_file(s.config.packet_out_path, s.last_packet); err != nil {
 			fmt.eprintfln("hugi: could not write packet '%s' (%v)", s.config.packet_out_path, err)
 			s.failed_io += 1
+			s.failed_packet_io = true
 		}
 	}
 
@@ -798,7 +859,7 @@ suite_failure_messages :: proc(s: ^Suite, allocator := context.temp_allocator) -
 			),
 		)
 	}
-	if s.failed_io > s.obench_suite.failed_io {
+	if s.failed_packet_io {
 		append(
 			&out,
 			fmt.aprintf(

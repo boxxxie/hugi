@@ -136,6 +136,7 @@ Pipeline :: struct {
 	_temp_counter:         ^obench.Counting_Allocator,
 	_counters:             ^obench.Counter_Group,
 	_counter_overhead:     obench.Counter_Values,
+	_runs:                 int,
 	_enforce_zero_alloc:   bool,
 	_allocator:            runtime.Allocator,
 }
@@ -162,17 +163,18 @@ phase_begin :: proc(
 	eff_zero := zero_alloc || p._enforce_zero_alloc
 
 	if slot >= len(p._accums) {
+		cap_runs := max(p._runs, 1)
 		acc := _Phase_Accum {
 			name             = strings.clone(name, p._allocator),
 			ops              = eff_ops,
 			bytes_per_op     = bytes_per_op,
 			zero_alloc       = eff_zero,
-			samples_batch_ns = make([dynamic]u64, p._allocator),
-			samples_cycles   = make([dynamic]f64, p._allocator),
+			samples_batch_ns = make([dynamic]u64, 0, cap_runs, p._allocator),
+			samples_cycles   = make([dynamic]f64, 0, cap_runs, p._allocator),
 		}
 		if p._counters != nil && p._counters.open {
 			for k in 0 ..< 4 {
-				acc.samples_hw[k] = make([dynamic]f64, p._allocator)
+				acc.samples_hw[k] = make([dynamic]f64, 0, cap_runs, p._allocator)
 			}
 		}
 		append(&p._accums, acc)
@@ -545,6 +547,7 @@ _execute_pipeline :: proc(
 		_accums               = make([dynamic]_Phase_Accum, s.allocator),
 		_counters             = counters,
 		_counter_overhead     = counter_overhead,
+		_runs                 = runs,
 		_enforce_zero_alloc   = s.obench_suite.config.enforce_zero_allocs,
 		_allocator            = s.allocator,
 	}

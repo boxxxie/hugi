@@ -72,6 +72,9 @@ _append_counter_metric :: proc(
 		}
 	}
 	v := 0.0 if value == 0 else value
+	if metrics.allocator.procedure == nil {
+		metrics.allocator = allocator
+	}
 	append(metrics, Metric{unit = strings.clone(unit, allocator), value = v})
 }
 

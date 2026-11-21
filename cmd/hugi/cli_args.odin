@@ -2,6 +2,7 @@ package hugi_cli
 
 import store "../../store"
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:path/filepath"
 import "core:strconv"
@@ -70,31 +71,38 @@ _resolve_db_path :: proc(explicit: string) -> string {
 }
 
 @(private, require_results)
-_parse_flag_kv :: proc(args: []string, idx: ^int) -> (key: string, val: string, is_flag: bool) {
+_parse_flag_kv :: proc(
+	args: []string,
+	idx: ^int,
+) -> (
+	key: string,
+	inline_val: Maybe(string),
+	is_flag: bool,
+) {
 	arg := args[idx^]
 	if !strings.has_prefix(arg, "-") || arg == "-" {
-		return "", "", false
+		return "", nil, false
 	}
 	idx^ += 1
 	trimmed := strings.trim_left(arg, "-")
 	if sep := strings.index_any(trimmed, "=:"); sep >= 0 {
 		return trimmed[:sep], trimmed[sep + 1:], true
 	}
-	return trimmed, "", true
+	return trimmed, nil, true
 }
 
 @(private, require_results)
 _consume_value :: proc(
 	args: []string,
 	idx: ^int,
-	inline_val: string,
+	inline_val: Maybe(string),
 	flag_name: string,
 ) -> (
 	val: string,
 	ok: bool,
 ) {
-	if inline_val != "" {
-		return inline_val, true
+	if v, has_inline := inline_val.?; has_inline {
+		return v, true
 	}
 	if idx^ >= len(args) {
 		fmt.eprintfln("hugi: missing value for --%s", flag_name)
@@ -109,7 +117,7 @@ _consume_value :: proc(
 _try_parse_common_flag :: proc(
 	cmd_name: string,
 	key: string,
-	inline_val: string,
+	inline_val: Maybe(string),
 	args: []string,
 	idx: ^int,
 	allowed: _Common_Flag_Set,
@@ -167,7 +175,7 @@ _try_parse_common_flag :: proc(
 			return .Error
 		}
 		parsed, p_ok := strconv.parse_f64(v)
-		if !p_ok || parsed < 0 {
+		if !p_ok || math.is_nan(parsed) || math.is_inf(parsed, 0) || parsed < 0 {
 			fmt.eprintfln("hugi %s: invalid --threshold '%s'", cmd_name, v)
 			return .Error
 		}
@@ -183,7 +191,7 @@ _parse_nonneg_int_flag :: proc(
 	flag_name: string,
 	args: []string,
 	idx: ^int,
-	inline_val: string,
+	inline_val: Maybe(string),
 ) -> (
 	val: int,
 	ok: bool,

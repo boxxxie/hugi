@@ -853,6 +853,420 @@ test_compare_1v1_hl_ci_symmetry_and_shape_diagnostics :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_multirun_pooling_avoids_stitched_shape_false_positives_and_ar1_p_parity :: proc(
+	t: ^testing.T,
+) {
+	make_pkt :: proc(commit, run_id: string, name: string, ns_vals: []f64) -> hugi.Run_Packet {
+		pkt := hugi.Run_Packet {
+			suite_name     = strings.clone("pool_shape_suite"),
+			lang           = strings.clone("odin"),
+			commit         = strings.clone(commit),
+			run_id         = strings.clone(run_id),
+			os             = strings.clone("linux"),
+			arch           = strings.clone("amd64"),
+			optimization   = strings.clone("Speed"),
+			odin_version   = strings.clone("test"),
+			timestamp_unix = 1770000000,
+			records        = make([dynamic]hugi.Record, 0, 1),
+		}
+		samples := make([dynamic]u64, len(ns_vals))
+		for v, i in ns_vals {
+			samples[i] = hugi.ns_f64_to_batch_ns(v, 100)
+		}
+		r := hugi.Record {
+			rank             = 1,
+			group_name       = strings.clone("core"),
+			name             = strings.clone(name),
+			full_name        = strings.concatenate({"core::", name}),
+			ops_per_sample   = 100,
+			samples          = len(ns_vals),
+			samples_batch_ns = samples,
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		hugi.recompute_record_stats_from_samples(&r)
+		hugi.refresh_record_throughput(&r)
+		append(&pkt.records, r)
+		return pkt
+	}
+
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	// 1. Two steady, unimodal, zero-autocorrelation runs at slightly shifted ambient clocks
+	// (100 ns vs 107 ns) must NOT trigger false drift, 2 modes, or collapsed n_eff.
+	run1 := [20]f64 {
+		100.00,
+		100.05,
+		99.95,
+		100.02,
+		99.98,
+		100.04,
+		99.96,
+		100.01,
+		99.99,
+		100.03,
+		99.97,
+		100.02,
+		99.98,
+		100.05,
+		99.95,
+		100.01,
+		99.99,
+		100.04,
+		99.96,
+		100.00,
+	}
+	run2 := [20]f64 {
+		107.00,
+		107.05,
+		106.95,
+		107.02,
+		106.98,
+		107.04,
+		106.96,
+		107.01,
+		106.99,
+		107.03,
+		106.97,
+		107.02,
+		106.98,
+		107.05,
+		106.95,
+		107.01,
+		106.99,
+		107.04,
+		106.96,
+		107.00,
+	}
+	p1 := make_pkt("amb_b", "r-amb-1", "steady", run1[:])
+	defer hugi.packet_destroy(&p1)
+	p2 := make_pkt("amb_b", "r-amb-2", "steady", run2[:])
+	defer hugi.packet_destroy(&p2)
+	testing.expect(t, store.store_ingest_packet(&st, p1))
+	testing.expect(t, store.store_ingest_packet(&st, p2))
+
+	pooled := store.store_load_pooled_records(&st, "odin", "amb_b")
+	defer store.pooled_records_destroy(pooled)
+	testing.expect_value(t, len(pooled), 1)
+	if len(pooled) == 1 {
+		pr := pooled[0]
+		testing.expect_value(t, pr.samples, 40)
+		testing.expect(t, pr.trend_pct == 0.0, "steady multi-run must not report stitched drift")
+		testing.expect_value(t, pr.modes, 1)
+		testing.expect(
+			t,
+			pr.autocorrelation < 0.25,
+			"steady multi-run must not report high stitched autocorrelation",
+		)
+		testing.expect(
+			t,
+			pr.effective_samples > 35.0,
+			"steady multi-run must preserve per-run effective_samples (~40)",
+		)
+	}
+
+	// Compare pooled steady multi-run against slightly higher steady multi-run (108 vs 115 ns):
+	// stitched r1 would have collapsed n_eff and over-widened HL CI, whereas per-run n_eff keeps
+	// pooled HL CI tight and consistent.
+	p_c1 := make_pkt(
+		"amb_c",
+		"r-ambc-1",
+		"steady",
+		[]f64 {
+			112.00,
+			112.05,
+			111.95,
+			112.02,
+			111.98,
+			112.04,
+			111.96,
+			112.01,
+			111.99,
+			112.03,
+			111.97,
+			112.02,
+			111.98,
+			112.05,
+			111.95,
+			112.01,
+			111.99,
+			112.04,
+			111.96,
+			112.00,
+		},
+	)
+	defer hugi.packet_destroy(&p_c1)
+	p_c2 := make_pkt(
+		"amb_c",
+		"r-ambc-2",
+		"steady",
+		[]f64 {
+			119.00,
+			119.05,
+			118.95,
+			119.02,
+			118.98,
+			119.04,
+			118.96,
+			119.01,
+			118.99,
+			119.03,
+			118.97,
+			119.02,
+			118.98,
+			119.05,
+			118.95,
+			119.01,
+			118.99,
+			119.04,
+			118.96,
+			119.00,
+		},
+	)
+	defer hugi.packet_destroy(&p_c2)
+	testing.expect(t, store.store_ingest_packet(&st, p_c1))
+	testing.expect(t, store.store_ingest_packet(&st, p_c2))
+	pooled_c := store.store_load_pooled_records(&st, "odin", "amb_c")
+	defer store.pooled_records_destroy(pooled_c)
+
+	rep_amb := store.compare_records(pooled, pooled_c, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_amb)
+	testing.expect_value(t, rep_amb.drifting_rows, 0)
+	testing.expect_value(t, rep_amb.multimodal_rows, 0)
+	testing.expect_value(t, len(rep_amb.rows), 1)
+	if len(rep_amb.rows) == 1 {
+		testing.expect_value(t, rep_amb.rows[0].verdict, store.Verdict.Regression)
+	}
+
+	// 2. --by-run with >20 monotonic runs must use adjust_for_autocorrelation = false.
+	base_meds := make([]f64, 24)
+	cand_meds := make([]f64, 24)
+	for idx in 0 ..< 24 {
+		bv := 100.0 + f64(idx) * 0.2
+		cv := 106.0 + f64(idx) * 0.2
+		base_meds[idx] = bv
+		cand_meds[idx] = cv
+		pb := make_pkt("br24_b", fmt.tprintf("br24-b-%d", idx), "mono", []f64{bv, bv, bv, bv})
+		defer hugi.packet_destroy(&pb)
+		pc := make_pkt("br24_c", fmt.tprintf("br24-c-%d", idx), "mono", []f64{cv, cv, cv, cv})
+		defer hugi.packet_destroy(&pc)
+		testing.expect(t, store.store_ingest_packet(&st, pb))
+		testing.expect(t, store.store_ingest_packet(&st, pc))
+	}
+	defer delete(base_meds)
+	defer delete(cand_meds)
+	br24_b := store.store_load_pooled_records(&st, "odin", "br24_b")
+	defer store.pooled_records_destroy(br24_b)
+	br24_c := store.store_load_pooled_records(&st, "odin", "br24_c")
+	defer store.pooled_records_destroy(br24_c)
+	rep_br24 := store.compare_records(br24_b, br24_c, threshold_pct = 0.0, use_run_medians = true)
+	defer store.comparison_report_destroy(&rep_br24)
+	_, exp_low, exp_high, exp_ok := obench.hodges_lehmann_shift(
+		cand_meds,
+		base_meds,
+		adjust_for_autocorrelation = false,
+		allocator = context.temp_allocator,
+	)
+	testing.expect(t, exp_ok)
+	testing.expect_value(t, len(rep_br24.rows), 1)
+	if len(rep_br24.rows) == 1 {
+		r := rep_br24.rows[0]
+		testing.expect(
+			t,
+			math.abs(r.shift_low_pct - exp_low) < 1e-6 &&
+			math.abs(r.shift_high_pct - exp_high) < 1e-6,
+			"--by-run HL CI must match adjust_for_autocorrelation=false",
+		)
+	}
+
+	// 3. Positively autocorrelated single runs (n=40): when 95% HL CI straddles 0%, adjusted MWU
+	// p_value must also be >= 0.05 (no contradiction between CI and p-value).
+	ac_a := make([]f64, 40)
+	ac_b := make([]f64, 40)
+	defer delete(ac_a)
+	defer delete(ac_b)
+	for i in 0 ..< 40 {
+		ac_a[i] = 100.0 + f64(i) * 1.5
+		ac_b[i] = 112.0 + f64(i) * 1.5
+	}
+	p_aca := make_pkt("ac_b", "r-ac-a", "ramp", ac_a)
+	defer hugi.packet_destroy(&p_aca)
+	p_acb := make_pkt("ac_c", "r-ac-b", "ramp", ac_b)
+	defer hugi.packet_destroy(&p_acb)
+	testing.expect(t, store.store_ingest_packet(&st, p_aca))
+	testing.expect(t, store.store_ingest_packet(&st, p_acb))
+	ra := store.store_load_pooled_records(&st, "odin", "ac_b")
+	defer store.pooled_records_destroy(ra)
+	rb := store.store_load_pooled_records(&st, "odin", "ac_c")
+	defer store.pooled_records_destroy(rb)
+	rep_ac := store.compare_records(ra, rb, threshold_pct = 0.0)
+	defer store.comparison_report_destroy(&rep_ac)
+	testing.expect_value(t, len(rep_ac.rows), 1)
+	if len(rep_ac.rows) == 1 {
+		r := rep_ac.rows[0]
+		testing.expect(t, r.used_shift_ci)
+		testing.expect(t, r.shift_low_pct < 0.0, "autocorrelated 95% HL CI must straddle 0%")
+		testing.expect_value(t, r.verdict, store.Verdict.Unchanged)
+		testing.expectf(
+			t,
+			r.p_value >= 0.05,
+			"autocorrelation-adjusted MWU p_value (%.4f) must agree with HL CI straddling 0%%",
+			r.p_value,
+		)
+	}
+}
+
+@(test)
+test_compare_1v1_skewed_hl_orientation_and_table_json_csv_visibility :: proc(t: ^testing.T) {
+	make_lang_pkt :: proc(lang: string, name: string, ns_vals: []f64) -> hugi.Run_Packet {
+		pkt := hugi.Run_Packet {
+			suite_name     = strings.clone("skew_1v1_suite"),
+			lang           = strings.clone(lang),
+			commit         = strings.clone("sk1"),
+			run_id         = strings.concatenate({"r-", lang}),
+			os             = strings.clone("linux"),
+			arch           = strings.clone("amd64"),
+			optimization   = strings.clone("Speed"),
+			odin_version   = strings.clone("test"),
+			timestamp_unix = 1770000000,
+			records        = make([dynamic]hugi.Record, 0, 1),
+		}
+		samples := make([dynamic]u64, len(ns_vals))
+		for v, i in ns_vals {
+			samples[i] = hugi.ns_f64_to_batch_ns(v, 100)
+		}
+		r := hugi.Record {
+			rank             = 1,
+			group_name       = strings.clone("core"),
+			name             = strings.clone(name),
+			full_name        = strings.concatenate({"core::", name}),
+			ops_per_sample   = 100,
+			samples          = len(ns_vals),
+			samples_batch_ns = samples,
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		hugi.recompute_record_stats_from_samples(&r)
+		hugi.refresh_record_throughput(&r)
+		append(&pkt.records, r)
+		return pkt
+	}
+
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	// Skewed/bimodal distribution where a_med (99) < b_med (100), yet pairwise HL shift
+	// significantly favors b (b has fast tail at 30ns, a has slow tail at 300ns).
+	skew_a := []f64 {
+		99,
+		99,
+		99,
+		99,
+		99,
+		99,
+		99,
+		99,
+		99,
+		99,
+		300,
+		300,
+		300,
+		300,
+		300,
+		300,
+		300,
+		300,
+		300,
+	}
+	skew_b := []f64 {
+		30,
+		30,
+		30,
+		30,
+		30,
+		30,
+		30,
+		30,
+		30,
+		100,
+		100,
+		100,
+		100,
+		100,
+		100,
+		100,
+		100,
+		100,
+		100,
+	}
+
+	pa := make_lang_pkt("odin", "skew", skew_a)
+	defer hugi.packet_destroy(&pa)
+	pb := make_lang_pkt("zig", "skew", skew_b)
+	defer hugi.packet_destroy(&pb)
+	testing.expect(t, store.store_ingest_packet(&st, pa))
+	testing.expect(t, store.store_ingest_packet(&st, pb))
+
+	rep_ab := store.compare_1v1_langs(&st, "odin", "zig", "sk1", threshold_pct = 5.0)
+	defer store.cross_lang_report_destroy(&rep_ab)
+	rep_ba := store.compare_1v1_langs(&st, "zig", "odin", "sk1", threshold_pct = 5.0)
+	defer store.cross_lang_report_destroy(&rep_ba)
+
+	testing.expect_value(t, len(rep_ab.rows), 1)
+	testing.expect_value(t, len(rep_ba.rows), 1)
+	if len(rep_ab.rows) == 1 && len(rep_ba.rows) == 1 {
+		rab := rep_ab.rows[0]
+		rba := rep_ba.rows[0]
+		testing.expect(t, rab.used_shift_ci)
+		testing.expect(t, rab.shift_pct > 0, "1v1 shift_pct must never be negative")
+		testing.expect(t, rab.shift_low_pct > 5.0, "1v1 shift_low_pct must exceed threshold")
+		testing.expect(
+			t,
+			rab.is_significant,
+			"significant HL shift favoring zig must not be missed",
+		)
+		testing.expect_value(t, rab.faster_lang, "zig")
+		testing.expect_value(t, rep_ab.b_wins, 1)
+
+		testing.expect_value(t, rba.faster_lang, "zig")
+		testing.expect(t, rba.is_significant)
+		testing.expect(t, math.abs(rab.shift_pct - rba.shift_pct) < 1e-6)
+		testing.expect(t, math.abs(rab.shift_low_pct - rba.shift_low_pct) < 1e-6)
+		testing.expect(t, math.abs(rab.shift_high_pct - rba.shift_high_pct) < 1e-6)
+	}
+
+	md := store.format_1v1_table(rep_ab, context.temp_allocator)
+	testing.expect(
+		t,
+		strings.contains(md, "Test / p-value"),
+		"1v1 table must show Test / p-value header",
+	)
+	testing.expect(t, strings.contains(md, "HL ["), "1v1 table must display HL shift CI bounds")
+
+	js := store.format_1v1_json(rep_ab, context.temp_allocator)
+	testing.expect(
+		t,
+		strings.contains(js, `"used_shift_ci": true`),
+		"1v1 JSON must serialize used_shift_ci",
+	)
+
+	csv := store.format_1v1_csv(rep_ab, context.temp_allocator)
+	testing.expect(
+		t,
+		strings.contains(csv, ",shift_pct,shift_low_pct,shift_high_pct,used_shift_ci\n"),
+		"1v1 CSV header must include shift CI columns",
+	)
+	testing.expect(t, strings.contains(csv, ",true\n"), "1v1 CSV row must emit used_shift_ci")
+}
+
+@(test)
 test_compare_by_run_aligns_medians_delta_geomean_and_fallback_gate :: proc(t: ^testing.T) {
 	make_pkt :: proc(commit, run_id: string, name: string, ns_vals: []f64) -> hugi.Run_Packet {
 		pkt := hugi.Run_Packet {

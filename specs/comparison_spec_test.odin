@@ -618,3 +618,224 @@ spec_hodges_lehmann_ci_gating_shape_warnings_and_by_run_comparison :: proc(t: ^t
 		shows_1v1_significance(&w, row, false)
 	}
 }
+
+@(test)
+spec_multirun_ambient_shift_and_skewed_1v1_avoid_false_diagnostics :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_in_memory_store(&w)
+
+	// Two steady runs at slightly shifted ambient clocks (100ns vs 107ns) must not trigger false
+	// drift or bimodal diagnostics when pooled.
+	run_a := [20]u64 {
+		10000,
+		10005,
+		9995,
+		10002,
+		9998,
+		10004,
+		9996,
+		10001,
+		9999,
+		10003,
+		9997,
+		10002,
+		9998,
+		10005,
+		9995,
+		10001,
+		9999,
+		10004,
+		9996,
+		10000,
+	}
+	run_b := [20]u64 {
+		10700,
+		10705,
+		10695,
+		10702,
+		10698,
+		10704,
+		10696,
+		10701,
+		10699,
+		10703,
+		10697,
+		10702,
+		10698,
+		10705,
+		10695,
+		10701,
+		10699,
+		10704,
+		10696,
+		10700,
+	}
+	run_c1 := [20]u64 {
+		11200,
+		11205,
+		11195,
+		11202,
+		11198,
+		11204,
+		11196,
+		11201,
+		11199,
+		11203,
+		11197,
+		11202,
+		11198,
+		11205,
+		11195,
+		11201,
+		11199,
+		11204,
+		11196,
+		11200,
+	}
+	run_c2 := [20]u64 {
+		11900,
+		11905,
+		11895,
+		11902,
+		11898,
+		11904,
+		11896,
+		11901,
+		11899,
+		11903,
+		11897,
+		11902,
+		11898,
+		11905,
+		11895,
+		11901,
+		11899,
+		11904,
+		11896,
+		11900,
+	}
+	given_recorded_run(
+		&w,
+		commit = "amb_b",
+		lang = "odin",
+		run_id = "r-amb-1",
+		bench = Bench_Observation {
+			name = "core::steady",
+			ops_per_sample = 100,
+			exact_batch_ns = run_a[:],
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "amb_b",
+		lang = "odin",
+		run_id = "r-amb-2",
+		bench = Bench_Observation {
+			name = "core::steady",
+			ops_per_sample = 100,
+			exact_batch_ns = run_b[:],
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "amb_c",
+		lang = "odin",
+		run_id = "r-amb-3",
+		bench = Bench_Observation {
+			name = "core::steady",
+			ops_per_sample = 100,
+			exact_batch_ns = run_c1[:],
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "amb_c",
+		lang = "odin",
+		run_id = "r-amb-4",
+		bench = Bench_Observation {
+			name = "core::steady",
+			ops_per_sample = 100,
+			exact_batch_ns = run_c2[:],
+		},
+	)
+	upon_comparing_commits(&w, "amb_b", "amb_c", lang = "odin", threshold_pct = 5.0)
+	then_comparison_shape_counts(&w, drifting_rows = 0, multimodal_rows = 0)
+	if row, ok := viewing_comparison_row(&w, "core::steady"); ok {
+		shows_verdict(&w, row, .Regression)
+	}
+
+	// Skewed 1v1 bimodal comparison aligns winner with HL shift CI rather than raw median order.
+	skew_a := []u64 {
+		9900,
+		9900,
+		9900,
+		9900,
+		9900,
+		9900,
+		9900,
+		9900,
+		9900,
+		9900,
+		30000,
+		30000,
+		30000,
+		30000,
+		30000,
+		30000,
+		30000,
+		30000,
+		30000,
+	}
+	skew_b := []u64 {
+		3000,
+		3000,
+		3000,
+		3000,
+		3000,
+		3000,
+		3000,
+		3000,
+		3000,
+		10000,
+		10000,
+		10000,
+		10000,
+		10000,
+		10000,
+		10000,
+		10000,
+		10000,
+		10000,
+	}
+	given_recorded_run(
+		&w,
+		commit = "skew01",
+		lang = "odin",
+		run_id = "r-skew-o",
+		bench = Bench_Observation {
+			name = "core::skew",
+			ops_per_sample = 100,
+			exact_batch_ns = skew_a,
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "skew01",
+		lang = "zig",
+		run_id = "r-skew-z",
+		bench = Bench_Observation {
+			name = "core::skew",
+			ops_per_sample = 100,
+			exact_batch_ns = skew_b,
+		},
+	)
+	upon_comparing_1v1(&w, "odin", "zig", commit = "skew01", threshold_pct = 5.0)
+	then_1v1_summary(&w, a_wins = 0, b_wins = 1, ties = 0, footprint_mismatches = 0)
+	if row, ok := viewing_1v1_row(&w, "core::skew"); ok {
+		shows_winner(&w, row, "zig")
+		shows_1v1_significance(&w, row, true, max_p_value = 0.05)
+	}
+}

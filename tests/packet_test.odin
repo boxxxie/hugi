@@ -1,6 +1,7 @@
 package hugi_tests
 
 import hugi "../hugi"
+import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -996,4 +997,167 @@ test_suite_test_mode_pin_and_counters_no_leaks :: proc(t: ^testing.T) {
 		strings.contains(strings.to_string(sb_note), "--counters: no hardware counters here"),
 		"unavailable hardware counters should emit a clear note",
 	)
+}
+
+@(test)
+test_suite_reuse_groups_filter_name_filter_and_custom_allocator_nested_phases :: proc(
+	t: ^testing.T,
+) {
+	tmp, tmp_ok := _make_temp_dir(t, "hugi-reuse-filter-*")
+	if !tmp_ok {
+		return
+	}
+
+	// 1. Reusing a Suite with groups_filter matching only a Pipeline must clear stale obench
+	// state and still report packet write I/O failures via failed_packet_io.
+	cfg := hugi.default_suite_config()
+	cfg.quiet = true
+	cfg.runs = 2
+	cfg.warmup = 0
+	cfg.obench_cfg.sample_count = 4
+	cfg.obench_cfg.warmup_time = 0
+	cfg.obench_cfg.fixed_batch_size = 1
+
+	s := hugi.suite_create("reuse_suite", cfg)
+	defer hugi.suite_destroy(&s)
+
+	g := hugi.group_add(&s, "micro_grp")
+	hugi.group_bench(g, "bad_micro", proc(b: ^hugi.Bencher) {
+			for hugi.step(b) {
+				buf := make([]u8, 16)
+				_ = hugi.black_box(buf[0])
+				delete(buf)
+			}
+		}, zero_alloc = true)
+	hugi.group_pipeline(&s, "pipe_grp", proc(p: ^hugi.Pipeline) {
+			_ = hugi.scoped_phase(p, "clean_step", ops = 1, zero_alloc = true)
+			_ = hugi.black_box(1)
+		}, runs = 2, warmup = 0)
+
+	testing.expect(t, !hugi.suite_execute(&s), "first run must fail due to bad_micro")
+	testing.expect_value(t, len(s.obench_suite.results), 1)
+
+	// Second run: select only pipe_grp and point packet_out_path at an unwritable directory.
+	delete(s.config.groups_filter, s.allocator)
+	s.config.groups_filter = strings.clone("pipe_grp", s.allocator)
+	delete(s.config.packet_out_path, s.allocator)
+	s.config.packet_out_path = strings.concatenate({tmp, "/no_such_dir/out.hpk"}, s.allocator)
+
+	testing.expect(t, !hugi.suite_execute(&s), "second run must fail on packet I/O")
+	testing.expect_value(t, len(s.obench_suite.results), 0)
+	testing.expect_value(t, s.failed_zero_alloc, 0)
+	testing.expect_value(t, s.failed_io, 1)
+	testing.expect(t, s.failed_packet_io)
+
+	sb_reuse := strings.builder_make(context.temp_allocator)
+	hugi.write_terminal_summary(&sb_reuse, &s)
+	reuse_txt := strings.to_string(sb_reuse)
+	testing.expect(
+		t,
+		!strings.contains(reuse_txt, "micro_grp::bad_micro"),
+		"terminal summary must not reprint stale microbenchmark results",
+	)
+	testing.expect(
+		t,
+		strings.contains(reuse_txt, "pipe_grp::clean_step"),
+		"terminal summary should print selected pipeline phase",
+	)
+
+	reuse_msgs := hugi.suite_failure_messages(&s, context.allocator)
+	defer {
+		for m in reuse_msgs {
+			delete(m)
+		}
+		delete(reuse_msgs)
+	}
+	saw_stale_micro := false
+	saw_pkt_io := false
+	for m in reuse_msgs {
+		if strings.contains(m, "bad_micro") {
+			saw_stale_micro = true
+		}
+		if strings.contains(m, "could not write packet") {
+			saw_pkt_io = true
+		}
+	}
+	testing.expect(t, !saw_stale_micro, "suite_failure_messages must not leak stale obench errors")
+	testing.expect(t, saw_pkt_io, "suite_failure_messages must report packet write failure")
+
+	// 2. Multi-token name_filter ("alpha|gamma") must exclude beta's failure and keep contiguous ranks.
+	cfg_nf := hugi.default_suite_config()
+	cfg_nf.quiet = true
+	cfg_nf.name_filter = "alpha|gamma"
+	cfg_nf.obench_cfg.sample_count = 4
+	cfg_nf.obench_cfg.warmup_time = 0
+	cfg_nf.obench_cfg.fixed_batch_size = 1
+
+	s_nf := hugi.suite_create("name_filter_suite", cfg_nf)
+	defer hugi.suite_destroy(&s_nf)
+	gnf := hugi.group_add(&s_nf, "g")
+	hugi.group_bench(gnf, "alpha", proc(b: ^hugi.Bencher) {
+			for hugi.step(b) {
+				_ = hugi.black_box(1)
+			}
+		}, zero_alloc = true)
+	hugi.group_bench(gnf, "beta", proc(b: ^hugi.Bencher) {
+			for hugi.step(b) {
+				buf := make([]u8, 16)
+				_ = hugi.black_box(buf[0])
+				delete(buf)
+			}
+		}, zero_alloc = true)
+	hugi.group_bench(gnf, "gamma", proc(b: ^hugi.Bencher) {
+			for hugi.step(b) {
+				_ = hugi.black_box(2)
+			}
+		}, zero_alloc = true)
+
+	testing.expect(t, hugi.suite_execute(&s_nf), "filtered-out beta failure must not fail suite")
+	testing.expect_value(t, s_nf.failed_zero_alloc, 0)
+	testing.expect_value(t, len(s_nf.last_packet.records), 2)
+	if len(s_nf.last_packet.records) == 2 {
+		testing.expect_value(t, s_nf.last_packet.records[0].rank, 1)
+		testing.expect_value(t, s_nf.last_packet.records[1].rank, 2)
+	}
+
+	// 3. Custom s.allocator != context.allocator with counters and nested phases must not leak or
+	// bad-free, and pre-sized pipeline accumulators avoid allocations during Timed passes.
+	custom_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&custom_track, context.allocator)
+	defer {
+		testing.expect_value(t, len(custom_track.allocation_map), 0)
+		testing.expect_value(t, len(custom_track.bad_free_array), 0)
+		mem.tracking_allocator_destroy(&custom_track)
+	}
+	custom_alloc := mem.tracking_allocator(&custom_track)
+
+	cfg_cust := hugi.default_suite_config()
+	cfg_cust.quiet = true
+	cfg_cust.runs = 12
+	cfg_cust.warmup = 1
+	cfg_cust.obench_cfg.counters = true
+	cfg_cust.obench_cfg.sample_count = 4
+	cfg_cust.obench_cfg.warmup_time = 0
+	cfg_cust.obench_cfg.fixed_batch_size = 1
+
+	{
+		s_cust := hugi.suite_create("custom_alloc_suite", cfg_cust, allocator = custom_alloc)
+		defer hugi.suite_destroy(&s_cust)
+
+		hugi.bench(&s_cust, "micro", proc(b: ^hugi.Bencher) {
+			for hugi.step(b) {
+				_ = hugi.black_box(1)
+			}
+		})
+		hugi.group_pipeline(&s_cust, "nested", proc(p: ^hugi.Pipeline) {
+				_ = hugi.scoped_phase(p, "outer", ops = 1)
+				{
+					_ = hugi.scoped_phase(p, "inner", ops = 1)
+					_ = hugi.black_box(2)
+				}
+			}, runs = 12, warmup = 1)
+
+		testing.expect(t, hugi.suite_execute(&s_cust))
+		testing.expect_value(t, len(s_cust.last_packet.records), 3)
+	}
 }

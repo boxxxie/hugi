@@ -3,6 +3,7 @@ package hugi_cli
 import hugi "../../hugi"
 import store "../../store"
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -412,4 +413,36 @@ test_cli_run_args_pin_counters_test_and_by_run :: proc(t: ^testing.T) {
 
 	_, bad_code, bad_done := _parse_run_args([]string{"--pin", "abc"})
 	testing.expect(t, bad_done && bad_code == 1, "non-integer --pin must fail parsing")
+}
+
+@(test)
+test_doctor_load_avg_zero_and_nonfinite_handling :: proc(t: ^testing.T) {
+	testing.expect(
+		t,
+		_doctor_load_avg_known(0.0, true),
+		"0.00 load_avg on supported OS with source must be treated as known",
+	)
+	testing.expect(
+		t,
+		!_doctor_load_avg_known(0.0, false),
+		"0.00 load_avg without OS source (e.g. Windows) must be treated as unknown",
+	)
+	testing.expect(t, !_doctor_load_avg_known(math.nan_f64(), true))
+	testing.expect(t, !_doctor_load_avg_known(math.inf_f64(1), true))
+
+	sb := strings.builder_make(context.temp_allocator)
+	_doctor_write_load_avg_json(&sb, 0.0, true)
+	testing.expect_value(t, strings.to_string(sb), "0.00")
+
+	strings.builder_reset(&sb)
+	_doctor_write_load_avg_json(&sb, 0.0, false)
+	testing.expect_value(t, strings.to_string(sb), "null")
+
+	strings.builder_reset(&sb)
+	_doctor_write_load_avg_json(&sb, math.nan_f64(), true)
+	testing.expect_value(t, strings.to_string(sb), "null")
+
+	strings.builder_reset(&sb)
+	_doctor_write_load_avg_json(&sb, math.inf_f64(1), true)
+	testing.expect_value(t, strings.to_string(sb), "null")
 }

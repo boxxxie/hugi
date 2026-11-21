@@ -1,5 +1,6 @@
 package hugi_specs
 
+import "core:fmt"
 import "core:testing"
 
 @(test)
@@ -647,6 +648,8 @@ spec_cli_compare_1v1_reports_winner_mismatch_and_unmatched :: proc(t: ^testing.T
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
 		shows_stdout_contains(&w, out, "Cross-Language 1v1: odin vs zig")
+		shows_stdout_contains(&w, out, "Test / p-value")
+		shows_stdout_contains(&w, out, "HL [")
 		shows_stdout_contains(&w, out, "footprint mismatches: 1")
 		shows_stdout_contains(&w, out, "[MISMATCH]")
 		shows_stdout_contains(&w, out, "Only in odin (1):")
@@ -674,6 +677,7 @@ spec_cli_compare_1v1_reports_winner_mismatch_and_unmatched :: proc(t: ^testing.T
 		shows_stdout_contains(&w, out, `"shift_pct":`)
 		shows_stdout_contains(&w, out, `"shift_low_pct":`)
 		shows_stdout_contains(&w, out, `"shift_high_pct":`)
+		shows_stdout_contains(&w, out, `"used_shift_ci": true`)
 		shows_stdout_contains(&w, out, `"only_in_a": ["core::odin_only"]`)
 	}
 
@@ -1132,5 +1136,81 @@ spec_cli_run_test_mode_and_pin_counters :: proc(t: ^testing.T) {
 	)
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
+	}
+}
+
+@(test)
+spec_cli_inspect_large_suite_emits_sample_shape_warning_banner :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 15)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	benches := make([]Bench_Observation, 27)
+	defer delete(benches)
+	steady_batches := []u64{10000, 10010, 9990, 10005, 9995, 10010, 9990, 10000}
+	for i in 0 ..< 25 {
+		benches[i] = Bench_Observation {
+			name           = fmt.tprintf("steady_%02d", i),
+			ops_per_sample = 100,
+			exact_batch_ns = steady_batches,
+		}
+	}
+	benches[25] = Bench_Observation {
+		name           = "drift_op",
+		ops_per_sample = 100,
+		exact_batch_ns = []u64{10000, 10800, 11600, 12400, 13200, 14000, 14800, 15600},
+	}
+	benches[26] = Bench_Observation {
+		name           = "bimodal_op",
+		ops_per_sample = 100,
+		exact_batch_ns = []u64 {
+			5000,
+			5020,
+			4990,
+			5010,
+			5000,
+			5030,
+			4980,
+			5000,
+			5010,
+			4990,
+			5020,
+			5000,
+			20000,
+			20020,
+			19990,
+			20010,
+			20000,
+			20030,
+			19980,
+			20000,
+			20010,
+			19990,
+			20020,
+			20000,
+		},
+	}
+	given_packet_file(
+		&w,
+		"pkt-big",
+		commit = "big27",
+		lang = "odin",
+		run_id = "r-big27",
+		benches = benches,
+	)
+	upon_running_cli(&w, "ingest", "--db", "@db", "@pkt-big")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+	upon_running_cli(&w, "inspect", "--db", "@db")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Sample-Shape Warnings (2/27 benchmarks;")
+		shows_stdout_contains(&w, out, "core::drift_op")
+		shows_stdout_contains(&w, out, "[drifts +")
+		shows_stdout_contains(&w, out, "core::bimodal_op")
+		shows_stdout_contains(&w, out, "[2 modes]")
 	}
 }

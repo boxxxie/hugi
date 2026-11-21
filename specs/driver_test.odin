@@ -321,6 +321,14 @@ _driver_suite_terminal_summary :: proc(s: ^hugi.Suite, allocator := context.allo
 }
 
 @(private)
+_driver_suite_failure_messages :: proc(
+	s: ^hugi.Suite,
+	allocator := context.allocator,
+) -> []string {
+	return hugi.suite_failure_messages(s, allocator)
+}
+
+@(private)
 _driver_suite_destroy :: proc(s: ^hugi.Suite) {
 	hugi.suite_destroy(s)
 }
@@ -398,6 +406,59 @@ _driver_write_obench_json_fixture :: proc(
 		max(batch_mid, 1) - 1,
 		max(batch_mid, 1),
 		max(batch_mid, 1) + 1,
+		allocator = context.temp_allocator,
+	)
+	return os.write_entire_file(path, transmute([]u8)payload) == nil
+}
+
+@(private)
+_driver_write_obench_v6_json_fixture :: proc(
+	path: string,
+	suite_name,
+	group_name,
+	bench_name,
+	commit,
+	created_at,
+	cpu,
+	governor,
+	boost,
+	microarch,
+	bounds_checks: string,
+	median_ns: f64,
+	batch_size: u64,
+	peak_heap_bytes: i64,
+	zero_alloc_failed: bool,
+	instructions: f64,
+) -> bool {
+	full_name := fmt.aprintf("%s::%s", group_name, bench_name, allocator = context.temp_allocator)
+	batch_mid := u64(math_round_u64(median_ns * f64(max(batch_size, 1))))
+	payload := fmt.aprintf(
+		`{{"format_version":6,"suite_name":"%s","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev-2026-10","created_at":"%s","git":{{"commit":"%s","branch":"main","dirty":false}},"machine":{{"cpu":"%s","cores":8,"governor":"%s","boost":"%s","smt":"on"}},"build":{{"microarch":"%s","bounds_checks":"%s","odin_version_hash":"abc"}},"benchmarks":[{{"suite_name":"%s","group_name":"%s","name":"%s","full_name":"%s","samples":3,"batch_size":%d,"min_ns":%.6f,"p50_ns":%.6f,"p95_ns":%.6f,"p99_ns":%.6f,"max_ns":%.6f,"mean_ns":%.6f,"samples_batch_ns":[%d,%d,%d],"peak_heap_bytes":%d,"zero_alloc_failed":%s,"instructions":%.2f}}]}}`,
+		suite_name,
+		created_at,
+		commit,
+		cpu,
+		governor,
+		boost,
+		microarch,
+		bounds_checks,
+		suite_name,
+		group_name,
+		bench_name,
+		full_name,
+		batch_size,
+		max(median_ns - 0.1, 0.1),
+		median_ns,
+		median_ns + 0.1,
+		median_ns + 0.1,
+		median_ns + 0.1,
+		median_ns,
+		max(batch_mid, 1) - 1,
+		max(batch_mid, 1),
+		max(batch_mid, 1) + 1,
+		peak_heap_bytes,
+		"true" if zero_alloc_failed else "false",
+		instructions,
 		allocator = context.temp_allocator,
 	)
 	return os.write_entire_file(path, transmute([]u8)payload) == nil

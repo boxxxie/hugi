@@ -46,20 +46,23 @@ Suite_Config :: struct {
 	run_id:          string,
 	packet_out_path: string,
 	quiet:           bool,
+	host_warned:     bool,
 }
 
 Suite :: struct {
-	name:               string,
-	config:             Suite_Config,
-	obench_suite:       obench.Suite,
-	pipelines:          [dynamic]_Pipeline_Def,
-	last_packet:        Run_Packet,
-	violations:         [dynamic]Phase_Violation,
-	failed_zero_alloc:  int,
-	failed_errors:      int,
-	failed_regressions: int,
-	failed_io:          int,
-	allocator:          runtime.Allocator,
+	name:                     string,
+	config:                   Suite_Config,
+	obench_suite:             obench.Suite,
+	pipelines:                [dynamic]_Pipeline_Def,
+	last_packet:              Run_Packet,
+	violations:               [dynamic]Phase_Violation,
+	failed_zero_alloc:        int,
+	failed_alloc_regressions: int,
+	failed_errors:            int,
+	failed_regressions:       int,
+	failed_io:                int,
+	failed_baseline:          int,
+	allocator:                runtime.Allocator,
 }
 
 @(private = "file")
@@ -70,6 +73,10 @@ _apply_cli_flags :: proc(cfg: ^Suite_Config, args: []string) {
 		i += 1
 		if arg == "--quiet" || arg == "-quiet" {
 			cfg.quiet = true
+			continue
+		}
+		if arg == "--host-warned" || arg == "-host-warned" {
+			cfg.host_warned = true
 			continue
 		}
 		if !strings.has_prefix(arg, "-") {
@@ -402,9 +409,11 @@ populating `s.last_packet` and writing `--packet-out` if configured.
 @(require_results)
 suite_execute :: proc(s: ^Suite) -> bool {
 	s.failed_zero_alloc = 0
+	s.failed_alloc_regressions = 0
 	s.failed_errors = 0
 	s.failed_regressions = 0
 	s.failed_io = 0
+	s.failed_baseline = 0
 	for &v in s.violations {
 		delete(v.full_name, s.allocator)
 	}
@@ -453,9 +462,11 @@ suite_execute :: proc(s: ^Suite) -> bool {
 			s.obench_suite.config.filter = saved_filter
 
 			s.failed_zero_alloc += s.obench_suite.failed_zero_alloc
+			s.failed_alloc_regressions += s.obench_suite.failed_alloc_regressions
 			s.failed_errors += s.obench_suite.failed_errors
 			s.failed_regressions += s.obench_suite.failed_regressions
 			s.failed_io += s.obench_suite.failed_io
+			s.failed_baseline += s.obench_suite.failed_baseline
 
 			for r in s.obench_suite.results {
 				rank += 1
@@ -504,7 +515,13 @@ suite_execute :: proc(s: ^Suite) -> bool {
 		}
 	}
 
-	total_failures := s.failed_zero_alloc + s.failed_errors + s.failed_regressions + s.failed_io
+	total_failures :=
+		s.failed_zero_alloc +
+		s.failed_alloc_regressions +
+		s.failed_errors +
+		s.failed_regressions +
+		s.failed_io +
+		s.failed_baseline
 	return total_failures == 0
 }
 
@@ -513,7 +530,12 @@ Writes the terminal report for `s` (both `obench` micro results and `Pipeline` p
 */
 write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 	if len(s.obench_suite.results) > 0 {
+		saved_gov := s.obench_suite.machine_state.governor
+		if s.config.host_warned {
+			s.obench_suite.machine_state.governor = ""
+		}
 		obench.write_terminal_report(strings.to_writer(sb), &s.obench_suite)
+		s.obench_suite.machine_state.governor = saved_gov
 	}
 	has_pipeline_rows := false
 	for &r in s.last_packet.records {
@@ -653,8 +675,50 @@ suite_run :: proc(s: ^Suite) -> bool {
 }
 
 /*
-Runs `s` inside an `odin test` procedure, logging the report and failing the test on any
-error, `@zero_alloc` violation, regression, or file I/O failure.
+Returns one failure message per problem recorded by the last `suite_execute` / `suite_run` /
+`run_test` call, naming each failing `obench` benchmark, pipeline `@zero_alloc` violation, or
+packet I/O error. Strings and the returned slice are allocated with `allocator`.
+*/
+@(require_results)
+suite_failure_messages :: proc(s: ^Suite, allocator := context.temp_allocator) -> []string {
+	out := make([dynamic]string, allocator)
+	if s == nil {
+		return out[:]
+	}
+	ob_msgs := obench.suite_failure_messages(&s.obench_suite, allocator)
+	if len(ob_msgs) > 0 {
+		append(&out, ..ob_msgs)
+	}
+	delete(ob_msgs, allocator)
+	for v in s.violations {
+		append(
+			&out,
+			fmt.aprintf(
+				"%s: allocated %d B on the heap in a @zero_alloc pipeline phase, first at %v",
+				v.full_name,
+				v.size,
+				v.loc,
+				allocator = allocator,
+			),
+		)
+	}
+	if s.failed_io > s.obench_suite.failed_io {
+		append(
+			&out,
+			fmt.aprintf(
+				"hugi suite %q: could not write packet %q",
+				s.name,
+				s.config.packet_out_path,
+				allocator = allocator,
+			),
+		)
+	}
+	return out[:]
+}
+
+/*
+Runs `s` inside an `odin test` procedure, logging the report and reporting one failure per
+problem (`suite_failure_messages`).
 */
 run_test :: proc(t: ^testing.T, s: ^Suite, loc := #caller_location) {
 	color := s.obench_suite.config.color_output
@@ -665,15 +729,17 @@ run_test :: proc(t: ^testing.T, s: ^Suite, loc := #caller_location) {
 	s.obench_suite.config.color_output = color
 
 	log.info(strings.to_string(sb), location = loc)
-	testing.expectf(
-		t,
-		ok,
-		"hugi suite %q failed: %d errors, %d @zero_alloc failures, %d regressions, %d file errors",
-		s.name,
-		s.failed_errors,
-		s.failed_zero_alloc,
-		s.failed_regressions,
-		s.failed_io,
-		loc = loc,
-	)
+	messages := suite_failure_messages(s, context.allocator)
+	defer {
+		for msg in messages {
+			delete(msg)
+		}
+		delete(messages)
+	}
+	for msg in messages {
+		testing.expect(t, false, msg, loc = loc)
+	}
+	if !ok && len(messages) == 0 {
+		testing.expectf(t, false, "hugi suite %q failed", s.name, loc = loc)
+	}
 }

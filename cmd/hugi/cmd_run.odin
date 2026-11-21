@@ -351,7 +351,13 @@ _build_run_binary :: proc(opts: _Run_Opts, bin_path: string) -> (ok: bool, flags
 }
 
 @(private = "file")
-_exec_run_binary :: proc(opts: _Run_Opts, bin_path, pkt_path: string) -> (run_ok, has_pkt: bool) {
+_exec_run_binary :: proc(
+	opts: _Run_Opts,
+	bin_path, pkt_path: string,
+	host_warned_gov := false,
+) -> (
+	run_ok, has_pkt: bool,
+) {
 	run_cmd := make([dynamic]string, context.temp_allocator)
 	append(&run_cmd, bin_path, "--packet-out", pkt_path)
 	if opts.runs != "" {
@@ -376,6 +382,8 @@ _exec_run_binary :: proc(opts: _Run_Opts, bin_path, pkt_path: string) -> (run_ok
 	}
 	if opts.quiet {
 		append(&run_cmd, "--quiet")
+	} else if host_warned_gov {
+		append(&run_cmd, "--host-warned")
 	}
 
 	run_ok = _run_process(run_cmd[:])
@@ -502,8 +510,10 @@ _cmd_run :: proc(args: []string) -> int {
 		return 1
 	}
 
+	host_warned_gov := false
 	if !opts.quiet {
 		host_env := hugi.collect_host_env(context.temp_allocator)
+		host_warned_gov = host_env.governor != "" && host_env.governor != "performance"
 		issues := hugi.check_host_env(host_env, context.temp_allocator)
 		for w in issues {
 			fmt.eprintfln("hugi warning: %s", w)
@@ -540,7 +550,7 @@ _cmd_run :: proc(args: []string) -> int {
 		return 1
 	}
 
-	run_ok, has_pkt := _exec_run_binary(opts, bin_path, pkt_path)
+	run_ok, has_pkt := _exec_run_binary(opts, bin_path, pkt_path, host_warned_gov)
 	if !has_pkt {
 		return 1
 	}

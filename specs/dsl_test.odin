@@ -708,6 +708,48 @@ given_obench_report_fixture :: proc(
 	testing.expect(w.t, ok, "write obench report fixture", loc = loc)
 }
 
+given_obench_v6_report_fixture :: proc(
+	w: ^World,
+	label, suite_name, group_name, bench_name: string,
+	commit := "v6commit1234",
+	created_at := "2026-11-20T08:30:00Z",
+	cpu := "AMD Ryzen 7 7735U",
+	governor := "performance",
+	boost := "on",
+	microarch := "native",
+	bounds_checks := "off",
+	median_ns: f64 = 12.1,
+	batch_size: u64 = 10,
+	peak_heap_bytes: i64 = 4096,
+	zero_alloc_failed := false,
+	instructions: f64 = 0,
+	loc := #caller_location,
+) {
+	path, p_ok := _world_resolve_label_path(w, label, ".json", loc)
+	if !p_ok {
+		return
+	}
+	ok := _driver_write_obench_v6_json_fixture(
+		path,
+		suite_name,
+		group_name,
+		bench_name,
+		commit,
+		created_at,
+		cpu,
+		governor,
+		boost,
+		microarch,
+		bounds_checks,
+		median_ns,
+		batch_size,
+		peak_heap_bytes,
+		zero_alloc_failed,
+		instructions,
+	)
+	testing.expect(w.t, ok, "write obench v6 report fixture", loc = loc)
+}
+
 given_readme_file :: proc(w: ^World, label, content: string, loc := #caller_location) {
 	path, p_ok := _world_resolve_label_path(w, label, ".md", loc)
 	if !p_ok {
@@ -1701,6 +1743,40 @@ then_suite_terminal_summary_contains :: proc(
 			"expected terminal summary to contain %q, got:\n%s",
 			s,
 			w.last_terminal_summary,
+			loc = loc,
+		)
+	}
+}
+
+then_suite_failure_messages_contain :: proc(
+	w: ^World,
+	substrs: ..string,
+	loc := #caller_location,
+) {
+	if !testing.expect(w.t, w.suite_executed, "suite was not executed", loc = loc) {
+		return
+	}
+	msgs := _driver_suite_failure_messages(&w.suite, context.allocator)
+	defer {
+		for m in msgs {
+			delete(m)
+		}
+		delete(msgs)
+	}
+	for s in substrs {
+		found := false
+		for m in msgs {
+			if strings.contains(m, s) {
+				found = true
+				break
+			}
+		}
+		testing.expectf(
+			w.t,
+			found,
+			"expected suite failure messages (%v) to contain %q",
+			msgs,
+			s,
 			loc = loc,
 		)
 	}

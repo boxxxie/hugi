@@ -528,15 +528,15 @@ wc -c benchmarks/history.hugidb .tmp/all_runs.parquet .tmp/all_runs.arrow .tmp/a
 
 | Command | Description |
 | :--- | :--- |
-| `hugi run [pkg_dir]` | Build and run an Odin benchmark package and ingest results into the store (`--no-db`, `--overlay`, `--runs`, `--warmup`, `--groups`, `-f`, `--baseline-commit`, `--fail-on-regression`; defaults from `hugi.json`). |
+| `hugi run [pkg_dir]` | Build and run an Odin benchmark package and ingest results into the store (`--no-db`, `--overlay`, `--runs`, `--warmup`, `--groups`, `-f`, `--pin`, `--counters`, `--test`, `--baseline-commit`, `--by-run`, `--fail-on-regression`; defaults from `hugi.json`). |
 | `hugi ingest <file...>` | Ingest `.hpk`/`.bpk` binary packets, `obench` `.json` reports, or `.jsonl` benchmark logs (`--lang`, `--commit`, `--capture-host-env`, `--build-flags`, `--runtime-version`). |
 | `hugi history` | List stored commits (`--commits`, default) or individual runs (`--runs`, `--limit <N>`). |
 | `hugi inspect [filter]` | Display Markdown summary, provenance header, and quantile/allocation breakdown (`--commit`, `--run`, `--lang`). |
-| `hugi compare` | Statistical comparison across `--commits <a..b>`, `--runs <a..b>`, or `--last` (`--threshold <pct>`, `--fail-on-regression`, `--format md|json|csv`, `--out <path|->`). |
-| `hugi compare-1v1` | Cross-language 1v1 comparison with Mann-Whitney U / Welch `t`-test and footprint checks (`--langs <a,b>`, `--commit`, `--format md|json|csv`, `--out <path|->`). |
+| `hugi compare` | Statistical comparison across `--commits <a..b>`, `--runs <a..b>`, or `--last` (`--by-run`, `--threshold <pct>`, `--fail-on-regression`, `--format md|json|csv`, `--out <path|->`). |
+| `hugi compare-1v1` | Cross-language 1v1 comparison with Hodges-Lehmann CI / Mann-Whitney U / Welch `t`-test and footprint checks (`--langs <a,b>`, `--commit`, `--format md|json|csv`, `--out <path|->`). |
 | `hugi export` | Export snapshot, `--all-commits`, or `--all-runs` (`--lang odin|<lang>|all`) to `arrow`, `parquet`, `json`, `jsonl`, `csv`, `tsv`, or `md` (including `--out -` stdout streaming) or `--update-readme <path>`. |
 | `hugi compact` | Seal cold runs into `CZCH\x02` columnar chunks and atomically compact dead `xitdb` pages (`--keep-hot <N>`). |
-| `hugi doctor` | Inspect CPU scaling limits, governor, boost state, Odin version, and nearest `hugi.json` (`--strict`, `--format md|json`). |
+| `hugi doctor` | Inspect CPU scaling limits, governor, boost state, cores, SMT, load, power/VM state, Odin version, and nearest `hugi.json` (`--strict`, `--format md|json`). |
 
 ---
 

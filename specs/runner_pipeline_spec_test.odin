@@ -81,6 +81,7 @@ spec_zero_alloc_violations_in_micro_and_pipeline_fail_suite :: proc(t: ^testing.
 	upon_executing_suite(&w)
 
 	then_suite_failed_zero_alloc(&w, min_violations = 2)
+	then_suite_failure_messages_contain(&w, "alloc_grp::bad_micro", "bad_pipe::leaking_phase")
 	then_suite_recorded_benchmarks(&w, []string{"alloc_grp::bad_micro", "bad_pipe::leaking_phase"})
 	if mb, ok := viewing_benchmark(&w, "alloc_grp::bad_micro"); ok {
 		shows_failure_state(&w, mb, zero_alloc_failed = true, error = "")

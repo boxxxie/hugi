@@ -1,11 +1,73 @@
 package hugi
 
 import obench "../deps/obench/obench"
+import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:time"
+
+@(private = "file", require_results)
+_obench_doc_run_env :: proc(doc: obench.Export_Document, allocator: runtime.Allocator) -> Run_Env {
+	has_v6_env :=
+		doc.machine.cpu != "" ||
+		doc.machine.governor != "" ||
+		doc.machine.boost != "" ||
+		doc.build.microarch != "" ||
+		doc.build.bounds_checks != ""
+	if !has_v6_env {
+		return {}
+	}
+	boost: i8 = 0
+	if doc.machine.boost == "on" {
+		boost = 1
+	} else if doc.machine.boost == "off" {
+		boost = -1
+	}
+	build_flags := ""
+	if doc.build.microarch != "" || doc.build.bounds_checks != "" {
+		parts := make([dynamic]string, context.temp_allocator)
+		if doc.optimization != "" {
+			append(
+				&parts,
+				fmt.tprintf("-o:%s", strings.to_lower(doc.optimization, context.temp_allocator)),
+			)
+		}
+		if doc.build.microarch != "" {
+			append(&parts, fmt.tprintf("-microarch:%s", doc.build.microarch))
+		}
+		if doc.build.bounds_checks == "off" {
+			append(&parts, "-no-bounds-check")
+		}
+		build_flags = strings.join(parts[:], " ", allocator)
+	}
+	return Run_Env {
+		cpu_model = strings.clone(doc.machine.cpu, allocator),
+		governor = strings.clone(doc.machine.governor, allocator),
+		boost_state = boost,
+		build_flags = build_flags,
+		runtime_version = doc.odin_version != "" ? strings.clone(doc.odin_version, allocator) : "",
+	}
+}
+
+@(private = "file")
+_append_counter_metric :: proc(
+	metrics: ^[dynamic]Metric,
+	unit: string,
+	value: f64,
+	allocator: runtime.Allocator,
+) {
+	if !(value > 0) || len(metrics^) >= MAX_METRICS {
+		return
+	}
+	for m in metrics^ {
+		if m.unit == unit {
+			return
+		}
+	}
+	append(metrics, Metric{unit = strings.clone(unit, allocator), value = value})
+}
 
 /*
 Converts an `obench` JSON report (`Export_Document`) into one `Run_Packet` per suite.
@@ -27,10 +89,20 @@ read_obench_json_packets :: proc(
 	}
 
 	lang := lang_override != "" ? lang_override : "odin"
-	commit :=
-		commit_override != "" ? commit_override : resolve_git_commit(".", context.temp_allocator)
+	commit := commit_override
+	if commit == "" && doc.git.commit != "" {
+		commit = len(doc.git.commit) > 12 ? doc.git.commit[:12] : doc.git.commit
+	}
+	if commit == "" {
+		commit = resolve_git_commit(".", context.temp_allocator)
+	}
 	base_run_id := run_id_override != "" ? run_id_override : default_run_id(context.temp_allocator)
 	ts := i64(time.to_unix_nanoseconds(time.now())) / 1_000_000_000
+	if doc.created_at != "" {
+		if parsed, consumed := time.rfc3339_to_time_utc(doc.created_at); consumed > 0 {
+			ts = i64(time.to_unix_nanoseconds(parsed)) / 1_000_000_000
+		}
+	}
 
 	suite_order := make([dynamic]string, context.temp_allocator)
 	by_suite := make(map[string]int, context.temp_allocator)
@@ -62,6 +134,7 @@ read_obench_json_packets :: proc(
 					optimization = strings.clone(doc.optimization, allocator),
 					odin_version = strings.clone(doc.odin_version, allocator),
 					timestamp_unix = ts,
+					env = _obench_doc_run_env(doc, allocator),
 					records = make([dynamic]Record, allocator),
 				},
 			)
@@ -97,6 +170,8 @@ read_obench_json_packets :: proc(
 			alloc_bytes_per_op = e.alloc_bytes_per_op,
 			temp_allocs_per_op = e.temp_allocs_per_op,
 			temp_bytes_per_op  = e.temp_bytes_per_op,
+			peak_heap_bytes    = e.peak_heap_bytes,
+			zero_alloc_failed  = e.zero_alloc_failed,
 			error              = strings.clone(e.error, allocator),
 			metrics            = make([dynamic]Metric, allocator),
 			samples_batch_ns   = make([dynamic]u64, s_cnt, allocator),
@@ -109,8 +184,15 @@ read_obench_json_packets :: proc(
 			}
 		}
 		for m in e.custom_metrics {
+			if len(r.metrics) >= MAX_METRICS {
+				break
+			}
 			append(&r.metrics, Metric{unit = strings.clone(m.unit, allocator), value = m.value})
 		}
+		_append_counter_metric(&r.metrics, "instructions/op", e.instructions, allocator)
+		_append_counter_metric(&r.metrics, "cycles/op", e.cycles, allocator)
+		_append_counter_metric(&r.metrics, "branch_misses/op", e.branch_misses, allocator)
+		_append_counter_metric(&r.metrics, "cache_misses/op", e.cache_misses, allocator)
 		if r.mean_fs > 0 {
 			r.cv_pct = (f64(r.std_dev_fs) / f64(r.mean_fs)) * 100.0
 		}

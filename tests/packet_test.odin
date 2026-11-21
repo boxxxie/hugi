@@ -4,6 +4,7 @@ import hugi "../hugi"
 import "core:os"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
 @(test)
 test_packet_binary_roundtrip :: proc(t: ^testing.T) {
@@ -469,4 +470,219 @@ test_jsonl_summary_only_preserves_stats :: proc(t: ^testing.T) {
 		testing.expect_value(t, r.cv_pct, 5.8)
 		testing.expect_value(t, r.iqr_fs, i64(3_000_000))
 	}
+}
+
+@(test)
+test_obench_v6_json_importer_maps_metadata_and_preserves_legacy_v3 :: proc(t: ^testing.T) {
+	tmp, mk_err := os.make_directory_temp("", "hugi-obench-v6-*", context.allocator)
+	testing.expectf(t, mk_err == nil && tmp != "", "create temp dir: %v", mk_err)
+	if mk_err != nil || tmp == "" {
+		return
+	}
+	defer {
+		_ = os.remove_all(tmp)
+		delete(tmp)
+	}
+
+	v6_path := strings.concatenate({tmp, "/v6.json"}, context.temp_allocator)
+	v6_json := `{
+		"format_version": 6,
+		"suite_name": "v6_suite",
+		"os": "linux",
+		"arch": "amd64",
+		"optimization": "Speed",
+		"odin_version": "dev-2026-10",
+		"created_at": "2026-11-20T08:30:00Z",
+		"git": {"commit": "deadbeef1234567890abcdef", "branch": "main", "dirty": false},
+		"machine": {"cpu": "AMD Ryzen 7 7735U", "cores": 16, "governor": "performance", "boost": "on", "smt": "on"},
+		"build": {"microarch": "native", "bounds_checks": "off", "odin_version_hash": "abc"},
+		"benchmarks": [{
+			"suite_name": "v6_suite",
+			"group_name": "hash",
+			"name": "fnv1a",
+			"full_name": "hash::fnv1a",
+			"samples": 3,
+			"batch_size": 10,
+			"min_ns": 10.0,
+			"p50_ns": 10.1,
+			"p95_ns": 10.2,
+			"p99_ns": 10.2,
+			"max_ns": 10.2,
+			"mean_ns": 10.1,
+			"samples_batch_ns": [100, 101, 102],
+			"peak_heap_bytes": 4096,
+			"zero_alloc_failed": true,
+			"custom_metrics": [{"unit": "hit%", "value": 99.5}],
+			"instructions": 120.5,
+			"cycles": 45.0,
+			"branch_misses": 1.25,
+			"cache_misses": 0.5
+		}]
+	}`
+	testing.expect(t, os.write_entire_file(v6_path, transmute([]u8)v6_json) == nil)
+
+	pkts, ok := hugi.read_obench_json_packets(v6_path)
+	defer hugi.packets_destroy(pkts)
+	testing.expect(t, ok, "read_obench_json_packets v6 should succeed")
+	testing.expect_value(t, len(pkts), 1)
+	if ok && len(pkts) == 1 {
+		p := pkts[0]
+		expected_t, _ := time.rfc3339_to_time_utc("2026-11-20T08:30:00Z")
+		expected_ts := i64(time.to_unix_nanoseconds(expected_t)) / 1_000_000_000
+		testing.expect_value(t, p.commit, "deadbeef1234")
+		testing.expect_value(t, p.timestamp_unix, expected_ts)
+		testing.expect_value(t, p.env.cpu_model, "AMD Ryzen 7 7735U")
+		testing.expect_value(t, p.env.governor, "performance")
+		testing.expect_value(t, p.env.boost_state, i8(1))
+		testing.expect_value(t, p.env.build_flags, "-o:speed -microarch:native -no-bounds-check")
+		testing.expect_value(t, p.env.runtime_version, "dev-2026-10")
+
+		testing.expect_value(t, len(p.records), 1)
+		if len(p.records) == 1 {
+			r := p.records[0]
+			testing.expect_value(t, r.peak_heap_bytes, i64(4096))
+			testing.expect_value(t, r.zero_alloc_failed, true)
+			testing.expect_value(t, len(r.metrics), 5)
+			if len(r.metrics) == 5 {
+				testing.expect_value(t, r.metrics[0].unit, "hit%")
+				testing.expect_value(t, r.metrics[0].value, 99.5)
+				testing.expect_value(t, r.metrics[1].unit, "instructions/op")
+				testing.expect_value(t, r.metrics[1].value, 120.5)
+				testing.expect_value(t, r.metrics[2].unit, "cycles/op")
+				testing.expect_value(t, r.metrics[2].value, 45.0)
+				testing.expect_value(t, r.metrics[3].unit, "branch_misses/op")
+				testing.expect_value(t, r.metrics[3].value, 1.25)
+				testing.expect_value(t, r.metrics[4].unit, "cache_misses/op")
+				testing.expect_value(t, r.metrics[4].value, 0.5)
+			}
+		}
+	}
+
+	// Legacy v3 report without machine/build metadata must leave pkt.env empty.
+	v3_path := strings.concatenate({tmp, "/v3.json"}, context.temp_allocator)
+	v3_json := `{"format_version":3,"suite_name":"v3_suite","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev","benchmarks":[{"suite_name":"v3_suite","group_name":"math","name":"mul","full_name":"math::mul","samples":3,"batch_size":10,"min_ns":10.0,"p50_ns":10.1,"p95_ns":10.2,"p99_ns":10.2,"max_ns":10.2,"mean_ns":10.1,"samples_batch_ns":[100,101,102]}]}`
+	testing.expect(t, os.write_entire_file(v3_path, transmute([]u8)v3_json) == nil)
+	v3_pkts, v3_ok := hugi.read_obench_json_packets(v3_path)
+	defer hugi.packets_destroy(v3_pkts)
+	testing.expect(t, v3_ok, "read_obench_json_packets v3 should succeed")
+	if v3_ok && len(v3_pkts) == 1 {
+		testing.expect(t, hugi.run_env_is_empty(v3_pkts[0].env), "v3 report must leave env empty")
+	}
+}
+
+@(test)
+test_suite_failure_messages_and_host_warned_dedup :: proc(t: ^testing.T) {
+	tmp, mk_err := os.make_directory_temp("", "hugi-fail-msgs-*", context.allocator)
+	testing.expectf(t, mk_err == nil && tmp != "", "create temp dir: %v", mk_err)
+	if mk_err != nil || tmp == "" {
+		return
+	}
+	defer {
+		_ = os.remove_all(tmp)
+		delete(tmp)
+	}
+
+	// 1. Per-benchmark failure messages for micro + pipeline @zero_alloc and host_warned governor dedup.
+	cfg := hugi.default_suite_config()
+	cfg.quiet = true
+	cfg.host_warned = true
+	cfg.runs = 2
+	cfg.warmup = 0
+	cfg.obench_cfg.sample_count = 5
+	cfg.obench_cfg.warmup_time = 0
+	cfg.obench_cfg.fixed_batch_size = 1
+
+	s := hugi.suite_create("fail_msgs_suite", cfg)
+	defer hugi.suite_destroy(&s)
+
+	g := hugi.group_add(&s, "alloc_grp")
+	hugi.group_bench(g, "bad_micro", proc(b: ^hugi.Bencher) {
+			for hugi.step(b) {
+				buf := make([]u8, 32)
+				_ = hugi.black_box(buf[0])
+				delete(buf)
+			}
+		}, zero_alloc = true)
+
+	hugi.group_pipeline(&s, "bad_pipe", proc(p: ^hugi.Pipeline) {
+		ph := hugi.phase_begin(p, "bad_phase", ops = 1, zero_alloc = true)
+		buf := make([]u8, 24)
+		_ = hugi.black_box(buf[0])
+		delete(buf)
+		hugi.phase_end(ph)
+	})
+
+	ok := hugi.suite_execute(&s)
+	testing.expect(t, !ok, "suite must fail on @zero_alloc violations")
+	testing.expect_value(t, s.failed_zero_alloc, 2)
+
+	msgs := hugi.suite_failure_messages(&s, context.allocator)
+	defer {
+		for m in msgs {
+			delete(m)
+		}
+		delete(msgs)
+	}
+	testing.expect_value(t, len(msgs), 2)
+	saw_micro, saw_pipe := false, false
+	for m in msgs {
+		if strings.contains(m, "alloc_grp::bad_micro") {
+			saw_micro = true
+		}
+		if strings.contains(m, "bad_pipe::bad_phase") {
+			saw_pipe = true
+		}
+	}
+	testing.expect(t, saw_micro, "failure messages should name micro benchmark")
+	testing.expect(t, saw_pipe, "failure messages should name pipeline phase")
+
+	// Check governor deduplication around write_terminal_summary without leaking machine_state.governor.
+	orig_gov := s.obench_suite.machine_state.governor
+	forced_gov := strings.clone("powersave", s.allocator)
+	s.obench_suite.machine_state.governor = forced_gov
+
+	sb_dedup := strings.builder_make(context.temp_allocator)
+	hugi.write_terminal_summary(&sb_dedup, &s)
+	testing.expect(
+		t,
+		!strings.contains(strings.to_string(sb_dedup), "CPU governor is 'powersave'"),
+		"host_warned=true must suppress duplicate obench governor warning",
+	)
+	testing.expect_value(t, s.obench_suite.machine_state.governor, forced_gov)
+
+	s.config.host_warned = false
+	sb_plain := strings.builder_make(context.temp_allocator)
+	hugi.write_terminal_summary(&sb_plain, &s)
+	testing.expect(
+		t,
+		strings.contains(strings.to_string(sb_plain), "CPU governor is 'powersave'"),
+		"host_warned=false should preserve obench governor warning",
+	)
+
+	delete(forced_gov, s.allocator)
+	s.obench_suite.machine_state.governor = orig_gov
+
+	// 2. Forward failed_baseline from obench into hugi.Suite.
+	base_path := strings.concatenate({tmp, "/mismatch_base.json"}, context.temp_allocator)
+	mismatch_json := `{"format_version":6,"suite_name":"other","os":"windows","arch":"arm64","optimization":"None","odin_version":"dev","benchmarks":[{"suite_name":"other","group_name":"g","name":"b","full_name":"g::b","samples":3,"batch_size":1,"min_ns":10.0,"p50_ns":10.0,"p95_ns":10.0,"p99_ns":10.0,"max_ns":10.0,"mean_ns":10.0}]}`
+	testing.expect(t, os.write_entire_file(base_path, transmute([]u8)mismatch_json) == nil)
+
+	cfg_bl := hugi.default_suite_config()
+	cfg_bl.quiet = true
+	cfg_bl.obench_cfg.sample_count = 5
+	cfg_bl.obench_cfg.warmup_time = 0
+	cfg_bl.obench_cfg.fixed_batch_size = 1
+	cfg_bl.obench_cfg.fail_on_regression = true
+	cfg_bl.obench_cfg.baseline_load_path = base_path
+
+	s_bl := hugi.suite_create("baseline_fwd_suite", cfg_bl)
+	defer hugi.suite_destroy(&s_bl)
+	hugi.bench(&s_bl, "work", proc(b: ^hugi.Bencher) {
+		for hugi.step(b) {
+			_ = hugi.black_box(1)
+		}
+	})
+	bl_ok := hugi.suite_execute(&s_bl)
+	testing.expect(t, !bl_ok, "mismatched baseline must fail suite_execute")
+	testing.expect(t, s_bl.failed_baseline > 0, "failed_baseline must be forwarded to hugi.Suite")
 }

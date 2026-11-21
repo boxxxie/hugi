@@ -817,3 +817,71 @@ spec_cli_doctor_hugi_json_and_ingest_provenance :: proc(t: ^testing.T) {
 		shows_stdout_contains(&w, out, "GCC 14")
 	}
 }
+
+@(test)
+spec_cli_ingest_obench_v6_preserves_git_timestamp_provenance_and_heap_peak :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 15)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+	given_obench_v6_report_fixture(
+		&w,
+		"v6-rep",
+		suite_name = "v6_cli",
+		group_name = "hash",
+		bench_name = "fnv1a",
+		commit = "cafe1234567890",
+		created_at = "2026-11-20T08:30:00Z",
+		cpu = "AMD Ryzen 7 7735U",
+		governor = "performance",
+		boost = "on",
+		microarch = "native",
+		bounds_checks = "off",
+		median_ns = 14.5,
+		batch_size = 10,
+		peak_heap_bytes = 8192,
+		zero_alloc_failed = false,
+		instructions = 142.0,
+	)
+
+	upon_running_cli(&w, "ingest", "--db", "@db", "@v6-rep")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Ingested 1 packet(s), 1 record(s)")
+	}
+
+	upon_running_cli(&w, "history", "--db", "@db", "--commits")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "cafe12345678")
+	}
+
+	upon_running_cli(&w, "inspect", "--db", "@db", "--commit", "cafe12345678")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, "Environment:")
+		shows_stdout_contains(&w, out, "AMD Ryzen 7 7735U")
+		shows_stdout_contains(&w, out, "-o:speed -microarch:native -no-bounds-check")
+		shows_stdout_contains(&w, out, "dev-2026-10")
+	}
+
+	upon_running_cli(
+		&w,
+		"export",
+		"--db",
+		"@db",
+		"--commit",
+		"cafe12345678",
+		"--format",
+		"json",
+		"--out",
+		"-",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, `"peak_heap_bytes": 8192`)
+		shows_stdout_contains(&w, out, `"timestamp_unix": 1795163400`)
+	}
+}

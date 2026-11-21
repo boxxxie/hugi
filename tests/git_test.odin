@@ -1,6 +1,7 @@
 package hugi_tests
 
 import hugi "../hugi"
+import "core:mem"
 import "core:os"
 import "core:path/filepath"
 import "core:testing"
@@ -34,12 +35,23 @@ test_resolve_git_commit_all_layouts :: proc(t: ^testing.T) {
 		)
 	}
 
-	// 1. Directory outside any Git repository returns "unknown".
-	outside, _ := filepath.join({tmp, "outside", "sub"}, context.temp_allocator)
+	// 1. Directory outside any Git repository returns "unknown" with 0 intermediate leaks on
+	// context.allocator across deep directory traversal.
+	outside, _ := filepath.join({tmp, "outside", "a", "b", "sub"}, context.temp_allocator)
 	testing.expect(t, os.make_directory_all(outside) == nil, "mkdir outside")
-	c_out := hugi.resolve_git_commit(outside, context.allocator)
-	testing.expect_value(t, c_out, "unknown")
-	delete(c_out)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer {
+		testing.expect_value(t, len(track.allocation_map), 0)
+		testing.expect_value(t, len(track.bad_free_array), 0)
+		mem.tracking_allocator_destroy(&track)
+	}
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		c_out := hugi.resolve_git_commit(outside, context.allocator)
+		testing.expect_value(t, c_out, "unknown")
+		delete(c_out)
+	}
 
 	// 2. Standard .git/HEAD symref + loose branch file resolved from nested subdirectory.
 	std_repo, _ := filepath.join({tmp, "std_repo"}, context.temp_allocator)

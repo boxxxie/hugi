@@ -11,13 +11,23 @@ import "core:testing"
 
 @(test)
 test_cli_parse_flag_kv_and_consume_value :: proc(t: ^testing.T) {
-	args := []string{"--db=my.hugidb", "-f:bench", "--lang", "zig", "-", "pkg_dir", "--quiet"}
+	args := []string {
+		"--db=my.hugidb",
+		"-f:bench",
+		"--lang",
+		"zig",
+		"--filter=",
+		"out.csv",
+		"-",
+		"pkg_dir",
+		"--quiet",
+	}
 	idx := 0
 
 	k, v, is_flag := _parse_flag_kv(args, &idx)
 	testing.expect(t, is_flag)
 	testing.expect_value(t, k, "db")
-	testing.expect_value(t, v, "my.hugidb")
+	testing.expect_value(t, v.? or_else "", "my.hugidb")
 	val, v_ok := _consume_value(args, &idx, v, k)
 	testing.expect(t, v_ok)
 	testing.expect_value(t, val, "my.hugidb")
@@ -26,7 +36,7 @@ test_cli_parse_flag_kv_and_consume_value :: proc(t: ^testing.T) {
 	k, v, is_flag = _parse_flag_kv(args, &idx)
 	testing.expect(t, is_flag)
 	testing.expect_value(t, k, "f")
-	testing.expect_value(t, v, "bench")
+	testing.expect_value(t, v.? or_else "", "bench")
 	val, v_ok = _consume_value(args, &idx, v, k)
 	testing.expect(t, v_ok)
 	testing.expect_value(t, val, "bench")
@@ -35,26 +45,43 @@ test_cli_parse_flag_kv_and_consume_value :: proc(t: ^testing.T) {
 	k, v, is_flag = _parse_flag_kv(args, &idx)
 	testing.expect(t, is_flag)
 	testing.expect_value(t, k, "lang")
-	testing.expect_value(t, v, "")
+	testing.expect(t, v == nil)
 	val, v_ok = _consume_value(args, &idx, v, k)
 	testing.expect(t, v_ok)
 	testing.expect_value(t, val, "zig")
 	testing.expect_value(t, idx, 4)
 
+	// Explicit empty inline value (--filter=) must return "" without consuming "out.csv".
+	k, v, is_flag = _parse_flag_kv(args, &idx)
+	testing.expect(t, is_flag)
+	testing.expect_value(t, k, "filter")
+	inline_empty, has_inline := v.?
+	testing.expect(t, has_inline)
+	testing.expect_value(t, inline_empty, "")
+	val, v_ok = _consume_value(args, &idx, v, k)
+	testing.expect(t, v_ok)
+	testing.expect_value(t, val, "")
+	testing.expect_value(t, idx, 5)
+
+	k, v, is_flag = _parse_flag_kv(args, &idx)
+	testing.expect(t, !is_flag, "positional argument after --filter= is not consumed")
+	testing.expect_value(t, idx, 5)
+	idx += 1
+
 	k, v, is_flag = _parse_flag_kv(args, &idx)
 	testing.expect(t, !is_flag, "single '-' is positional, not a flag")
-	testing.expect_value(t, idx, 4)
+	testing.expect_value(t, idx, 6)
 	idx += 1
 
 	k, v, is_flag = _parse_flag_kv(args, &idx)
 	testing.expect(t, !is_flag, "positional argument is not a flag")
-	testing.expect_value(t, idx, 5)
+	testing.expect_value(t, idx, 7)
 	idx += 1
 
 	k, v, is_flag = _parse_flag_kv(args, &idx)
 	testing.expect(t, is_flag)
 	testing.expect_value(t, k, "quiet")
-	testing.expect_value(t, v, "")
+	testing.expect(t, v == nil)
 	_, missing_ok := _consume_value(args, &idx, v, k)
 	testing.expect(t, !missing_ok, "missing trailing value must return false")
 }
@@ -90,15 +117,17 @@ test_cli_common_flags_and_split_range :: proc(t: ^testing.T) {
 		_Flag_Parse_Status.Not_Matched,
 	)
 
-	// Invalid negative threshold returns .Error.
-	bad_args := []string{"--threshold", "-1.0"}
-	bidx := 0
-	bk, biv, _ := _parse_flag_kv(bad_args, &bidx)
-	testing.expect_value(
-		t,
-		_try_parse_common_flag("test", bk, biv, bad_args, &bidx, allowed, &opts),
-		_Flag_Parse_Status.Error,
-	)
+	// Invalid negative and non-finite thresholds return .Error.
+	for bad_thresh in ([]string{"-1.0", "NaN", "Inf", "+Inf", "-Inf"}) {
+		bad_args := []string{"--threshold", bad_thresh}
+		bidx := 0
+		bk, biv, _ := _parse_flag_kv(bad_args, &bidx)
+		testing.expect_value(
+			t,
+			_try_parse_common_flag("test", bk, biv, bad_args, &bidx, allowed, &opts),
+			_Flag_Parse_Status.Error,
+		)
+	}
 
 	// Help flag returns .Help.
 	help_args := []string{"--help"}

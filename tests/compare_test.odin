@@ -635,4 +635,164 @@ test_compare_drift_multimodal_warnings_and_by_run_medians :: proc(t: ^testing.T)
 	testing.expect(t, strings.contains(md_runs, " (runs)"))
 	js_runs := store.format_comparison_json(rep_runs, "run_b", "run_c", context.temp_allocator)
 	testing.expect(t, strings.contains(js_runs, `"used_run_medians": true`))
+	csv_runs := store.format_comparison_csv(rep_runs, "run_b", "run_c", context.temp_allocator)
+	testing.expect(
+		t,
+		strings.contains(
+			csv_runs,
+			",shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,used_run_medians\n",
+		),
+	)
+	testing.expect(t, strings.contains(csv_runs, ",true,true\n"))
+}
+
+@(test)
+test_compare_1v1_hl_ci_symmetry_and_shape_diagnostics :: proc(t: ^testing.T) {
+	add_bench :: proc(pkt: ^hugi.Run_Packet, rank: int, name: string, ns_vals: []f64) {
+		samples := make([dynamic]u64, len(ns_vals))
+		for v, i in ns_vals {
+			samples[i] = hugi.ns_f64_to_batch_ns(v, 100)
+		}
+		r := hugi.Record {
+			rank             = rank,
+			group_name       = strings.clone("core"),
+			name             = strings.clone(name),
+			full_name        = strings.concatenate({"core::", name}),
+			ops_per_sample   = 100,
+			samples          = len(ns_vals),
+			samples_batch_ns = samples,
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		hugi.recompute_record_stats_from_samples(&r)
+		hugi.refresh_record_throughput(&r)
+		append(&pkt.records, r)
+	}
+	make_lang_pkt :: proc(lang: string) -> hugi.Run_Packet {
+		return hugi.Run_Packet {
+			suite_name = strings.clone("suite_1v1"),
+			lang = strings.clone(lang),
+			commit = strings.clone("c1v1"),
+			run_id = strings.concatenate({"r-", lang}),
+			os = strings.clone("linux"),
+			arch = strings.clone("amd64"),
+			optimization = strings.clone("Speed"),
+			odin_version = strings.clone("test"),
+			timestamp_unix = 1770000000,
+			records = make([dynamic]hugi.Record, 0, 5),
+		}
+	}
+
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	straddle_fast := [10]f64{100, 92, 105, 95, 108, 97, 103, 99, 101, 100}
+	straddle_slow := [10]f64{108, 101, 115, 103, 118, 105, 113, 107, 111, 109}
+	low_series := [10]f64{98, 101, 99, 102, 100, 100, 101, 99, 100, 100}
+	high_series := [10]f64{128, 131, 129, 132, 130, 130, 131, 129, 130, 130}
+	steady_100 := [10]f64{100, 100, 100, 100, 100, 100, 100, 100, 100, 100}
+	drift_ramp := [10]f64{100, 105, 110, 115, 120, 125, 130, 135, 140, 145}
+	bimodal := [24]f64 {
+		50,
+		50.2,
+		49.9,
+		50.1,
+		50.0,
+		50.3,
+		49.8,
+		50.0,
+		50.1,
+		49.9,
+		50.2,
+		50.0,
+		200,
+		200.2,
+		199.9,
+		200.1,
+		200.0,
+		200.3,
+		199.8,
+		200.0,
+		200.1,
+		199.9,
+		200.2,
+		200.0,
+	}
+
+	po := make_lang_pkt("odin")
+	defer hugi.packet_destroy(&po)
+	add_bench(&po, 1, "straddle", straddle_fast[:])
+	add_bench(&po, 2, "odin_fast", low_series[:])
+	add_bench(&po, 3, "zig_fast", high_series[:])
+	add_bench(&po, 4, "drift_1v1", steady_100[:])
+	add_bench(&po, 5, "bimodal_1v1", steady_100[:])
+
+	pz := make_lang_pkt("zig")
+	defer hugi.packet_destroy(&pz)
+	add_bench(&pz, 1, "straddle", straddle_slow[:])
+	add_bench(&pz, 2, "odin_fast", high_series[:])
+	add_bench(&pz, 3, "zig_fast", low_series[:])
+	add_bench(&pz, 4, "drift_1v1", drift_ramp[:])
+	add_bench(&pz, 5, "bimodal_1v1", bimodal[:])
+
+	testing.expect(t, store.store_ingest_packet(&st, po))
+	testing.expect(t, store.store_ingest_packet(&st, pz))
+
+	rep := store.compare_1v1_langs(&st, "odin", "zig", "c1v1", threshold_pct = 5.0)
+	defer store.cross_lang_report_destroy(&rep)
+	testing.expect_value(t, len(rep.rows), 5)
+	testing.expect_value(t, rep.drifting_rows, 1)
+	testing.expect_value(t, rep.multimodal_rows, 1)
+
+	found_straddle, found_ofast, found_zfast := false, false, false
+	row_ofast, row_zfast: store.Cross_Lang_Row
+	for r in rep.rows {
+		switch r.full_name {
+		case "core::straddle":
+			found_straddle = true
+			testing.expect(t, r.used_shift_ci, "straddle 1v1 should use HL shift CI")
+			testing.expect(t, r.shift_low_pct < 5.0, "straddle HL lower bound should be < 5%")
+			testing.expect(t, !r.is_significant, "straddle 1v1 must not be marked significant")
+		case "core::odin_fast":
+			found_ofast = true
+			row_ofast = r
+			testing.expect(t, r.used_shift_ci)
+			testing.expect_value(t, r.faster_lang, "odin")
+			testing.expect(t, r.is_significant)
+			testing.expect(t, r.shift_low_pct > 5.0)
+		case "core::zig_fast":
+			found_zfast = true
+			row_zfast = r
+			testing.expect(t, r.used_shift_ci)
+			testing.expect_value(t, r.faster_lang, "zig")
+			testing.expect(t, r.is_significant)
+			testing.expect(t, r.shift_low_pct > 5.0)
+		}
+	}
+	testing.expect(t, found_straddle && found_ofast && found_zfast)
+	testing.expect(
+		t,
+		math.abs(row_ofast.shift_pct - row_zfast.shift_pct) < 1e-6,
+		"1v1 HL shift_pct must be symmetric between a<b and a>b",
+	)
+	testing.expect(
+		t,
+		math.abs(row_ofast.shift_low_pct - row_zfast.shift_low_pct) < 1e-6,
+		"1v1 HL shift_low_pct must be symmetric between a<b and a>b",
+	)
+	testing.expect(
+		t,
+		math.abs(row_ofast.shift_high_pct - row_zfast.shift_high_pct) < 1e-6,
+		"1v1 HL shift_high_pct must be symmetric between a<b and a>b",
+	)
+
+	js := store.format_1v1_json(rep, context.temp_allocator)
+	testing.expect(t, strings.contains(js, `"drifting_rows": 1`))
+	testing.expect(t, strings.contains(js, `"multimodal_rows": 1`))
+	testing.expect(t, strings.contains(js, `"shift_pct":`))
+	testing.expect(t, strings.contains(js, `"shift_low_pct":`))
+	testing.expect(t, strings.contains(js, `"shift_high_pct":`))
 }

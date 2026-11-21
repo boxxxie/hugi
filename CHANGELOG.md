@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-21
+
+### Fixed
+
+- **CLI Flag Parsing (`cmd/hugi/`):**
+  - Return `Maybe(string)` from `_parse_flag_kv` and `_consume_value` in `cli_args.odin` so explicit empty inline values (such as `--filter=` or `--build-flags=`) resolve to `""` instead of consuming the following CLI argument.
+  - Guard `--threshold` parsing in `_try_parse_common_flag` with `math.is_nan` and `math.is_inf` so `NaN` and `±Inf` values are rejected.
+
+### Tests
+
+- Added CLI flag-parser tests for `--filter=` and non-finite `--threshold` inputs (`cmd/hugi/cli_test.odin`) and a `mem.Tracking_Allocator` leak check for deep non-repository traversal in `resolve_git_commit` (`tests/git_test.odin`).
+
 ## [0.1.1] - 2026-11-21
 
 ### Fixed

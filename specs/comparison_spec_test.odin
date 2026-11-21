@@ -321,3 +321,202 @@ spec_compare_1v1_warns_on_cross_language_commit_drift :: proc(t: ^testing.T) {
 	upon_comparing_1v1(&w, "odin", "zig", commit = "", threshold_pct = 3.0)
 	then_1v1_warns_containing(&w, "Cross-language commit mismatch: odin at c_new vs zig at c_old")
 }
+
+@(test)
+spec_hodges_lehmann_ci_gating_shape_warnings_and_by_run_comparison :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_in_memory_store(&w)
+	// Noisy boundary shift (p < 0.05 and delta > 5%, but 95% HL CI straddles 5%) must stay Unchanged.
+	given_recorded_run(
+		&w,
+		commit = "hl_base",
+		lang = "odin",
+		run_id = "r-hl-b",
+		benches = []Bench_Observation {
+			{
+				name = "core::straddle",
+				ops_per_sample = 100,
+				exact_batch_ns = []u64 {
+					9200,
+					9500,
+					9700,
+					9900,
+					10000,
+					10000,
+					10100,
+					10300,
+					10500,
+					10800,
+				},
+			},
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "hl_cand",
+		lang = "odin",
+		run_id = "r-hl-c",
+		benches = []Bench_Observation {
+			{
+				name = "core::straddle",
+				ops_per_sample = 100,
+				exact_batch_ns = []u64 {
+					10100,
+					10300,
+					10500,
+					10700,
+					10800,
+					10900,
+					11100,
+					11300,
+					11500,
+					11800,
+				},
+			},
+		},
+	)
+	upon_comparing_commits(&w, "hl_base", "hl_cand", lang = "odin", threshold_pct = 5.0)
+	if row, ok := viewing_comparison_row(&w, "core::straddle"); ok {
+		shows_shift_ci(&w, row, expect_used_ci = true, expect_by_run = false)
+		shows_verdict(&w, row, .Unchanged)
+		shows_significance(&w, row, false, max_p_value = 0.05)
+	}
+
+	// Drifting and multimodal runs surface diagnostic warnings.
+	given_recorded_run(
+		&w,
+		commit = "shape_b",
+		lang = "odin",
+		run_id = "r-sh-b",
+		benches = []Bench_Observation {
+			{
+				name = "core::drift",
+				ops_per_sample = 100,
+				exact_batch_ns = []u64{10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000},
+			},
+			{
+				name = "core::bimodal",
+				ops_per_sample = 100,
+				exact_batch_ns = []u64 {
+					5000,
+					5020,
+					4990,
+					5010,
+					5000,
+					5030,
+					4980,
+					5000,
+					5010,
+					4990,
+					5020,
+					5000,
+					20000,
+					20020,
+					19990,
+					20010,
+					20000,
+					20030,
+					19980,
+					20000,
+					20010,
+					19990,
+					20020,
+					20000,
+				},
+			},
+		},
+	)
+	given_recorded_run(
+		&w,
+		commit = "shape_c",
+		lang = "odin",
+		run_id = "r-sh-c",
+		benches = []Bench_Observation {
+			{
+				name = "core::drift",
+				ops_per_sample = 100,
+				exact_batch_ns = []u64{10000, 10800, 11600, 12400, 13200, 14000, 14800, 15600},
+			},
+			{
+				name = "core::bimodal",
+				ops_per_sample = 100,
+				exact_batch_ns = []u64 {
+					5000,
+					5020,
+					4990,
+					5010,
+					5000,
+					5030,
+					4980,
+					5000,
+					5010,
+					4990,
+					5020,
+					5000,
+					20000,
+					20020,
+					19990,
+					20010,
+					20000,
+					20030,
+					19980,
+					20000,
+					20010,
+					19990,
+					20020,
+					20000,
+				},
+			},
+		},
+	)
+	upon_comparing_commits(&w, "shape_b", "shape_c", lang = "odin", threshold_pct = 5.0)
+	then_comparison_shape_counts(&w, drifting_rows = 1, multimodal_rows = 1)
+	then_comparison_warns_containing(&w, "sample drift over the run")
+	then_comparison_warns_containing(&w, "multimodal sample distributions")
+
+	// Multi-run comparison with use_run_medians = true compares per-run medians.
+	base_rids := [4]string{"br-0", "br-1", "br-2", "br-3"}
+	cand_rids := [4]string{"cr-0", "cr-1", "cr-2", "cr-3"}
+	for idx in 0 ..< 4 {
+		given_recorded_run(
+			&w,
+			commit = "byrun_b",
+			lang = "odin",
+			run_id = base_rids[idx],
+			bench = Bench_Observation {
+				name = "core::op",
+				median_ns = 100.0 + f64(idx) * 0.5,
+				spread_ns = 0.1,
+				samples = 6,
+			},
+		)
+		given_recorded_run(
+			&w,
+			commit = "byrun_c",
+			lang = "odin",
+			run_id = cand_rids[idx],
+			bench = Bench_Observation {
+				name = "core::op",
+				median_ns = 140.0 + f64(idx) * 0.5,
+				spread_ns = 0.1,
+				samples = 6,
+			},
+		)
+	}
+	upon_comparing_commits(
+		&w,
+		"byrun_b",
+		"byrun_c",
+		lang = "odin",
+		threshold_pct = 5.0,
+		use_run_medians = true,
+	)
+	if row, ok := viewing_comparison_row(&w, "core::op"); ok {
+		shows_shift_ci(&w, row, expect_used_ci = true, expect_by_run = true)
+		shows_verdict(&w, row, .Regression)
+		shows_significance(&w, row, true, max_p_value = 0.05)
+	}
+}

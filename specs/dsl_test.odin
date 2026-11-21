@@ -106,11 +106,16 @@ Benchmark_View :: struct {
 }
 
 Comparison_Row_View :: struct {
-	full_name:      string,
-	delta_pct:      f64,
-	p_value:        f64,
-	is_significant: bool,
-	verdict:        Verdict,
+	full_name:        string,
+	delta_pct:        f64,
+	p_value:          f64,
+	shift_pct:        f64,
+	shift_low_pct:    f64,
+	shift_high_pct:   f64,
+	used_shift_ci:    bool,
+	used_run_medians: bool,
+	is_significant:   bool,
+	verdict:          Verdict,
 }
 
 Cross_Lang_Row_View :: struct {
@@ -1052,6 +1057,7 @@ upon_comparing_commits :: proc(
 	base_commit, cand_commit: string,
 	lang := "odin",
 	threshold_pct := 5.0,
+	use_run_medians := false,
 	loc := #caller_location,
 ) {
 	st, ok := _world_active_store(w, loc)
@@ -1059,7 +1065,14 @@ upon_comparing_commits :: proc(
 		return
 	}
 	_world_clear_comparison(w)
-	w.last_comparison = _driver_compare_commits(st, lang, base_commit, cand_commit, threshold_pct)
+	w.last_comparison = _driver_compare_commits(
+		st,
+		lang,
+		base_commit,
+		cand_commit,
+		threshold_pct,
+		use_run_medians = use_run_medians,
+	)
 	w.has_comparison = true
 }
 
@@ -1511,6 +1524,11 @@ viewing_comparison_row :: proc(
 					full_name = strings.clone(r.full_name, arena_alloc),
 					delta_pct = r.delta_pct,
 					p_value = r.p_value,
+					shift_pct = r.shift_pct,
+					shift_low_pct = r.shift_low_pct,
+					shift_high_pct = r.shift_high_pct,
+					used_shift_ci = r.used_shift_ci,
+					used_run_medians = r.used_run_medians,
 					is_significant = r.is_significant,
 					verdict = r.verdict,
 				},
@@ -1564,6 +1582,17 @@ shows_positive_regression_delta :: proc(
 		v.delta_pct,
 		loc = loc,
 	)
+}
+
+shows_shift_ci :: proc(
+	w: ^World,
+	v: Comparison_Row_View,
+	expect_used_ci: bool,
+	expect_by_run := false,
+	loc := #caller_location,
+) {
+	testing.expect_value(w.t, v.used_shift_ci, expect_used_ci, loc = loc)
+	testing.expect_value(w.t, v.used_run_medians, expect_by_run, loc = loc)
 }
 
 viewing_1v1_row :: proc(
@@ -1933,6 +1962,18 @@ then_comparison_summary :: proc(
 	testing.expect_value(w.t, w.last_comparison.improvements, improvements, loc = loc)
 	testing.expect_value(w.t, w.last_comparison.regressions, regressions, loc = loc)
 	testing.expect_value(w.t, w.last_comparison.unchanged, unchanged, loc = loc)
+}
+
+then_comparison_shape_counts :: proc(
+	w: ^World,
+	drifting_rows, multimodal_rows: int,
+	loc := #caller_location,
+) {
+	if !testing.expect(w.t, w.has_comparison, "no comparison report in World", loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, w.last_comparison.drifting_rows, drifting_rows, loc = loc)
+	testing.expect_value(w.t, w.last_comparison.multimodal_rows, multimodal_rows, loc = loc)
 }
 
 then_comparison_geomean_between :: proc(

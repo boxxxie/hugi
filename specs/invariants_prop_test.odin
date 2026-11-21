@@ -1,8 +1,10 @@
 package hugi_specs
 
+import obench "../deps/obench/obench"
 import hugi "../hugi"
 import store "../store"
 import "core:fmt"
+import "core:math"
 import "core:math/rand"
 import "core:slice"
 import "core:strings"
@@ -621,15 +623,54 @@ prop_femtosecond_stats_monotonicity_and_permutation_invariance :: proc(t: ^testi
 			}
 		}
 
+		if n > 1 {
+			sum_sq := 0.0
+			for v in samples {
+				d := f64(v - st.mean_fs)
+				sum_sq += d * d
+			}
+			std_f := math.sqrt(sum_sq / f64(n - 1))
+			unadj_ci95 := i64(
+				math.round(obench.t_critical_975(f64(n - 1)) * (std_f / math.sqrt(f64(n)))),
+			)
+			if !testing.expectf(
+				t,
+				st.ci95_fs >= unadj_ci95,
+				"seed=%d iter=%d expected AR(1) ci95_fs (%d) >= unadjusted (%d)",
+				t.seed,
+				iter,
+				st.ci95_fs,
+				unadj_ci95,
+			) {
+				return
+			}
+		}
+
 		copy(shuf_buf[:n], samples)
 		shuffled := shuf_buf[:n]
 		rand.shuffle(shuffled)
 		st2 := hugi.compute_stats_fs(shuffled, context.temp_allocator)
 
+		order_invariant :=
+			st2.samples == st.samples &&
+			st2.min_fs == st.min_fs &&
+			st2.p25_fs == st.p25_fs &&
+			st2.p50_fs == st.p50_fs &&
+			st2.p75_fs == st.p75_fs &&
+			st2.p95_fs == st.p95_fs &&
+			st2.p99_fs == st.p99_fs &&
+			st2.max_fs == st.max_fs &&
+			st2.mean_fs == st.mean_fs &&
+			st2.std_dev_fs == st.std_dev_fs &&
+			st2.cv_pct == st.cv_pct &&
+			st2.iqr_fs == st.iqr_fs &&
+			st2.mad_fs == st.mad_fs &&
+			st2.ci95_fs >= 0
+
 		if !testing.expectf(
 			t,
-			st2 == st,
-			"seed=%d iter=%d permutation broke stats invariance (%v != %v)",
+			order_invariant,
+			"seed=%d iter=%d permutation broke order-independent stats (%v != %v)",
 			t.seed,
 			iter,
 			st2,

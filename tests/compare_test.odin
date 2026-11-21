@@ -2,6 +2,7 @@ package hugi_tests
 
 import hugi "../hugi"
 import store "../store"
+import "core:fmt"
 import "core:math"
 import "core:strings"
 import "core:testing"
@@ -359,4 +360,279 @@ test_compare_env_mismatch_underpowered_and_1v1_commit_warnings :: proc(t: ^testi
 	testing.expect(t, strings.contains(js1v1, `"a_commit": "c_cand"`))
 	testing.expect(t, strings.contains(js1v1, `"b_commit": "c_base"`))
 	testing.expect(t, strings.contains(js1v1, `"warnings": [`))
+}
+
+@(test)
+test_hodges_lehmann_ci_gating_and_ar1_ci95_widening :: proc(t: ^testing.T) {
+	// 1. Positively autocorrelated ramp widens ci95_fs compared to alternating permutation.
+	ramp := [12]i64 {
+		10_000_000,
+		12_000_000,
+		14_000_000,
+		16_000_000,
+		18_000_000,
+		20_000_000,
+		22_000_000,
+		24_000_000,
+		26_000_000,
+		28_000_000,
+		30_000_000,
+		32_000_000,
+	}
+	osc := [12]i64 {
+		10_000_000,
+		32_000_000,
+		12_000_000,
+		30_000_000,
+		14_000_000,
+		28_000_000,
+		16_000_000,
+		26_000_000,
+		18_000_000,
+		24_000_000,
+		20_000_000,
+		22_000_000,
+	}
+	st_ramp := hugi.compute_stats_fs(ramp[:])
+	st_osc := hugi.compute_stats_fs(osc[:])
+	testing.expect_value(t, st_ramp.p50_fs, st_osc.p50_fs)
+	testing.expect_value(t, st_ramp.std_dev_fs, st_osc.std_dev_fs)
+	testing.expectf(
+		t,
+		st_ramp.ci95_fs > st_osc.ci95_fs,
+		"expected AR(1) ci95_fs (%d) > unautocorrelated (%d)",
+		st_ramp.ci95_fs,
+		st_osc.ci95_fs,
+	)
+
+	// 2. HL CI gating rejects noisy shifts whose 95% CI straddles threshold_pct.
+	make_rec :: proc(name: string, ns_vals: []f64) -> store.Pooled_Record {
+		samples := make([dynamic]i64, len(ns_vals))
+		for v, i in ns_vals {
+			samples[i] = hugi.ns_f64_to_fs(v)
+		}
+		st := hugi.compute_stats_fs(samples[:])
+		return store.Pooled_Record {
+			full_name = strings.clone(name),
+			samples = len(ns_vals),
+			p50_fs = st.p50_fs,
+			mean_fs = st.mean_fs,
+			std_dev_fs = st.std_dev_fs,
+			ci95_fs = st.ci95_fs,
+			cv_pct = st.cv_pct,
+			modes = 1,
+			samples_fs = samples,
+		}
+	}
+
+	base_noisy := make([]store.Pooled_Record, 1)
+	base_noisy[0] = make_rec("core::border", []f64{92, 95, 97, 99, 100, 100, 101, 103, 105, 108})
+	defer store.pooled_records_destroy(base_noisy)
+
+	cand_noisy := make([]store.Pooled_Record, 1)
+	cand_noisy[0] = make_rec(
+		"core::border",
+		[]f64{101, 103, 105, 107, 108, 109, 111, 113, 115, 118},
+	)
+	defer store.pooled_records_destroy(cand_noisy)
+
+	rep_straddle := store.compare_records(base_noisy, cand_noisy, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_straddle)
+	testing.expect_value(t, len(rep_straddle.rows), 1)
+	if len(rep_straddle.rows) == 1 {
+		r := rep_straddle.rows[0]
+		testing.expect(t, r.used_shift_ci, "expected HL CI to be used for n=10")
+		testing.expect(t, r.delta_pct > 5.0, "expected median delta > 5%")
+		testing.expect(t, r.p_value < 0.05, "expected MWU p < 0.05")
+		testing.expect(t, r.shift_low_pct < 5.0, "expected HL lower bound below 5%")
+		testing.expect(t, !r.is_significant, "straddling HL CI must not be flagged significant")
+		testing.expect_value(t, r.verdict, store.Verdict.Unchanged)
+	}
+
+	// Clear shift with entire 95% CI above threshold passes gate.
+	cand_clear := make([]store.Pooled_Record, 1)
+	cand_clear[0] = make_rec(
+		"core::border",
+		[]f64{114, 115, 116, 117, 118, 119, 120, 121, 122, 123},
+	)
+	defer store.pooled_records_destroy(cand_clear)
+
+	rep_clear := store.compare_records(base_noisy, cand_clear, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_clear)
+	testing.expect_value(t, rep_clear.regressions, 1)
+	if len(rep_clear.rows) == 1 {
+		testing.expect(t, rep_clear.rows[0].shift_low_pct > 5.0)
+		testing.expect_value(t, rep_clear.rows[0].verdict, store.Verdict.Regression)
+	}
+}
+
+@(test)
+test_compare_drift_multimodal_warnings_and_by_run_medians :: proc(t: ^testing.T) {
+	make_pkt :: proc(commit, run_id: string, name: string, ns_vals: []f64) -> hugi.Run_Packet {
+		pkt := hugi.Run_Packet {
+			suite_name     = strings.clone("diag_suite"),
+			lang           = strings.clone("odin"),
+			commit         = strings.clone(commit),
+			run_id         = strings.clone(run_id),
+			os             = strings.clone("linux"),
+			arch           = strings.clone("amd64"),
+			optimization   = strings.clone("Speed"),
+			odin_version   = strings.clone("test"),
+			timestamp_unix = 1770000000,
+			records        = make([dynamic]hugi.Record, 0, 1),
+		}
+		samples := make([dynamic]u64, len(ns_vals))
+		for v, i in ns_vals {
+			samples[i] = hugi.ns_f64_to_batch_ns(v, 100)
+		}
+		r := hugi.Record {
+			rank             = 1,
+			group_name       = strings.clone("core"),
+			name             = strings.clone(name),
+			full_name        = strings.concatenate({"core::", name}),
+			ops_per_sample   = 100,
+			samples          = len(ns_vals),
+			samples_batch_ns = samples,
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		hugi.recompute_record_stats_from_samples(&r)
+		hugi.refresh_record_throughput(&r)
+		append(&pkt.records, r)
+		return pkt
+	}
+
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	// 1. Drift & multimodal shape detection.
+	p_steady := make_pkt(
+		"sh01",
+		"r-sh1",
+		"drift_op",
+		[]f64{100, 100, 100, 100, 100, 100, 100, 100, 100, 100},
+	)
+	defer hugi.packet_destroy(&p_steady)
+	p_drift := make_pkt(
+		"sh02",
+		"r-sh2",
+		"drift_op",
+		[]f64{100, 105, 110, 115, 120, 125, 130, 135, 140, 145},
+	)
+	defer hugi.packet_destroy(&p_drift)
+
+	bimodal := [24]f64 {
+		50,
+		50.2,
+		49.9,
+		50.1,
+		50.0,
+		50.3,
+		49.8,
+		50.0,
+		50.1,
+		49.9,
+		50.2,
+		50.0,
+		200,
+		200.2,
+		199.9,
+		200.1,
+		200.0,
+		200.3,
+		199.8,
+		200.0,
+		200.1,
+		199.9,
+		200.2,
+		200.0,
+	}
+	p_bimodal_base := make_pkt("sh01", "r-sh1b", "bimodal_op", bimodal[:])
+	defer hugi.packet_destroy(&p_bimodal_base)
+	p_bimodal_cand := make_pkt("sh02", "r-sh2b", "bimodal_op", bimodal[:])
+	defer hugi.packet_destroy(&p_bimodal_cand)
+
+	testing.expect(t, store.store_ingest_packet(&st, p_steady))
+	testing.expect(t, store.store_ingest_packet(&st, p_drift))
+	testing.expect(t, store.store_ingest_packet(&st, p_bimodal_base))
+	testing.expect(t, store.store_ingest_packet(&st, p_bimodal_cand))
+
+	b_recs := store.store_load_pooled_records(&st, "odin", "sh01")
+	defer store.pooled_records_destroy(b_recs)
+	c_recs := store.store_load_pooled_records(&st, "odin", "sh02")
+	defer store.pooled_records_destroy(c_recs)
+
+	rep_shape := store.compare_records(b_recs, c_recs, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_shape)
+	testing.expect_value(t, rep_shape.drifting_rows, 1)
+	testing.expect_value(t, rep_shape.multimodal_rows, 1)
+
+	md_shape := store.format_comparison_table(rep_shape, "sh01", "sh02", context.temp_allocator)
+	testing.expect(t, strings.contains(md_shape, "sample drift over the run"))
+	testing.expect(t, strings.contains(md_shape, "multimodal sample distributions"))
+	testing.expect(t, strings.contains(md_shape, "HL ["))
+	js_shape := store.format_comparison_json(rep_shape, "sh01", "sh02", context.temp_allocator)
+	testing.expect(t, strings.contains(js_shape, `"drifting_rows": 1`))
+	testing.expect(t, strings.contains(js_shape, `"multimodal_rows": 1`))
+	testing.expect(t, strings.contains(js_shape, `"used_shift_ci": true`))
+
+	// Fallback warning when --by-run is enabled with only 1 run per side.
+	rep_fallback := store.compare_records(
+		b_recs,
+		c_recs,
+		threshold_pct = 5.0,
+		use_run_medians = true,
+	)
+	defer store.comparison_report_destroy(&rep_fallback)
+	md_fb := store.format_comparison_table(rep_fallback, "sh01", "sh02", context.temp_allocator)
+	testing.expect(t, strings.contains(md_fb, "fell back to pooled sample comparison"))
+
+	// 2. Multi-run --by-run compares per-run medians across >= 4 runs per side.
+	for idx in 0 ..< 4 {
+		b_vals := [6]f64 {
+			100 + f64(idx),
+			100 + f64(idx),
+			100 + f64(idx),
+			100 + f64(idx),
+			100 + f64(idx),
+			100 + f64(idx),
+		}
+		c_vals := [6]f64 {
+			140 + f64(idx),
+			140 + f64(idx),
+			140 + f64(idx),
+			140 + f64(idx),
+			140 + f64(idx),
+			140 + f64(idx),
+		}
+		pb := make_pkt("run_b", fmt.tprintf("rb-%d", idx), "op", b_vals[:])
+		defer hugi.packet_destroy(&pb)
+		pc := make_pkt("run_c", fmt.tprintf("rc-%d", idx), "op", c_vals[:])
+		defer hugi.packet_destroy(&pc)
+		testing.expect(t, store.store_ingest_packet(&st, pb))
+		testing.expect(t, store.store_ingest_packet(&st, pc))
+	}
+	rb := store.store_load_pooled_records(&st, "odin", "run_b")
+	defer store.pooled_records_destroy(rb)
+	rc := store.store_load_pooled_records(&st, "odin", "run_c")
+	defer store.pooled_records_destroy(rc)
+
+	rep_runs := store.compare_records(rb, rc, threshold_pct = 5.0, use_run_medians = true)
+	defer store.comparison_report_destroy(&rep_runs)
+	testing.expect_value(t, len(rep_runs.rows), 1)
+	if len(rep_runs.rows) == 1 {
+		r := rep_runs.rows[0]
+		testing.expect(t, r.used_run_medians, "expected used_run_medians=true")
+		testing.expect(t, r.used_shift_ci, "expected HL CI over 4 run medians")
+		testing.expect_value(t, r.base_samples, 4)
+		testing.expect_value(t, r.cand_samples, 4)
+		testing.expect_value(t, r.verdict, store.Verdict.Regression)
+	}
+	md_runs := store.format_comparison_table(rep_runs, "run_b", "run_c", context.temp_allocator)
+	testing.expect(t, strings.contains(md_runs, " (runs)"))
+	js_runs := store.format_comparison_json(rep_runs, "run_b", "run_c", context.temp_allocator)
+	testing.expect(t, strings.contains(js_runs, `"used_run_medians": true`))
 }

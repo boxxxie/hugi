@@ -18,7 +18,7 @@ COMMANDS:
   ingest <file...>       Ingest HPKT .hpk/.bpk packets, obench .json reports, or .jsonl histories
   history                List commits or runs stored in the benchmark database
   inspect [filter]       Inspect pooled metrics (quantiles, CV%, allocations, footprint)
-  compare                Compare commits or runs using Mann-Whitney U and Welch t-test
+  compare                Compare commits or runs using Hodges-Lehmann shift CI, MWU, and Welch t-test
   compare-1v1            Cross-language 1v1 comparison (e.g., odin vs zig) with footprint checks
   export                 Export pooled benchmarks to Arrow IPC, Parquet, JSON, JSONL, CSV, TSV, or Markdown
   compact                Compact the xitdb store and reclaim dead pages
@@ -38,6 +38,7 @@ RUN OPTIONS:
   --warmup <N>           Warmup iterations / milliseconds (default: hugi.json 'warmup' or 1)
   --groups <g1,g2>       Comma-separated group filter
   --baseline-commit <c>  Compare run immediately against baseline commit <c>
+  --by-run               Compare per-run medians across multi-run commits (fallback to pooled if < 2 runs)
   --fail-on-regression   Exit non-zero if statistical regressions are detected
   --threshold <pct>      Regression threshold percentage (default: 5.0)
   --extra-build-flags s  Extra flags passed to 'odin build' (default: hugi.json 'extra_build_flags')

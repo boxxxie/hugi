@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-22
+
+### Changed
+
+- **Dependencies (`deps/obench`):**
+  - Updated vendored `deps/obench` submodule to [`v0.5.0`](https://github.com/zeybek/obench/releases/tag/v0.5.0) (`c1dd6d2`), bringing median-of-block-means per-benchmark post-warmup clock calibration, two-loop auto-calibrated empty-loop floors (`_empty_step` vs `_black_box_step`), `also_fits` ambiguous Big-O reporting, safe `process_medians_ns` allocator cloning in `load_baseline_file`, omitting mismatched `samples_batch_ns` in combined multi-process reports, clamped-baseline allocation regression checks, and undecided (`too_few_samples`) handling when a side lacks enough values for a 95% Hodges-Lehmann interval.
+
 ## [0.1.3] - 2026-11-21
 
 ### Changed

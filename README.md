@@ -1,7 +1,7 @@
 # `hugi`
 
 [![CI](https://github.com/boxxxie/hugi/actions/workflows/ci.yml/badge.svg)](https://github.com/boxxxie/hugi/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](cmd/hugi/main.odin)
+[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](cmd/hugi/main.odin)
 [![Odin](https://img.shields.io/badge/Odin-dev--2026-3882D2?logo=odin&logoColor=white)](https://odin-lang.org/)
 [![Precision](https://img.shields.io/badge/precision-1%20fs%20(10%E2%81%BB%C2%B9%E2%81%B5%20s)-0A7B83)](#architecture-how-hugidb-beats-parquet--preserves-femtoseconds)
 [![Store Format](https://img.shields.io/badge/store-xitdb%20v5-5C6BC0.svg)](store/format.odin)

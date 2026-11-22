@@ -1,6 +1,5 @@
 package hugi_store
 
-import obench "../deps/obench/obench"
 import hugi "../hugi"
 import "core:fmt"
 import "core:math"
@@ -290,14 +289,14 @@ format_markdown_table :: proc(records: []Pooled_Record, allocator := context.all
 		p95_str := hugi.format_duration_fs(r.p95_fs, context.temp_allocator)
 		foot_str := "-"
 		if r.footprint_bytes > 0 {
-			foot_str = obench.format_bytes(f64(r.footprint_bytes), context.temp_allocator)
+			foot_str = hugi.format_bytes(f64(r.footprint_bytes), context.temp_allocator)
 		}
 		alloc_str := "0"
 		if r.allocs_per_op > 0 || r.alloc_bytes_per_op > 0 {
 			alloc_str = fmt.tprintf(
 				"%.1f (%s)",
 				r.allocs_per_op,
-				obench.format_bytes(r.alloc_bytes_per_op, context.temp_allocator),
+				hugi.format_bytes(r.alloc_bytes_per_op, context.temp_allocator),
 			)
 		}
 		fmt.sbprintf(
@@ -344,16 +343,30 @@ format_comparison_table :: proc(
 	allocator := context.allocator,
 ) -> string {
 	sb := strings.builder_make(allocator)
-	fmt.sbprintf(
-		&sb,
-		"Comparison: %s -> %s  (geomean delta: %+.2f%%, improved: %d, regressed: %d, unchanged: %d)\n",
-		base_label,
-		cand_label,
-		rep.geomean_delta,
-		rep.improvements,
-		rep.regressions,
-		rep.unchanged,
-	)
+	if rep.undecided_rows > 0 {
+		fmt.sbprintf(
+			&sb,
+			"Comparison: %s -> %s  (geomean delta: %+.2f%%, improved: %d, regressed: %d, unchanged: %d, undecided: %d)\n",
+			base_label,
+			cand_label,
+			rep.geomean_delta,
+			rep.improvements,
+			rep.regressions,
+			rep.unchanged,
+			rep.undecided_rows,
+		)
+	} else {
+		fmt.sbprintf(
+			&sb,
+			"Comparison: %s -> %s  (geomean delta: %+.2f%%, improved: %d, regressed: %d, unchanged: %d)\n",
+			base_label,
+			cand_label,
+			rep.geomean_delta,
+			rep.improvements,
+			rep.regressions,
+			rep.unchanged,
+		)
+	}
 	for w in rep.warnings {
 		fmt.sbprintf(&sb, "WARNING: %s\n", w)
 	}
@@ -367,7 +380,15 @@ format_comparison_table :: proc(
 		base_str := hugi.format_duration_fs(r.base_p50_fs, context.temp_allocator)
 		cand_str := hugi.format_duration_fs(r.cand_p50_fs, context.temp_allocator)
 		test_str := ""
-		if r.used_shift_ci {
+		if r.too_few_samples {
+			suffix := " (runs)" if r.used_run_medians else ""
+			test_str = fmt.tprintf(
+				"HL %+.1f%% to %+.1f%% (too few for 95%%)%s",
+				r.shift_low_pct,
+				r.shift_high_pct,
+				suffix,
+			)
+		} else if r.used_shift_ci {
 			suffix := " (runs)" if r.used_run_medians else ""
 			test_str = fmt.tprintf(
 				"HL [%+.1f%%, %+.1f%%] p=%.4f%s",
@@ -421,10 +442,12 @@ format_comparison_json :: proc(
 	_write_json_f64(&sb, "%.4f", rep.geomean_delta)
 	fmt.sbprintf(
 		&sb,
-		",\n  \"improvements\": %d,\n  \"regressions\": %d,\n  \"unchanged\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"drifting_rows\": %d,\n  \"multimodal_rows\": %d,\n  \"warnings\": ",
+		",\n  \"improvements\": %d,\n  \"regressions\": %d,\n  \"unchanged\": %d,\n  \"undecided_rows\": %d,\n  \"one_sided_runs_rows\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"drifting_rows\": %d,\n  \"multimodal_rows\": %d,\n  \"warnings\": ",
 		rep.improvements,
 		rep.regressions,
 		rep.unchanged,
+		rep.undecided_rows,
+		rep.one_sided_runs_rows,
 		rep.underpowered_rows,
 		rep.high_cv_rows,
 		rep.drifting_rows,
@@ -473,6 +496,8 @@ format_comparison_json :: proc(
 		_write_json_bool(&sb, r.used_shift_ci)
 		strings.write_string(&sb, ",\n      \"used_run_medians\": ")
 		_write_json_bool(&sb, r.used_run_medians)
+		strings.write_string(&sb, ",\n      \"too_few_samples\": ")
+		_write_json_bool(&sb, r.too_few_samples)
 		strings.write_string(&sb, ",\n      \"is_significant\": ")
 		_write_json_bool(&sb, r.is_significant)
 		strings.write_string(&sb, ",\n      \"verdict\": ")
@@ -513,7 +538,7 @@ format_comparison_csv :: proc(
 	sb := strings.builder_make(allocator)
 	strings.write_string(
 		&sb,
-		"baseline,candidate,full_name,base_p50_ns,cand_p50_ns,base_std_dev_ns,cand_std_dev_ns,base_samples,cand_samples,delta_pct,speedup,welch_t,welch_df,used_rank_test,p_value,is_significant,verdict,base_allocs_per_op,cand_allocs_per_op,base_alloc_bytes_per_op,cand_alloc_bytes_per_op,base_footprint_bytes,cand_footprint_bytes,shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,used_run_medians\n",
+		"baseline,candidate,full_name,base_p50_ns,cand_p50_ns,base_std_dev_ns,cand_std_dev_ns,base_samples,cand_samples,delta_pct,speedup,welch_t,welch_df,used_rank_test,p_value,is_significant,verdict,base_allocs_per_op,cand_allocs_per_op,base_alloc_bytes_per_op,cand_alloc_bytes_per_op,base_footprint_bytes,cand_footprint_bytes,shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,used_run_medians,too_few_samples\n",
 	)
 	for r in rep.rows {
 		_write_delimited_str(&sb, base_label, ',')
@@ -563,6 +588,8 @@ format_comparison_csv :: proc(
 		_write_json_bool(&sb, r.used_shift_ci)
 		strings.write_byte(&sb, ',')
 		_write_json_bool(&sb, r.used_run_medians)
+		strings.write_byte(&sb, ',')
+		_write_json_bool(&sb, r.too_few_samples)
 		strings.write_byte(&sb, '\n')
 	}
 	return strings.to_string(sb)
@@ -575,18 +602,34 @@ footprint mismatch flags.
 @(require_results)
 format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator) -> string {
 	sb := strings.builder_make(allocator)
-	fmt.sbprintf(
-		&sb,
-		"Cross-Language 1v1: %s vs %s  (%s wins: %d, %s wins: %d, ties: %d, footprint mismatches: %d)\n",
-		rep.lang_a,
-		rep.lang_b,
-		rep.lang_a,
-		rep.a_wins,
-		rep.lang_b,
-		rep.b_wins,
-		rep.ties,
-		rep.footprint_mismatches,
-	)
+	if rep.undecided_rows > 0 {
+		fmt.sbprintf(
+			&sb,
+			"Cross-Language 1v1: %s vs %s  (%s wins: %d, %s wins: %d, ties: %d, footprint mismatches: %d, undecided: %d)\n",
+			rep.lang_a,
+			rep.lang_b,
+			rep.lang_a,
+			rep.a_wins,
+			rep.lang_b,
+			rep.b_wins,
+			rep.ties,
+			rep.footprint_mismatches,
+			rep.undecided_rows,
+		)
+	} else {
+		fmt.sbprintf(
+			&sb,
+			"Cross-Language 1v1: %s vs %s  (%s wins: %d, %s wins: %d, ties: %d, footprint mismatches: %d)\n",
+			rep.lang_a,
+			rep.lang_b,
+			rep.lang_a,
+			rep.a_wins,
+			rep.lang_b,
+			rep.b_wins,
+			rep.ties,
+			rep.footprint_mismatches,
+		)
+	}
 	for w in rep.warnings {
 		fmt.sbprintf(&sb, "WARNING: %s\n", w)
 	}
@@ -614,7 +657,13 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 			winner_str = fmt.tprintf("%s (ns)", r.faster_lang)
 		}
 		test_str := ""
-		if r.used_shift_ci {
+		if r.too_few_samples {
+			test_str = fmt.tprintf(
+				"HL %+.1f%% to %+.1f%% (too few for 95%%)",
+				r.shift_low_pct,
+				r.shift_high_pct,
+			)
+		} else if r.used_shift_ci {
 			test_str = fmt.tprintf(
 				"HL [%+.1f%%, %+.1f%%] p=%.4f",
 				r.shift_low_pct,
@@ -630,8 +679,8 @@ format_1v1_table :: proc(rep: Cross_Lang_Report, allocator := context.allocator)
 		if r.a_footprint > 0 || r.b_footprint > 0 {
 			foot_str = fmt.tprintf(
 				"%s / %s",
-				obench.format_bytes(f64(r.a_footprint), context.temp_allocator),
-				obench.format_bytes(f64(r.b_footprint), context.temp_allocator),
+				hugi.format_bytes(f64(r.a_footprint), context.temp_allocator),
+				hugi.format_bytes(f64(r.b_footprint), context.temp_allocator),
 			)
 			if r.footprint_mismatch {
 				foot_str = fmt.tprintf("%s [MISMATCH]", foot_str)
@@ -694,10 +743,12 @@ format_1v1_json :: proc(rep: Cross_Lang_Report, allocator := context.allocator) 
 	_write_json_str(&sb, rep.b_commit)
 	fmt.sbprintf(
 		&sb,
-		",\n  \"a_wins\": %d,\n  \"b_wins\": %d,\n  \"ties\": %d,\n  \"footprint_mismatches\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"drifting_rows\": %d,\n  \"multimodal_rows\": %d,\n  \"warnings\": ",
+		",\n  \"a_wins\": %d,\n  \"b_wins\": %d,\n  \"ties\": %d,\n  \"undecided_rows\": %d,\n  \"one_sided_runs_rows\": %d,\n  \"footprint_mismatches\": %d,\n  \"underpowered_rows\": %d,\n  \"high_cv_rows\": %d,\n  \"drifting_rows\": %d,\n  \"multimodal_rows\": %d,\n  \"warnings\": ",
 		rep.a_wins,
 		rep.b_wins,
 		rep.ties,
+		rep.undecided_rows,
+		rep.one_sided_runs_rows,
 		rep.footprint_mismatches,
 		rep.underpowered_rows,
 		rep.high_cv_rows,
@@ -744,6 +795,8 @@ format_1v1_json :: proc(rep: Cross_Lang_Report, allocator := context.allocator) 
 		_write_json_f64(&sb, "%.4f", r.shift_high_pct)
 		strings.write_string(&sb, ",\n      \"used_shift_ci\": ")
 		_write_json_bool(&sb, r.used_shift_ci)
+		strings.write_string(&sb, ",\n      \"too_few_samples\": ")
+		_write_json_bool(&sb, r.too_few_samples)
 		strings.write_string(&sb, ",\n      \"welch_t\": ")
 		_write_json_f64(&sb, "%.4f", r.welch_t)
 		fmt.sbprintf(
@@ -775,7 +828,7 @@ format_1v1_csv :: proc(rep: Cross_Lang_Report, allocator := context.allocator) -
 	sb := strings.builder_make(allocator)
 	strings.write_string(
 		&sb,
-		"lang_a,lang_b,full_name,ops,a_p50_ns,a_std_dev_ns,b_p50_ns,b_std_dev_ns,a_cv_pct,b_cv_pct,faster_lang,speedup_ratio,is_significant,p_value,welch_t,a_footprint_bytes,b_footprint_bytes,footprint_mismatch,a_allocs_per_op,b_allocs_per_op,shift_pct,shift_low_pct,shift_high_pct,used_shift_ci\n",
+		"lang_a,lang_b,full_name,ops,a_p50_ns,a_std_dev_ns,b_p50_ns,b_std_dev_ns,a_cv_pct,b_cv_pct,faster_lang,speedup_ratio,is_significant,p_value,welch_t,a_footprint_bytes,b_footprint_bytes,footprint_mismatch,a_allocs_per_op,b_allocs_per_op,shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,too_few_samples\n",
 	)
 	for r in rep.rows {
 		_write_delimited_str(&sb, rep.lang_a, ',')
@@ -819,6 +872,8 @@ format_1v1_csv :: proc(rep: Cross_Lang_Report, allocator := context.allocator) -
 		_write_json_f64(&sb, "%.4f", r.shift_high_pct)
 		strings.write_byte(&sb, ',')
 		_write_json_bool(&sb, r.used_shift_ci)
+		strings.write_byte(&sb, ',')
+		_write_json_bool(&sb, r.too_few_samples)
 		strings.write_byte(&sb, '\n')
 	}
 	return strings.to_string(sb)

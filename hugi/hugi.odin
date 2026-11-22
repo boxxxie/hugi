@@ -35,6 +35,12 @@ expect_zero_allocs :: obench.expect_zero_allocs
 param :: obench.param
 threads :: obench.threads
 
+EXIT_SUCCESS :: obench.EXIT_SUCCESS
+EXIT_FAILURE :: obench.EXIT_FAILURE
+EXIT_USAGE :: obench.EXIT_USAGE
+EXIT_BASELINE :: obench.EXIT_BASELINE
+MAX_METRIC_UNIT_LEN :: obench.MAX_METRIC_UNIT_LEN
+
 Suite_Config :: struct {
 	obench_cfg:      obench.Config,
 	runs:            int,
@@ -53,6 +59,7 @@ Suite :: struct {
 	name:                     string,
 	config:                   Suite_Config,
 	obench_suite:             obench.Suite,
+	_measured_clock:          obench.Clock_Calibration,
 	pipelines:                [dynamic]_Pipeline_Def,
 	last_packet:              Run_Packet,
 	violations:               [dynamic]Phase_Violation,
@@ -226,6 +233,7 @@ suite_create :: proc(
 		name = strings.clone(name, allocator, loc),
 		config = cfg,
 		obench_suite = ob_suite,
+		_measured_clock = ob_suite.clock,
 		pipelines = make([dynamic]_Pipeline_Def, allocator, loc),
 		violations = make([dynamic]Phase_Violation, allocator, loc),
 		allocator = allocator,
@@ -395,7 +403,7 @@ _obench_result_to_record :: proc(
 		temp_bytes_per_op  = st.temp_bytes_per_op,
 		peak_heap_bytes    = st.peak_heap_bytes,
 		zero_alloc_failed  = r.zero_alloc_failed,
-		error              = strings.clone(obench.bench_error_string(r.error), allocator),
+		error              = strings.clone(_obench_bench_error_string(r.error), allocator),
 		metrics            = make([dynamic]Metric, st.custom_metrics_count, allocator),
 		samples_batch_ns   = make([dynamic]u64, sample_count, allocator),
 	}
@@ -465,10 +473,33 @@ _clear_obench_results :: proc(osuite: ^obench.Suite) {
 	osuite.failed_errors = 0
 	osuite.failed_io = 0
 	osuite.failed_baseline = 0
-	obench.machine_state_destroy(&osuite.machine_state, osuite.allocator)
+	_obench_machine_state_destroy(&osuite.machine_state, osuite.allocator)
 	osuite.empty_loop_ns = 0
 	delete(osuite.counters_unavailable, osuite.allocator)
 	osuite.counters_unavailable = ""
+}
+
+/*
+Returns the process exit code matching `obench`'s contract: `EXIT_FAILURE` (1) for benchmark,
+`@zero_alloc`, packet/baseline I/O, or regression failures; `EXIT_BASELINE` (3) when only a
+baseline mismatch (`failed_baseline > 0`) occurred; or `EXIT_SUCCESS` (0).
+*/
+@(require_results)
+suite_exit_code :: proc "contextless" (s: ^Suite) -> int {
+	if s == nil {
+		return EXIT_SUCCESS
+	}
+	if s.failed_errors + s.failed_zero_alloc + s.failed_io + s.failed_alloc_regressions > 0 ||
+	   s.failed_packet_io {
+		return EXIT_FAILURE
+	}
+	if s.failed_baseline > 0 {
+		return EXIT_BASELINE
+	}
+	if s.failed_regressions > 0 {
+		return EXIT_FAILURE
+	}
+	return EXIT_SUCCESS
 }
 
 /*
@@ -511,6 +542,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 
 	rank := 0
 	ran_obench := false
+	user_overrode_clock := s.obench_suite.clock != s._measured_clock
 
 	// 1. Run matching obench micro-groups.
 	if len(s.obench_suite.groups) > 0 {
@@ -536,6 +568,9 @@ suite_execute :: proc(s: ^Suite) -> bool {
 			ran_obench = true
 			_ = obench.suite_execute(&s.obench_suite)
 			s.obench_suite.config.filter = saved_filter
+			if !user_overrode_clock {
+				s._measured_clock = s.obench_suite.clock
+			}
 
 			// Filter out microbenchmarks excluded by `matches_name_filter` before
 			// tallying failures or assigning contiguous `Record.rank` values.
@@ -569,7 +604,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 			}
 			if filtered_any {
 				resize(&s.obench_suite.results, kept)
-				s.obench_suite.summary = obench.compute_suite_summary(s.obench_suite.results[:])
+				s.obench_suite.summary = _obench_compute_suite_summary(s.obench_suite.results[:])
 			}
 			s.failed_io += s.obench_suite.failed_io
 			s.failed_baseline += s.obench_suite.failed_baseline
@@ -594,30 +629,30 @@ suite_execute :: proc(s: ^Suite) -> bool {
 		}
 	}
 	if has_matching_pipeline {
-		pinned: obench.Thread_Pin
+		pinned: _Obench_Thread_Pin
 		if cpu, pin := s.obench_suite.config.pin_cpu.?; pin {
 			p_ok: bool
 			p_why: string
-			pinned, p_ok, p_why = obench.pin_thread(cpu)
+			pinned, p_ok, p_why = _obench_pin_thread(cpu)
 			if !p_ok && !s.config.quiet && !ran_obench {
 				fmt.eprintfln("hugi: warning: not pinned to CPU %d: %s", cpu, p_why)
 			}
 		}
-		defer obench.unpin_thread(pinned)
+		defer _obench_unpin_thread(pinned)
 
-		counter_group: obench.Counter_Group
+		counter_group: _Obench_Counter_Group
 		counter_overhead: obench.Counter_Values
 		if s.obench_suite.config.counters {
 			c_ok: bool
 			c_why: string
-			counter_group, c_ok, c_why = obench.counter_group_open()
+			counter_group, c_ok, c_why = _obench_counter_group_open()
 			if c_ok {
 				counter_overhead = _calibrate_counter_overhead(&counter_group)
 			} else {
 				s.counters_unavailable = strings.clone(c_why, s.allocator)
 			}
 		}
-		defer obench.counter_group_close(&counter_group)
+		defer _obench_counter_group_close(&counter_group)
 
 		temp_arena := runtime.Arena {
 			backing_allocator = s.allocator,
@@ -635,6 +670,7 @@ suite_execute :: proc(s: ^Suite) -> bool {
 				&temp_arena,
 				&counter_group,
 				counter_overhead,
+				recalibrate_clock = !user_overrode_clock,
 			)
 			for r in recs {
 				append(&pkt.records, r)
@@ -676,7 +712,7 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 		if s.config.host_warned {
 			s.obench_suite.machine_state.governor = ""
 		}
-		obench.write_terminal_report(strings.to_writer(sb), &s.obench_suite)
+		_obench_write_terminal_report(strings.to_writer(sb), &s.obench_suite)
 		s.obench_suite.machine_state.governor = saved_gov
 	}
 	has_pipeline_rows := false
@@ -762,13 +798,13 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 			alloc_str = fmt.tprintf(
 				"%.1f / %s",
 				r.allocs_per_op,
-				obench.format_bytes(r.alloc_bytes_per_op, context.temp_allocator),
+				format_bytes(r.alloc_bytes_per_op, context.temp_allocator),
 			)
 		} else if r.temp_allocs_per_op > 0 {
 			alloc_str = fmt.tprintf(
 				"0 (tmp %.1f/%s)",
 				r.temp_allocs_per_op,
-				obench.format_bytes(r.temp_bytes_per_op, context.temp_allocator),
+				format_bytes(r.temp_bytes_per_op, context.temp_allocator),
 			)
 		}
 		notes := strings.builder_make(context.temp_allocator)
@@ -776,7 +812,7 @@ write_terminal_summary :: proc(sb: ^strings.Builder, s: ^Suite) {
 			fmt.sbprintf(
 				&notes,
 				"footprint=%s ",
-				obench.format_bytes(f64(r.footprint_bytes), context.temp_allocator),
+				format_bytes(f64(r.footprint_bytes), context.temp_allocator),
 			)
 		}
 		for m in r.metrics {

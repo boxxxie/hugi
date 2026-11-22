@@ -1,6 +1,5 @@
 package hugi
 
-import obench "../deps/obench/obench"
 import "base:runtime"
 import "core:fmt"
 import "core:math"
@@ -94,7 +93,7 @@ format_duration_fs :: proc(fs: i64, allocator := context.allocator) -> string {
 	if fs >= 1_000 && fs < 1_000_000 {
 		return fmt.aprintf("%.2f ps", f64(fs) / 1000.0, allocator = allocator)
 	}
-	return obench.format_duration_ns(fs_to_ns_f64(fs), allocator)
+	return _obench_format_duration_ns(fs_to_ns_f64(fs), allocator)
 }
 
 Metric :: struct {
@@ -690,9 +689,9 @@ compute_stats_fs :: proc(
 		for v, i in samples_fs {
 			samples_f64[i] = f64(v)
 		}
-		r1 := obench.lag1_autocorrelation(samples_f64)
-		eff := obench.effective_sample_count(n, r1)
-		st.ci95_fs = i64(math.round(obench.t_critical_975(eff - 1) * (std_f / math.sqrt(eff))))
+		r1 := _obench_lag1_autocorrelation(samples_f64)
+		eff := _obench_effective_sample_count(n, r1)
+		st.ci95_fs = i64(math.round(_obench_t_critical_975(eff - 1) * (std_f / math.sqrt(eff))))
 		st.cv_pct = st.mean_fs > 0 ? (std_f / f64(st.mean_fs)) * 100.0 : 0.0
 	}
 

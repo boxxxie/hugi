@@ -1,6 +1,5 @@
 package hugi_store
 
-import obench "../deps/obench/obench"
 import hugi "../hugi"
 import "base:runtime"
 import "core:fmt"
@@ -137,7 +136,7 @@ _desc_table_destroy :: proc(dt: ^_Descriptor_Table) {
 
 @(private, require_results)
 _desc_intern :: proc(dt: ^_Descriptor_Table, syms: ^_Symbol_Table, r: hugi.Record) -> u32 {
-	canonical := obench.format_full_name(
+	canonical := _obench_format_full_name(
 		r.group_name,
 		r.name,
 		r.param,
@@ -221,7 +220,7 @@ _desc_materialize_strings :: proc(
 		}
 		full_name = strings.clone(raw_custom, allocator)
 	} else {
-		full_name = obench.format_full_name(
+		full_name = _obench_format_full_name(
 			raw_group,
 			raw_name,
 			int(desc.param),

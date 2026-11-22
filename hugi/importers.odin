@@ -1,6 +1,5 @@
 package hugi
 
-import obench "../deps/obench/obench"
 import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
@@ -10,7 +9,10 @@ import "core:strings"
 import "core:time"
 
 @(private = "file", require_results)
-_obench_doc_run_env :: proc(doc: obench.Export_Document, allocator: runtime.Allocator) -> Run_Env {
+_obench_doc_run_env :: proc(
+	doc: _Obench_Export_Document,
+	allocator: runtime.Allocator,
+) -> Run_Env {
 	has_v6_env :=
 		doc.machine.cpu != "" ||
 		doc.machine.governor != "" ||
@@ -78,6 +80,55 @@ _append_counter_metric :: proc(
 	append(metrics, Metric{unit = strings.clone(unit, allocator), value = v})
 }
 
+@(private = "file", require_results)
+_infer_samples_ns_scale :: proc(samples_ns: []f64, hint_ops: u64) -> u64 {
+	MAX_SCALED_NS :: 1e18
+	max_ns := 0.0
+	for s in samples_ns {
+		if s > max_ns {
+			max_ns = s
+		}
+	}
+	if hint_ops >= 1 && max_ns * f64(hint_ops) < MAX_SCALED_NS {
+		exact := true
+		for s in samples_ns {
+			if s <= 0 {
+				continue
+			}
+			expected_fs := ns_f64_to_fs(s)
+			roundtrip_fs := batch_ns_to_op_fs(ns_f64_to_batch_ns(s, hint_ops), hint_ops)
+			if abs(roundtrip_fs - expected_fs) > 1 {
+				exact = false
+				break
+			}
+		}
+		if exact {
+			return hint_ops
+		}
+	}
+	has_sub_ns := false
+	has_sub_ps := false
+	for s in samples_ns {
+		fs := ns_f64_to_fs(s)
+		if fs % FS_PER_NS != 0 {
+			has_sub_ns = true
+		}
+		if fs % 1_000 != 0 {
+			has_sub_ps = true
+		}
+	}
+	if has_sub_ps && max_ns * 1_000_000.0 < MAX_SCALED_NS {
+		return 1_000_000
+	}
+	if (has_sub_ps || has_sub_ns) && max_ns * 1_000.0 < MAX_SCALED_NS {
+		return 1_000
+	}
+	if hint_ops >= 1 && max_ns * f64(hint_ops) < MAX_SCALED_NS {
+		return hint_ops
+	}
+	return 1
+}
+
 /*
 Converts an `obench` JSON report (`Export_Document`) into one `Run_Packet` per suite.
 */
@@ -92,7 +143,7 @@ read_obench_json_packets :: proc(
 	packets: []Run_Packet,
 	ok: bool,
 ) {
-	doc, err := obench.read_json_report(path, context.temp_allocator)
+	doc, err := _obench_read_json_report(path, context.temp_allocator)
 	if err != nil {
 		return nil, false
 	}
@@ -150,6 +201,9 @@ read_obench_json_packets :: proc(
 		}
 
 		ops := u64(max(e.batch_size, 1))
+		if len(e.samples_batch_ns) == 0 && len(e.samples_ns) > 0 {
+			ops = _infer_samples_ns_scale(e.samples_ns, ops)
+		}
 		s_cnt := len(e.samples_batch_ns) > 0 ? len(e.samples_batch_ns) : len(e.samples_ns)
 		r := Record {
 			rank               = len(pkts[pkt_idx].records) + 1,

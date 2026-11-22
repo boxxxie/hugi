@@ -1,6 +1,5 @@
 package hugi_cli
 
-import obench "../../deps/obench/obench"
 import hugi "../../hugi"
 import store "../../store"
 import "core:fmt"
@@ -241,7 +240,7 @@ _cmd_inspect :: proc(args: []string) -> int {
 				hugi.format_duration_fs(r.iqr_fs, context.temp_allocator),
 				hugi.format_duration_fs(r.mad_fs, context.temp_allocator),
 				r.allocs_per_op,
-				obench.format_bytes(f64(r.footprint_bytes), context.temp_allocator),
+				hugi.format_bytes(f64(r.footprint_bytes), context.temp_allocator),
 				strings.to_string(extras),
 			)
 		}
@@ -500,10 +499,20 @@ _cmd_compare :: proc(args: []string) -> int {
 		return 1
 	}
 
-	if fail_on_reg && rep.regressions > 0 {
-		return 1
+	if fail_on_reg {
+		if rep.regressions > 0 {
+			return hugi.EXIT_FAILURE
+		}
+		if rep.undecided_rows > 0 {
+			fmt.eprintfln(
+				"hugi compare: %d benchmark(s) undecided (too few samples/runs for 95%% CI); exiting with status %d",
+				rep.undecided_rows,
+				hugi.EXIT_BASELINE,
+			)
+			return hugi.EXIT_BASELINE
+		}
 	}
-	return 0
+	return hugi.EXIT_SUCCESS
 }
 
 @(private)

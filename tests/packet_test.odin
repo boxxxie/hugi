@@ -1161,3 +1161,71 @@ test_suite_reuse_groups_filter_name_filter_and_custom_allocator_nested_phases ::
 		testing.expect_value(t, len(s_cust.last_packet.records), 3)
 	}
 }
+
+@(test)
+test_obench_combined_json_without_samples_batch_ns_and_suite_exit_code :: proc(t: ^testing.T) {
+	tmp, tmp_ok := _make_temp_dir(t, "hugi-obench-v5-*")
+	if !tmp_ok {
+		return
+	}
+
+	// 1. Combined obench v0.5.0 JSON report omitting samples_batch_ns (mixed process batch sizes)
+	// must infer sub-ns ops_per_sample scaling cleanly from samples_ns.
+	comb_path := strings.concatenate({tmp, "/combined_v5.json"}, context.temp_allocator)
+	comb_json := `{"format_version":6,"suite_name":"comb_suite","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev-2026-11","processes":2,"benchmarks":[{"suite_name":"comb_suite","group_name":"simd","name":"hash","full_name":"simd::hash","samples":4,"batch_size":1,"min_ns":12.345678,"p50_ns":12.345955,"p95_ns":12.346123,"p99_ns":12.346123,"max_ns":12.346123,"mean_ns":12.345928,"samples_ns":[12.345678,12.346123,12.345900,12.346010],"process_medians_ns":[12.345789,12.346067]}]}`
+	testing.expect(t, os.write_entire_file(comb_path, transmute([]u8)comb_json) == nil)
+
+	pkts, ok := hugi.read_obench_json_packets(
+		comb_path,
+		commit_override = "comb01",
+		run_id_override = "r-comb",
+	)
+	testing.expect(t, ok, "read combined obench JSON without samples_batch_ns")
+	defer hugi.packets_destroy(pkts)
+	testing.expect_value(t, len(pkts), 1)
+	if len(pkts) == 1 && len(pkts[0].records) == 1 {
+		r := pkts[0].records[0]
+		testing.expect_value(t, r.ops_per_sample, u64(1_000_000))
+		testing.expect_value(t, len(r.samples_batch_ns), 4)
+		testing.expect_value(t, r.min_fs, i64(12_345_678))
+		testing.expect_value(t, r.max_fs, i64(12_346_123))
+		testing.expect_value(t, r.p50_fs, i64(12_345_955))
+	}
+
+	// 2. suite_exit_code parity with obench + format_bytes helper + pipeline clock override respect.
+	testing.expect_value(t, hugi.suite_exit_code(nil), hugi.EXIT_SUCCESS)
+	s_exit: hugi.Suite
+	testing.expect_value(t, hugi.suite_exit_code(&s_exit), hugi.EXIT_SUCCESS)
+	s_exit.failed_baseline = 1
+	testing.expect_value(t, hugi.suite_exit_code(&s_exit), hugi.EXIT_BASELINE)
+	s_exit.failed_regressions = 1
+	testing.expect_value(t, hugi.suite_exit_code(&s_exit), hugi.EXIT_BASELINE)
+	s_exit.failed_baseline = 0
+	testing.expect_value(t, hugi.suite_exit_code(&s_exit), hugi.EXIT_FAILURE)
+	s_exit.failed_regressions = 0
+	s_exit.failed_baseline = 1
+	s_exit.failed_errors = 1
+	testing.expect_value(t, hugi.suite_exit_code(&s_exit), hugi.EXIT_FAILURE)
+	s_exit.failed_errors = 0
+	s_exit.failed_packet_io = true
+	testing.expect_value(t, hugi.suite_exit_code(&s_exit), hugi.EXIT_FAILURE)
+
+	fb := hugi.format_bytes(1536, context.temp_allocator)
+	testing.expect_value(t, fb, "1.50 KiB")
+
+	cfg_clk := hugi.default_suite_config()
+	cfg_clk.quiet = true
+	cfg_clk.runs = 2
+	cfg_clk.warmup = 1
+	s_clk := hugi.suite_create("clock_ovr_suite", cfg_clk)
+	defer hugi.suite_destroy(&s_clk)
+	s_clk.obench_suite.clock.overhead_ns = 123.0
+	s_clk.obench_suite.clock.overhead_cycles = 456.0
+	hugi.group_pipeline(&s_clk, "pipe", proc(p: ^hugi.Pipeline) {
+			_ = hugi.scoped_phase(p, "op", ops = 1)
+			_ = hugi.black_box(1)
+		}, runs = 2, warmup = 1)
+	testing.expect(t, hugi.suite_execute(&s_clk))
+	testing.expect_value(t, s_clk.obench_suite.clock.overhead_ns, 123.0)
+	testing.expect_value(t, s_clk.obench_suite.clock.overhead_cycles, 456.0)
+}

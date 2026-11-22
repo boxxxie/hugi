@@ -1,6 +1,5 @@
 package hugi_store
 
-import obench "../deps/obench/obench"
 import hugi "../hugi"
 import "base:runtime"
 import "core:fmt"
@@ -141,19 +140,19 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 			if same_ops {
 				append(&pooled_batches, ..rec.samples_batch_ns[:])
 			}
-			r1 := obench.lag1_autocorrelation(rec_f64)
-			sum_eff += obench.effective_sample_count(rec_n, r1)
+			r1 := _obench_lag1_autocorrelation(rec_f64)
+			sum_eff += _obench_effective_sample_count(rec_n, r1)
 			if rec_n >= 3 {
 				weighted_r1 += r1 * f64(rec_n)
 				total_diag_samples += rec_n
 			}
-			trend, trend_z := obench.sample_trend(rec_f64, context.temp_allocator)
+			trend, trend_z := _obench_sample_trend(rec_f64, context.temp_allocator)
 			if abs(trend_z) > 2.576 &&
-			   abs(trend) >= obench.TREND_MIN_PCT &&
+			   abs(trend) >= _OBENCH_TREND_MIN_PCT &&
 			   abs(trend) > abs(best_trend) {
 				best_trend = trend
 			}
-			m := obench.count_modes(rec_f64, context.temp_allocator)
+			m := _obench_count_modes(rec_f64, context.temp_allocator)
 			if m > max_modes {
 				max_modes = m
 			}
@@ -250,7 +249,7 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 				eff := f64(pr.samples)
 				pr.ci95_fs = i64(
 					math.round(
-						obench.t_critical_975(eff - 1) * (f64(st.std_dev_fs) / math.sqrt(eff)),
+						_obench_t_critical_975(eff - 1) * (f64(st.std_dev_fs) / math.sqrt(eff)),
 					),
 				)
 			}
@@ -264,7 +263,7 @@ _pool_raw_group :: proc(g: ^_Raw_Group, allocator := context.allocator) -> Poole
 				eff := clamp(pr.effective_samples, 2.0, f64(pr.samples))
 				pr.ci95_fs = i64(
 					math.round(
-						obench.t_critical_975(eff - 1) * (f64(st.std_dev_fs) / math.sqrt(eff)),
+						_obench_t_critical_975(eff - 1) * (f64(st.std_dev_fs) / math.sqrt(eff)),
 					),
 				)
 			}
@@ -397,6 +396,7 @@ Comparison_Row :: struct {
 	shift_high_pct:   f64,
 	used_shift_ci:    bool,
 	used_run_medians: bool,
+	too_few_samples:  bool,
 	base_trend_pct:   f64,
 	cand_trend_pct:   f64,
 	base_modes:       int,
@@ -412,18 +412,20 @@ Comparison_Row :: struct {
 }
 
 Comparison_Report :: struct {
-	rows:              [dynamic]Comparison_Row,
-	improvements:      int,
-	regressions:       int,
-	unchanged:         int,
-	geomean_delta:     f64,
-	underpowered_rows: int,
-	high_cv_rows:      int,
-	drifting_rows:     int,
-	multimodal_rows:   int,
-	base_env:          hugi.Run_Env,
-	cand_env:          hugi.Run_Env,
-	warnings:          [dynamic]string,
+	rows:                [dynamic]Comparison_Row,
+	improvements:        int,
+	regressions:         int,
+	unchanged:           int,
+	undecided_rows:      int,
+	one_sided_runs_rows: int,
+	geomean_delta:       f64,
+	underpowered_rows:   int,
+	high_cv_rows:        int,
+	drifting_rows:       int,
+	multimodal_rows:     int,
+	base_env:            hugi.Run_Env,
+	cand_env:            hugi.Run_Env,
+	warnings:            [dynamic]string,
 }
 
 comparison_report_destroy :: proc(rep: ^Comparison_Report, allocator := context.allocator) {
@@ -461,6 +463,8 @@ _collect_comparison_warnings :: proc(
 	a_commit, b_commit: string,
 	check_build_flags: bool,
 	total_rows, underpowered_rows, high_cv_rows, drifting_rows, multimodal_rows: int,
+	undecided_rows, one_sided_runs_rows: int,
+	is_commit_cmp: bool,
 	allocator: runtime.Allocator,
 ) {
 	if total_rows <= 0 {
@@ -653,19 +657,47 @@ _collect_comparison_warnings :: proc(
 			),
 		)
 	}
+
+	if undecided_rows > 0 {
+		append(
+			warnings,
+			fmt.aprintf(
+				"%d/%d benchmark(s) have too few samples or runs per side for a 95%% Hodges-Lehmann interval, so nothing was decided (collect >= 4 per side, or 2 vs 8+ / 3 vs 5+)",
+				undecided_rows,
+				total_rows,
+				allocator = allocator,
+			),
+		)
+	}
+
+	if one_sided_runs_rows > 0 {
+		hint :=
+			"collect >= 4 runs on both sides and use --by-run" if is_commit_cmp else "collect multiple runs on both sides"
+		append(
+			warnings,
+			fmt.aprintf(
+				"%d/%d benchmark(s) have multiple runs on only one side (compared on pooled samples, which can flag unchanged code more often; %s)",
+				one_sided_runs_rows,
+				total_rows,
+				hint,
+				allocator = allocator,
+			),
+		)
+	}
 }
 
 @(private)
 _Significance_Result :: struct {
-	welch_t:        f64,
-	welch_df:       f64,
-	p_value:        f64,
-	shift_pct:      f64,
-	shift_low_pct:  f64,
-	shift_high_pct: f64,
-	used_rank_test: bool,
-	used_shift_ci:  bool,
-	stat_diff:      bool,
+	welch_t:         f64,
+	welch_df:        f64,
+	p_value:         f64,
+	shift_pct:       f64,
+	shift_low_pct:   f64,
+	shift_high_pct:  f64,
+	used_rank_test:  bool,
+	used_shift_ci:   bool,
+	too_few_samples: bool,
+	stat_diff:       bool,
 }
 
 @(private = "file", require_results)
@@ -683,7 +715,7 @@ _hodges_lehmann_shift_eff :: proc(
 		return
 	}
 	if !adjust_for_autocorrelation || (n <= 20 && m <= 20) {
-		return obench.hodges_lehmann_shift(
+		return _obench_hodges_lehmann_shift(
 			current,
 			baseline,
 			adjust_for_autocorrelation = false,
@@ -765,13 +797,14 @@ _compare_significance :: proc(
 	eff_b: f64 = 0,
 	adjust_for_autocorrelation := true,
 ) -> _Significance_Result {
-	wt, wdf := obench.welch_test(f64(mean_a), f64(std_a), n_a, f64(mean_b), f64(std_b), n_b)
-	welch_sig := wdf > 0 && abs(wt) >= obench.t_critical_975(wdf)
+	wt, wdf := _obench_welch_test(f64(mean_a), f64(std_a), n_a, f64(mean_b), f64(std_b), n_b)
+	welch_sig := wdf > 0 && abs(wt) >= _obench_t_critical_975(wdf)
 
 	used_rank := len(samples_a) >= 2 && len(samples_b) >= 2
 	p_val := 1.0
 	shift_pct, shift_low_pct, shift_high_pct := 0.0, 0.0, 0.0
 	used_shift_ci := false
+	too_few_samples := false
 	stat_diff := welch_sig
 	if used_rank {
 		a_f64 := _samples_fs_as_f64(samples_a, context.temp_allocator)
@@ -783,12 +816,12 @@ _compare_significance :: proc(
 		me_eff := f64(len(samples_b))
 		if adjust_for_autocorrelation {
 			ne_eff =
-				eff_a > 0 ? clamp(eff_a, 2.0, f64(len(samples_a))) : obench.effective_sample_count(len(samples_a), obench.lag1_autocorrelation(a_f64))
+				eff_a > 0 ? clamp(eff_a, 2.0, f64(len(samples_a))) : _obench_effective_sample_count(len(samples_a), _obench_lag1_autocorrelation(a_f64))
 			me_eff =
-				eff_b > 0 ? clamp(eff_b, 2.0, f64(len(samples_b))) : obench.effective_sample_count(len(samples_b), obench.lag1_autocorrelation(b_f64))
+				eff_b > 0 ? clamp(eff_b, 2.0, f64(len(samples_b))) : _obench_effective_sample_count(len(samples_b), _obench_lag1_autocorrelation(b_f64))
 		}
 
-		_, z_raw, raw_p := obench.mann_whitney_u(a_f64, b_f64, context.temp_allocator)
+		_, z_raw, raw_p := _obench_mann_whitney_u(a_f64, b_f64, context.temp_allocator)
 		p_val = raw_p
 		if adjust_for_autocorrelation && (len(samples_a) > 20 || len(samples_b) > 20) {
 			fa, fb := f64(len(samples_a)), f64(len(samples_b))
@@ -810,16 +843,15 @@ _compare_significance :: proc(
 			adjust_for_autocorrelation,
 			context.temp_allocator,
 		)
-		if shift_ok {
-			shift_pct = shift
-			shift_low_pct = low
-			shift_high_pct = high
-		}
-		used_shift_ci = shift_ok && len(samples_a) >= 4 && len(samples_b) >= 4
-		if len(samples_a) >= 5 && len(samples_b) >= 5 {
-			stat_diff = p_val < 0.05
+		shift_pct = shift
+		shift_low_pct = low
+		shift_high_pct = high
+		used_shift_ci = shift_ok
+		too_few_samples = !shift_ok
+		if too_few_samples {
+			stat_diff = false
 		} else {
-			stat_diff = p_val < 0.05 || welch_sig
+			stat_diff = p_val < 0.05
 		}
 	}
 
@@ -832,16 +864,18 @@ _compare_significance :: proc(
 		shift_high_pct = shift_high_pct,
 		used_rank_test = used_rank,
 		used_shift_ci = used_shift_ci,
+		too_few_samples = too_few_samples,
 		stat_diff = stat_diff,
 	}
 }
 
 /*
-Compares two pooled record sets using the 95% confidence interval of the Hodges-Lehmann
-location shift (Mann-Whitney U inversion with autocorrelation adjustment when both sides have
->= 4 samples), falling back to Welch's `t`-test with Student's `t` critical values for smaller
-or summary-only records. When `use_run_medians` is true and both sides have >= 2 runs, each
-run's `p50_fs` is compared instead of pooled raw samples.
+Compares two pooled record sets using the exact 95% confidence interval of the Hodges-Lehmann
+location shift (Mann-Whitney U inversion with autocorrelation adjustment for `4+ vs 4+`,
+`3 vs 5+`, and `2 vs 8+`), leaving smaller raw-sample counts (`2 vs <=7`, `3 vs 3..4`)
+undecided (`too_few_samples`), and falling back to Welch's `t`-test with Student's `t`
+critical values for summary-only records without raw samples. When `use_run_medians` is true
+and both sides have >= 2 runs, each run's `p50_fs` is compared instead of pooled raw samples.
 */
 @(require_results)
 compare_records :: proc(
@@ -893,6 +927,10 @@ compare_records :: proc(
 			} else if _env_differs_core(rep.cand_env, c.env) {
 				cand_mixed = true
 			}
+		}
+
+		if (len(b.run_medians_fs) >= 2) != (len(c.run_medians_fs) >= 2) {
+			rep.one_sided_runs_rows += 1
 		}
 
 		row_base_p50_fs := b.p50_fs
@@ -968,7 +1006,10 @@ compare_records :: proc(
 
 		is_sig := false
 		verdict := Verdict.Unchanged
-		if sig.used_shift_ci {
+		if sig.too_few_samples {
+			rep.undecided_rows += 1
+			rep.unchanged += 1
+		} else if sig.used_shift_ci {
 			if sig.shift_low_pct > threshold_pct {
 				is_sig = true
 				verdict = .Regression
@@ -1024,6 +1065,7 @@ compare_records :: proc(
 				shift_high_pct = sig.shift_high_pct,
 				used_shift_ci = sig.used_shift_ci,
 				used_run_medians = row_used_run_medians,
+				too_few_samples = sig.too_few_samples,
 				base_trend_pct = b.trend_pct,
 				cand_trend_pct = c.trend_pct,
 				base_modes = b.modes,
@@ -1059,6 +1101,9 @@ compare_records :: proc(
 		high_cv_rows = rep.high_cv_rows,
 		drifting_rows = rep.drifting_rows,
 		multimodal_rows = rep.multimodal_rows,
+		undecided_rows = rep.undecided_rows,
+		one_sided_runs_rows = rep.one_sided_runs_rows,
+		is_commit_cmp = true,
 		allocator = allocator,
 	)
 	if use_run_medians && run_median_fallbacks > 0 && len(rep.rows) > 0 {
@@ -1092,6 +1137,7 @@ Cross_Lang_Row :: struct {
 	shift_low_pct:      f64,
 	shift_high_pct:     f64,
 	used_shift_ci:      bool,
+	too_few_samples:    bool,
 	welch_t:            f64,
 	a_footprint:        u64,
 	b_footprint:        u64,
@@ -1109,6 +1155,8 @@ Cross_Lang_Report :: struct {
 	a_wins:               int,
 	b_wins:               int,
 	ties:                 int,
+	undecided_rows:       int,
+	one_sided_runs_rows:  int,
 	footprint_mismatches: int,
 	underpowered_rows:    int,
 	high_cv_rows:         int,
@@ -1226,6 +1274,9 @@ compare_1v1_langs :: proc(
 			}
 		}
 
+		if (len(a.run_medians_fs) >= 2) != (len(b.run_medians_fs) >= 2) {
+			rep.one_sided_runs_rows += 1
+		}
 		if min(a.samples, b.samples) < 5 {
 			rep.underpowered_rows += 1
 		}
@@ -1287,8 +1338,14 @@ compare_1v1_langs :: proc(
 		}
 
 		rel_diff := abs(a_med - b_med) / min(a_med, b_med) * 100.0
-		is_sig :=
-			hl_low > threshold_pct if hl_used_ci else (sig.stat_diff && rel_diff >= threshold_pct)
+		is_sig: bool
+		if sig.too_few_samples {
+			rep.undecided_rows += 1
+			is_sig = false
+		} else {
+			is_sig =
+				hl_low > threshold_pct if hl_used_ci else (sig.stat_diff && rel_diff >= threshold_pct)
+		}
 
 		faster := "tie"
 		ratio := 1.0
@@ -1341,6 +1398,7 @@ compare_1v1_langs :: proc(
 				shift_low_pct = hl_low,
 				shift_high_pct = hl_high,
 				used_shift_ci = hl_used_ci,
+				too_few_samples = sig.too_few_samples,
 				welch_t = welch_t,
 				a_footprint = a.footprint_bytes,
 				b_footprint = b.footprint_bytes,
@@ -1373,6 +1431,9 @@ compare_1v1_langs :: proc(
 		high_cv_rows = rep.high_cv_rows,
 		drifting_rows = rep.drifting_rows,
 		multimodal_rows = rep.multimodal_rows,
+		undecided_rows = rep.undecided_rows,
+		one_sided_runs_rows = rep.one_sided_runs_rows,
+		is_commit_cmp = false,
 		allocator = allocator,
 	)
 	return rep

@@ -1,6 +1,5 @@
 package hugi_cli
 
-import obench "../../deps/obench/obench"
 import hugi "../../hugi"
 import "core:fmt"
 import "core:math"
@@ -95,13 +94,13 @@ _cmd_doctor :: proc(args: []string) -> int {
 		delete(warnings)
 	}
 
-	mstate := obench.read_machine_state(context.allocator)
-	defer obench.machine_state_destroy(&mstate, context.allocator)
+	mstate := _obench_read_machine_state(context.allocator)
+	defer _obench_machine_state_destroy(&mstate, context.allocator)
 	_, cores, _ := info.cpu_core_count()
 	if cores <= 0 {
 		cores = os.get_processor_core_count()
 	}
-	mnotes := obench.machine_notes(mstate, cores, context.temp_allocator)
+	mnotes := _obench_machine_notes(mstate, cores, context.temp_allocator)
 	notes := make([dynamic]string, context.temp_allocator)
 	for n in mnotes {
 		if n.warning {

@@ -320,8 +320,20 @@ test_compare_env_mismatch_underpowered_and_1v1_commit_warnings :: proc(t: ^testi
 	rep := store.compare_records(base_recs, cand_recs, threshold_pct = 5.0)
 	defer store.comparison_report_destroy(&rep)
 	testing.expect_value(t, rep.underpowered_rows, 1)
+	testing.expect_value(t, rep.undecided_rows, 1)
+	testing.expect_value(t, rep.unchanged, 1)
+	testing.expect_value(t, rep.regressions, 0)
 	testing.expect_value(t, rep.high_cv_rows, 1)
-	testing.expect(t, len(rep.warnings) >= 6, "expected env, underpowered, and high CV warnings")
+	testing.expect(
+		t,
+		len(rep.warnings) >= 7,
+		"expected env, underpowered, undecided, and high CV warnings",
+	)
+	if len(rep.rows) == 1 {
+		testing.expect(t, rep.rows[0].too_few_samples, "n=3 vs n=3 must set too_few_samples")
+		testing.expect(t, !rep.rows[0].is_significant, "n=3 vs n=3 must stay non-significant")
+		testing.expect_value(t, rep.rows[0].verdict, store.Verdict.Unchanged)
+	}
 
 	md := store.format_comparison_table(rep, "c_base", "c_cand", context.temp_allocator)
 	testing.expect(t, strings.contains(md, "WARNING: CPU model mismatch"), "CPU mismatch warning")
@@ -338,16 +350,29 @@ test_compare_env_mismatch_underpowered_and_1v1_commit_warnings :: proc(t: ^testi
 	testing.expect(t, strings.contains(md, "CPU scaling_governor mismatch"), "governor warning")
 	testing.expect(t, strings.contains(md, "Build flags mismatch"), "build flags warning")
 	testing.expect(t, strings.contains(md, "< 5 samples per side"), "underpowered warning")
+	testing.expect(
+		t,
+		strings.contains(md, "too few samples or runs per side"),
+		"undecided warning",
+	)
 	testing.expect(t, strings.contains(md, "CV > 25%"), "high CV warning")
-	testing.expect(t, strings.contains(md, "(n<4)"), "n<4 Welch display in comparison table")
+	testing.expect(t, strings.contains(md, "undecided: 1"), "undecided summary count in table")
+	testing.expect(t, strings.contains(md, "too few for 95%"), "undecided HL display in table")
 
 	js := store.format_comparison_json(rep, "c_base", "c_cand", context.temp_allocator)
 	testing.expect(t, strings.contains(js, `"underpowered_rows": 1`))
+	testing.expect(t, strings.contains(js, `"undecided_rows": 1`))
+	testing.expect(t, strings.contains(js, `"too_few_samples": true`))
 	testing.expect(t, strings.contains(js, `"high_cv_rows": 1`))
 	testing.expect(t, strings.contains(js, `"warnings": [`))
 
 	rep1v1 := store.compare_1v1_langs(&st, "odin", "zig", "", threshold_pct = 3.0)
 	defer store.cross_lang_report_destroy(&rep1v1)
+	testing.expect_value(t, rep1v1.undecided_rows, 1)
+	if len(rep1v1.rows) == 1 {
+		testing.expect(t, rep1v1.rows[0].too_few_samples)
+		testing.expect(t, !rep1v1.rows[0].is_significant)
+	}
 	md1v1 := store.format_1v1_table(rep1v1, context.temp_allocator)
 	testing.expect(
 		t,
@@ -357,9 +382,13 @@ test_compare_env_mismatch_underpowered_and_1v1_commit_warnings :: proc(t: ^testi
 		),
 		"1v1 must warn when latest language snapshots come from different commits",
 	)
+	testing.expect(t, strings.contains(md1v1, "undecided: 1"))
+	testing.expect(t, strings.contains(md1v1, "too few for 95%"))
 	js1v1 := store.format_1v1_json(rep1v1, context.temp_allocator)
 	testing.expect(t, strings.contains(js1v1, `"a_commit": "c_cand"`))
 	testing.expect(t, strings.contains(js1v1, `"b_commit": "c_base"`))
+	testing.expect(t, strings.contains(js1v1, `"undecided_rows": 1`))
+	testing.expect(t, strings.contains(js1v1, `"too_few_samples": true`))
 	testing.expect(t, strings.contains(js1v1, `"warnings": [`))
 }
 
@@ -659,10 +688,10 @@ test_compare_drift_multimodal_warnings_and_by_run_medians :: proc(t: ^testing.T)
 		t,
 		strings.contains(
 			csv_runs,
-			",shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,used_run_medians\n",
+			",shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,used_run_medians,too_few_samples\n",
 		),
 	)
-	testing.expect(t, strings.contains(csv_runs, ",true,true\n"))
+	testing.expect(t, strings.contains(csv_runs, ",true,true,false\n"))
 }
 
 @(test)
@@ -1260,10 +1289,17 @@ test_compare_1v1_skewed_hl_orientation_and_table_json_csv_visibility :: proc(t: 
 	csv := store.format_1v1_csv(rep_ab, context.temp_allocator)
 	testing.expect(
 		t,
-		strings.contains(csv, ",shift_pct,shift_low_pct,shift_high_pct,used_shift_ci\n"),
-		"1v1 CSV header must include shift CI columns",
+		strings.contains(
+			csv,
+			",shift_pct,shift_low_pct,shift_high_pct,used_shift_ci,too_few_samples\n",
+		),
+		"1v1 CSV header must include shift CI and too_few_samples columns",
 	)
-	testing.expect(t, strings.contains(csv, ",true\n"), "1v1 CSV row must emit used_shift_ci")
+	testing.expect(
+		t,
+		strings.contains(csv, ",true,false\n"),
+		"1v1 CSV row must emit used_shift_ci and too_few_samples",
+	)
 }
 
 @(test)
@@ -1395,8 +1431,8 @@ test_compare_by_run_aligns_medians_delta_geomean_and_fallback_gate :: proc(t: ^t
 		testing.expect_value(t, r.verdict, store.Verdict.Regression)
 	}
 
-	// 2. 3-run Welch fallback path (used_shift_ci == false):
-	// Base pooled p50=101ns (+4.46% vs 105.5ns, below 5% gate), run medians [100, 100, 101] => run p50=100ns (+5.5% >= 5% gate).
+	// 2. 3-run vs 3-run --by-run stays undecided (too few runs for a 95% HL interval) while
+	// preserving per-run median delta & geomean alignment (100ns vs 105.5ns => +5.5%).
 	heavy_101 := [20]f64 {
 		101,
 		101,
@@ -1446,15 +1482,232 @@ test_compare_by_run_aligns_medians_delta_geomean_and_fallback_gate :: proc(t: ^t
 	rep3 := store.compare_records(b3, c3, threshold_pct = 5.0, use_run_medians = true)
 	defer store.comparison_report_destroy(&rep3)
 	testing.expect_value(t, len(rep3.rows), 1)
+	testing.expect_value(t, rep3.undecided_rows, 1)
+	testing.expect_value(t, rep3.unchanged, 1)
+	testing.expect_value(t, rep3.regressions, 0)
 	testing.expect(t, math.abs(rep3.geomean_delta - 5.5) < 0.01)
 	if len(rep3.rows) == 1 {
 		r := rep3.rows[0]
 		testing.expect(t, r.used_run_medians)
 		testing.expect(t, !r.used_shift_ci)
+		testing.expect(t, r.too_few_samples)
 		testing.expect_value(t, r.base_p50_fs, i64(100_000_000))
 		testing.expect_value(t, r.cand_p50_fs, i64(105_500_000))
 		testing.expect(t, math.abs(r.delta_pct - 5.5) < 0.01)
-		testing.expect(t, r.is_significant)
-		testing.expect_value(t, r.verdict, store.Verdict.Regression)
+		testing.expect(t, r.shift_pct > 0 && r.shift_low_pct > 0 && r.shift_high_pct > 0)
+		testing.expect(t, !r.is_significant)
+		testing.expect_value(t, r.verdict, store.Verdict.Unchanged)
 	}
+}
+
+@(test)
+test_compare_exact_hl_thresholds_undecided_and_one_sided_runs :: proc(t: ^testing.T) {
+	make_raw_rec :: proc(name: string, ns_vals: []f64) -> store.Pooled_Record {
+		samples := make([dynamic]i64, len(ns_vals))
+		for v, i in ns_vals {
+			samples[i] = hugi.ns_f64_to_fs(v)
+		}
+		st := hugi.compute_stats_fs(samples[:])
+		return store.Pooled_Record {
+			full_name = strings.clone(name),
+			samples = len(ns_vals),
+			p50_fs = st.p50_fs,
+			mean_fs = st.mean_fs,
+			std_dev_fs = st.std_dev_fs,
+			ci95_fs = st.ci95_fs,
+			cv_pct = st.cv_pct,
+			modes = 1,
+			samples_fs = samples,
+		}
+	}
+
+	// 1. Exact HL sample-size boundary: 2v7 and 3v4 stay undecided; 2v8 and 3v5 decide Regression.
+	Threshold_Case :: struct {
+		base_vals:        []f64,
+		cand_vals:        []f64,
+		expect_undecided: bool,
+		expect_verdict:   store.Verdict,
+	}
+	cases := []Threshold_Case {
+		{[]f64{100, 101}, []f64{140, 141, 142, 143, 144, 145, 146}, true, .Unchanged},
+		{[]f64{100, 101, 102}, []f64{140, 141, 142, 143}, true, .Unchanged},
+		{[]f64{100, 101}, []f64{140, 141, 142, 143, 144, 145, 146, 147}, false, .Regression},
+		{[]f64{100, 101, 102}, []f64{140, 141, 142, 143, 144}, false, .Regression},
+	}
+	for tc in cases {
+		base_arr := make([]store.Pooled_Record, 1)
+		base_arr[0] = make_raw_rec("core::edge", tc.base_vals)
+		defer store.pooled_records_destroy(base_arr)
+
+		cand_arr := make([]store.Pooled_Record, 1)
+		cand_arr[0] = make_raw_rec("core::edge", tc.cand_vals)
+		defer store.pooled_records_destroy(cand_arr)
+
+		rep := store.compare_records(base_arr, cand_arr, threshold_pct = 5.0)
+		defer store.comparison_report_destroy(&rep)
+		testing.expect_value(t, len(rep.rows), 1)
+		if len(rep.rows) == 1 {
+			r := rep.rows[0]
+			testing.expect_value(t, r.too_few_samples, tc.expect_undecided)
+			testing.expect_value(t, r.used_shift_ci, !tc.expect_undecided)
+			testing.expect_value(t, r.verdict, tc.expect_verdict)
+			testing.expect_value(t, rep.undecided_rows, 1 if tc.expect_undecided else 0)
+		}
+	}
+
+	// 2. Summary-only records without raw samples still use Welch's t-test fallback.
+	sum_base := make([]store.Pooled_Record, 1)
+	sum_base[0] = store.Pooled_Record {
+		full_name  = strings.clone("core::summary_only"),
+		samples    = 10,
+		p50_fs     = 100_000_000,
+		mean_fs    = 100_000_000,
+		std_dev_fs = 1_000_000,
+	}
+	defer store.pooled_records_destroy(sum_base)
+
+	sum_cand := make([]store.Pooled_Record, 1)
+	sum_cand[0] = store.Pooled_Record {
+		full_name  = strings.clone("core::summary_only"),
+		samples    = 10,
+		p50_fs     = 140_000_000,
+		mean_fs    = 140_000_000,
+		std_dev_fs = 1_000_000,
+	}
+	defer store.pooled_records_destroy(sum_cand)
+
+	rep_sum := store.compare_records(sum_base, sum_cand, threshold_pct = 5.0)
+	defer store.comparison_report_destroy(&rep_sum)
+	testing.expect_value(t, rep_sum.undecided_rows, 0)
+	testing.expect_value(t, rep_sum.regressions, 1)
+	if len(rep_sum.rows) == 1 {
+		testing.expect(t, !rep_sum.rows[0].too_few_samples)
+		testing.expect(t, !rep_sum.rows[0].used_shift_ci)
+		testing.expect(t, rep_sum.rows[0].is_significant)
+		testing.expect_value(t, rep_sum.rows[0].verdict, store.Verdict.Regression)
+	}
+
+	// 3. Asymmetric multi-run comparisons emit one_sided_runs_rows and warning in commit & 1v1 reports.
+	make_pkt :: proc(lang, commit, run_id: string, ns_vals: []f64) -> hugi.Run_Packet {
+		pkt := hugi.Run_Packet {
+			suite_name     = strings.clone("asym_suite"),
+			lang           = strings.clone(lang),
+			commit         = strings.clone(commit),
+			run_id         = strings.clone(run_id),
+			os             = strings.clone("linux"),
+			arch           = strings.clone("amd64"),
+			optimization   = strings.clone("Speed"),
+			odin_version   = strings.clone("test"),
+			timestamp_unix = 1770000000,
+			records        = make([dynamic]hugi.Record, 0, 1),
+		}
+		samples := make([dynamic]u64, len(ns_vals))
+		for v, i in ns_vals {
+			samples[i] = hugi.ns_f64_to_batch_ns(v, 100)
+		}
+		r := hugi.Record {
+			rank             = 1,
+			group_name       = strings.clone("core"),
+			name             = strings.clone("asym"),
+			full_name        = strings.clone("core::asym"),
+			ops_per_sample   = 100,
+			samples          = len(ns_vals),
+			samples_batch_ns = samples,
+			metrics          = make([dynamic]hugi.Metric),
+		}
+		hugi.recompute_record_stats_from_samples(&r)
+		hugi.refresh_record_throughput(&r)
+		append(&pkt.records, r)
+		return pkt
+	}
+
+	st, ok := store.store_open(":memory:")
+	testing.expect(t, ok, "open in-memory store")
+	if !ok {
+		return
+	}
+	defer store.store_close(&st)
+
+	p_single := make_pkt("odin", "c_one", "r-one", []f64{100, 100, 100, 100, 100, 100})
+	defer hugi.packet_destroy(&p_single)
+	testing.expect(t, store.store_ingest_packet(&st, p_single))
+
+	for i in 0 ..< 4 {
+		pm := make_pkt(
+			"odin",
+			"c_many",
+			fmt.tprintf("r-many-%d", i),
+			[]f64 {
+				130 + f64(i),
+				130 + f64(i),
+				130 + f64(i),
+				130 + f64(i),
+				130 + f64(i),
+				130 + f64(i),
+			},
+		)
+		defer hugi.packet_destroy(&pm)
+		testing.expect(t, store.store_ingest_packet(&st, pm))
+
+		pz := make_pkt(
+			"zig",
+			"c_one",
+			fmt.tprintf("r-zig-%d", i),
+			[]f64 {
+				150 + f64(i),
+				150 + f64(i),
+				150 + f64(i),
+				150 + f64(i),
+				150 + f64(i),
+				150 + f64(i),
+			},
+		)
+		defer hugi.packet_destroy(&pz)
+		testing.expect(t, store.store_ingest_packet(&st, pz))
+	}
+
+	r_one := store.store_load_pooled_records(&st, "odin", "c_one")
+	defer store.pooled_records_destroy(r_one)
+	r_many := store.store_load_pooled_records(&st, "odin", "c_many")
+	defer store.pooled_records_destroy(r_many)
+
+	rep_pooled := store.compare_records(
+		r_one,
+		r_many,
+		threshold_pct = 5.0,
+		use_run_medians = false,
+	)
+	defer store.comparison_report_destroy(&rep_pooled)
+	testing.expect_value(t, rep_pooled.one_sided_runs_rows, 1)
+	js_pooled := store.format_comparison_json(
+		rep_pooled,
+		"c_one",
+		"c_many",
+		context.temp_allocator,
+	)
+	testing.expect(t, strings.contains(js_pooled, `"one_sided_runs_rows": 1`))
+	saw_one_sided_warn := false
+	for w in rep_pooled.warnings {
+		if strings.contains(w, "multiple runs on only one side") {
+			saw_one_sided_warn = true
+		}
+	}
+	testing.expect(t, saw_one_sided_warn, "expected one-sided multi-run warning in pooled compare")
+
+	rep_byrun := store.compare_records(r_one, r_many, threshold_pct = 5.0, use_run_medians = true)
+	defer store.comparison_report_destroy(&rep_byrun)
+	testing.expect_value(t, rep_byrun.one_sided_runs_rows, 1)
+
+	rep_1v1 := store.compare_1v1_langs(&st, "odin", "zig", "c_one", threshold_pct = 3.0)
+	defer store.cross_lang_report_destroy(&rep_1v1)
+	testing.expect_value(t, rep_1v1.one_sided_runs_rows, 1)
+	js_1v1 := store.format_1v1_json(rep_1v1, context.temp_allocator)
+	testing.expect(t, strings.contains(js_1v1, `"one_sided_runs_rows": 1`))
+	saw_1v1_warn := false
+	for w in rep_1v1.warnings {
+		if strings.contains(w, "multiple runs on only one side") {
+			saw_1v1_warn = true
+		}
+	}
+	testing.expect(t, saw_1v1_warn, "expected one-sided multi-run warning in 1v1 compare")
 }

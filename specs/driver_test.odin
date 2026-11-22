@@ -464,6 +464,37 @@ _driver_write_obench_v6_json_fixture :: proc(
 	return os.write_entire_file(path, transmute([]u8)payload) == nil
 }
 
+@(private)
+_driver_write_obench_combined_json_fixture :: proc(
+	path: string,
+	suite_name, group_name, bench_name: string,
+	samples_ns: [4]f64,
+) -> bool {
+	full_name := fmt.aprintf("%s::%s", group_name, bench_name, allocator = context.temp_allocator)
+	payload := fmt.aprintf(
+		`{{"format_version":6,"suite_name":"%s","os":"linux","arch":"amd64","optimization":"Speed","odin_version":"dev-2026-11","processes":2,"benchmarks":[{{"suite_name":"%s","group_name":"%s","name":"%s","full_name":"%s","samples":4,"batch_size":1,"min_ns":%.6f,"p50_ns":%.6f,"p95_ns":%.6f,"p99_ns":%.6f,"max_ns":%.6f,"mean_ns":%.6f,"samples_ns":[%.6f,%.6f,%.6f,%.6f],"process_medians_ns":[%.6f,%.6f]}}]}}`,
+		suite_name,
+		suite_name,
+		group_name,
+		bench_name,
+		full_name,
+		samples_ns[0],
+		samples_ns[1],
+		samples_ns[3],
+		samples_ns[3],
+		samples_ns[3],
+		samples_ns[1],
+		samples_ns[0],
+		samples_ns[1],
+		samples_ns[2],
+		samples_ns[3],
+		samples_ns[0],
+		samples_ns[3],
+		allocator = context.temp_allocator,
+	)
+	return os.write_entire_file(path, transmute([]u8)payload) == nil
+}
+
 @(private = "file")
 math_round_u64 :: proc(v: f64) -> u64 {
 	if v <= 0 {

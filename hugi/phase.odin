@@ -1,6 +1,5 @@
 package hugi
 
-import obench "../deps/obench/obench"
 import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
@@ -59,7 +58,7 @@ _snap_merge_snap :: proc "contextless" (dst: ^_Alloc_Counter_Snap, src: _Alloc_C
 @(private = "file")
 _snap_merge_counter :: proc "contextless" (
 	dst: ^_Alloc_Counter_Snap,
-	c: ^obench.Counting_Allocator,
+	c: ^_Obench_Counting_Allocator,
 ) {
 	if c == nil {
 		return
@@ -84,14 +83,14 @@ Phase :: struct {
 	ops:                 int,
 	bytes_per_op:        u64,
 	zero_alloc:          bool,
-	start_ts:            obench.Timestamp,
+	start_ts:            _Obench_Timestamp,
 	footprint_bytes:     u64,
 	metrics:             [MAX_METRICS]Metric,
 	metrics_count:       int,
-	_metric_buf:         [MAX_METRICS][obench.MAX_METRIC_UNIT_LEN]u8,
+	_metric_buf:         [MAX_METRICS][MAX_METRIC_UNIT_LEN]u8,
 	_heap_acc:           _Alloc_Counter_Snap,
 	_temp_acc:           _Alloc_Counter_Snap,
-	_counters_before:    obench.Counter_Values,
+	_counters_before:    _Obench_Counter_Values,
 	_counters_ok:        bool,
 	_nested_hw_brackets: int,
 	active:              bool,
@@ -132,10 +131,10 @@ Pipeline :: struct {
 	_accums:               [dynamic]_Phase_Accum,
 	_phase_stack:          [MAX_PHASE_DEPTH]Phase,
 	_stack_depth:          int,
-	_heap_counter:         ^obench.Counting_Allocator,
-	_temp_counter:         ^obench.Counting_Allocator,
-	_counters:             ^obench.Counter_Group,
-	_counter_overhead:     obench.Counter_Values,
+	_heap_counter:         ^_Obench_Counting_Allocator,
+	_temp_counter:         ^_Obench_Counting_Allocator,
+	_counters:             ^_Obench_Counter_Group,
+	_counter_overhead:     _Obench_Counter_Values,
 	_runs:                 int,
 	_enforce_zero_alloc:   bool,
 	_allocator:            runtime.Allocator,
@@ -211,23 +210,23 @@ phase_begin :: proc(
 	case .Warmup:
 	case .Alloc_Check:
 		if parent_depth > 0 {
-			obench.counting_allocator_set_paused(p._heap_counter, true)
-			obench.counting_allocator_set_paused(p._temp_counter, true)
+			_obench_counting_allocator_set_paused(p._heap_counter, true)
+			_obench_counting_allocator_set_paused(p._temp_counter, true)
 			parent := &p._phase_stack[parent_depth - 1]
 			_snap_merge_counter(&parent._heap_acc, p._heap_counter)
 			_snap_merge_counter(&parent._temp_acc, p._temp_counter)
 		}
-		obench.counting_allocator_reset(p._heap_counter)
-		obench.counting_allocator_reset(p._temp_counter)
+		_obench_counting_allocator_reset(p._heap_counter)
+		_obench_counting_allocator_reset(p._temp_counter)
 		p._heap_counter.enforce_zero_allocs = true
-		obench.counting_allocator_set_paused(p._heap_counter, false)
-		obench.counting_allocator_set_paused(p._temp_counter, false)
+		_obench_counting_allocator_set_paused(p._heap_counter, false)
+		_obench_counting_allocator_set_paused(p._temp_counter, false)
 	case .Timed:
 		if p._counters != nil && p._counters.open {
-			ph._counters_before, ph._counters_ok = obench.counter_group_read(p._counters)
+			ph._counters_before, ph._counters_ok = _obench_counter_group_read(p._counters)
 		}
-		obench.clobber_memory()
-		ph.start_ts = obench.clock_now()
+		clobber_memory()
+		ph.start_ts = _obench_clock_now()
 	}
 	return ph
 }
@@ -240,18 +239,18 @@ phase_end :: proc(ph: ^Phase) {
 		return
 	}
 	p := ph.pipeline
-	end_ts: obench.Timestamp
-	counters_after: obench.Counter_Values
+	end_ts: _Obench_Timestamp
+	counters_after: _Obench_Counter_Values
 	counters_after_ok: bool
 	if p._mode == .Timed {
-		end_ts = obench.clock_now()
-		obench.clobber_memory()
+		end_ts = _obench_clock_now()
+		clobber_memory()
 		if ph._counters_ok && p._counters != nil && p._counters.open {
-			counters_after, counters_after_ok = obench.counter_group_read(p._counters)
+			counters_after, counters_after_ok = _obench_counter_group_read(p._counters)
 		}
 	} else if p._mode == .Alloc_Check {
-		obench.counting_allocator_set_paused(p._heap_counter, true)
-		obench.counting_allocator_set_paused(p._temp_counter, true)
+		_obench_counting_allocator_set_paused(p._heap_counter, true)
+		_obench_counting_allocator_set_paused(p._temp_counter, true)
 	}
 
 	ph.active = false
@@ -270,7 +269,7 @@ phase_end :: proc(ph: ^Phase) {
 	switch p._mode {
 	case .Warmup:
 	case .Timed:
-		ns, cyc := obench.clock_elapsed(ph.start_ts, end_ts)
+		ns, cyc := _obench_clock_elapsed(ph.start_ts, end_ts)
 		ov_ns := (i128(p.clock_overhead_fs) + 500_000) / 1_000_000
 		adj_batch_ns := u64(max(i128(ns) - ov_ns, 0))
 		append(&acc.samples_batch_ns, adj_batch_ns)
@@ -346,11 +345,11 @@ phase_end :: proc(ph: ^Phase) {
 			parent := &p._phase_stack[p._stack_depth - 1]
 			_snap_merge_snap(&parent._heap_acc, ph._heap_acc)
 			_snap_merge_snap(&parent._temp_acc, ph._temp_acc)
-			obench.counting_allocator_reset(p._heap_counter)
-			obench.counting_allocator_reset(p._temp_counter)
+			_obench_counting_allocator_reset(p._heap_counter)
+			_obench_counting_allocator_reset(p._temp_counter)
 			p._heap_counter.enforce_zero_allocs = true
-			obench.counting_allocator_set_paused(p._heap_counter, false)
-			obench.counting_allocator_set_paused(p._temp_counter, false)
+			_obench_counting_allocator_set_paused(p._heap_counter, false)
+			_obench_counting_allocator_set_paused(p._temp_counter, false)
 		}
 	}
 }
@@ -390,7 +389,7 @@ phase_metric :: proc "contextless" (ph: ^Phase, value: f64, unit: string) {
 	if ph == nil || unit == "" {
 		return
 	}
-	n := min(len(unit), obench.MAX_METRIC_UNIT_LEN)
+	n := min(len(unit), MAX_METRIC_UNIT_LEN)
 	for n > 0 && n < len(unit) && unit[n] & 0xC0 == 0x80 {
 		n -= 1
 	}
@@ -450,26 +449,38 @@ _destroy_phase_accums :: proc(accums: []_Phase_Accum, allocator: runtime.Allocat
 	}
 }
 
+@(private = "file")
+_median_sorted_f64 :: proc "contextless" (sorted: []f64) -> f64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0
+	}
+	if n % 2 == 1 {
+		return sorted[n / 2]
+	}
+	return (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+}
+
 @(private)
-_calibrate_counter_overhead :: proc(counters: ^obench.Counter_Group) -> obench.Counter_Values {
+_calibrate_counter_overhead :: proc(counters: ^_Obench_Counter_Group) -> _Obench_Counter_Values {
 	if counters == nil || !counters.open {
 		return {}
 	}
 	WARMUP :: 8
 	SAMPLES :: 32
 	for _ in 0 ..< WARMUP {
-		b, _ := obench.counter_group_read(counters)
-		obench.clobber_memory()
-		t0 := obench.clock_now()
-		t1 := obench.clock_now()
-		obench.clobber_memory()
-		a, _ := obench.counter_group_read(counters)
-		_ = obench.black_box(t0)
-		_ = obench.black_box(t1)
-		_ = obench.black_box(b)
-		_ = obench.black_box(a)
+		b, _ := _obench_counter_group_read(counters)
+		clobber_memory()
+		t0 := _obench_clock_now()
+		t1 := _obench_clock_now()
+		clobber_memory()
+		a, _ := _obench_counter_group_read(counters)
+		_ = black_box(t0)
+		_ = black_box(t1)
+		_ = black_box(b)
+		_ = black_box(a)
 	}
-	best := obench.Counter_Values {
+	best := _Obench_Counter_Values {
 		instructions  = max(f64),
 		cycles        = max(f64),
 		branch_misses = max(f64),
@@ -477,14 +488,14 @@ _calibrate_counter_overhead :: proc(counters: ^obench.Counter_Group) -> obench.C
 	}
 	got_any := false
 	for _ in 0 ..< SAMPLES {
-		before, ok1 := obench.counter_group_read(counters)
-		obench.clobber_memory()
-		t0 := obench.clock_now()
-		t1 := obench.clock_now()
-		obench.clobber_memory()
-		after, ok2 := obench.counter_group_read(counters)
-		_ = obench.black_box(t0)
-		_ = obench.black_box(t1)
+		before, ok1 := _obench_counter_group_read(counters)
+		clobber_memory()
+		t0 := _obench_clock_now()
+		t1 := _obench_clock_now()
+		clobber_memory()
+		after, ok2 := _obench_counter_group_read(counters)
+		_ = black_box(t0)
+		_ = black_box(t1)
 		if ok1 && ok2 {
 			got_any = true
 			best.instructions = min(
@@ -514,8 +525,9 @@ _execute_pipeline :: proc(
 	def: _Pipeline_Def,
 	base_rank: ^int,
 	temp_arena: ^runtime.Arena,
-	counters: ^obench.Counter_Group = nil,
-	counter_overhead: obench.Counter_Values = {},
+	counters: ^_Obench_Counter_Group = nil,
+	counter_overhead: _Obench_Counter_Values = {},
+	recalibrate_clock := true,
 ) -> (
 	records: [dynamic]Record,
 	violations: [dynamic]Phase_Violation,
@@ -572,6 +584,14 @@ _execute_pipeline :: proc(
 		runtime.arena_free_all(temp_arena)
 	}
 
+	if recalibrate_clock && warmup > 0 && !s.obench_suite.config.test_mode {
+		cal := _obench_clock_calibrate()
+		s.obench_suite.clock = cal
+		s._measured_clock = cal
+		p.clock_overhead_fs = ns_f64_to_fs(cal.overhead_ns)
+		p.clock_overhead_cycles = cal.overhead_cycles
+	}
+
 	// 2. Timed passes (unwrapped allocators -> 0 ns Counting_Allocator distortion).
 	p._mode = .Timed
 	for _ in 0 ..< runs {
@@ -587,12 +607,12 @@ _execute_pipeline :: proc(
 	}
 
 	// 3. One untimed allocation-counting pass across all phases.
-	heap_counter: obench.Counting_Allocator
-	temp_counter: obench.Counting_Allocator
-	obench.counting_allocator_init(&heap_counter, context.allocator)
-	obench.counting_allocator_init(&temp_counter, arena_alloc)
-	obench.counting_allocator_set_paused(&heap_counter, true)
-	obench.counting_allocator_set_paused(&temp_counter, true)
+	heap_counter: _Obench_Counting_Allocator
+	temp_counter: _Obench_Counting_Allocator
+	_obench_counting_allocator_init(&heap_counter, context.allocator)
+	_obench_counting_allocator_init(&temp_counter, arena_alloc)
+	_obench_counting_allocator_set_paused(&heap_counter, true)
+	_obench_counting_allocator_set_paused(&temp_counter, true)
 
 	p._mode = .Alloc_Check
 	p._heap_counter = &heap_counter
@@ -601,8 +621,8 @@ _execute_pipeline :: proc(
 	p._stack_depth = 0
 	{
 		ctx := context
-		ctx.allocator = obench.counting_allocator(&heap_counter)
-		ctx.temp_allocator = obench.counting_allocator(&temp_counter)
+		ctx.allocator = _obench_counting_allocator(&heap_counter)
+		ctx.temp_allocator = _obench_counting_allocator(&temp_counter)
 		{
 			context = ctx
 			def.procedure(&p)
@@ -677,7 +697,7 @@ _execute_pipeline :: proc(
 		if len(acc.samples_cycles) > 0 {
 			cyc := slice.clone(acc.samples_cycles[:], context.temp_allocator)
 			slice.sort(cyc)
-			r.median_cycles = obench.percentile_sorted(cyc, 0.50)
+			r.median_cycles = _median_sorted_f64(cyc)
 		}
 		if len(acc.samples_hw[0]) > 0 {
 			hw_units := [4]string {
@@ -692,7 +712,7 @@ _execute_pipeline :: proc(
 				_append_counter_metric(
 					&r.metrics,
 					hw_units[k],
-					obench.percentile_sorted(vals, 0.50),
+					_median_sorted_f64(vals),
 					s.allocator,
 					allow_zero = k >= 2 && counters != nil && counters.fds[k] >= 0,
 				)

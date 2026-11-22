@@ -839,3 +839,134 @@ spec_multirun_ambient_shift_and_skewed_1v1_avoid_false_diagnostics :: proc(t: ^t
 		shows_1v1_significance(&w, row, true, max_p_value = 0.05)
 	}
 }
+
+@(test)
+spec_too_few_samples_stays_undecided_and_asymmetric_runs_warn :: proc(t: ^testing.T) {
+	w: World
+	world_init(&w, t)
+	defer world_destroy(&w)
+
+	given_in_memory_store(&w)
+
+	// 1. 3 vs 3 runs under --by-run lacks enough medians for a 95% HL interval -> undecided.
+	b3_ids := [3]string{"u-b0", "u-b1", "u-b2"}
+	c3_ids := [3]string{"u-c0", "u-c1", "u-c2"}
+	for idx in 0 ..< 3 {
+		given_recorded_run(
+			&w,
+			commit = "und_b",
+			lang = "odin",
+			run_id = b3_ids[idx],
+			bench = Bench_Observation {
+				name = "core::small",
+				median_ns = 100.0 + f64(idx) * 0.5,
+				samples = 6,
+				spread_ns = 0.1,
+			},
+		)
+		given_recorded_run(
+			&w,
+			commit = "und_c",
+			lang = "odin",
+			run_id = c3_ids[idx],
+			bench = Bench_Observation {
+				name = "core::small",
+				median_ns = 140.0 + f64(idx) * 0.5,
+				samples = 6,
+				spread_ns = 0.1,
+			},
+		)
+	}
+	upon_comparing_commits(
+		&w,
+		"und_b",
+		"und_c",
+		lang = "odin",
+		threshold_pct = 5.0,
+		use_run_medians = true,
+	)
+	then_comparison_summary(&w, improvements = 0, regressions = 0, unchanged = 1)
+	then_comparison_undecided_and_one_sided(&w, undecided_rows = 1, one_sided_runs_rows = 0)
+	then_comparison_warns_containing(&w, "too few samples or runs per side")
+	if row, ok := viewing_comparison_row(&w, "core::small"); ok {
+		shows_undecided(&w, row, true)
+		shows_shift_ci(&w, row, expect_used_ci = false, expect_by_run = true)
+		shows_verdict(&w, row, .Unchanged)
+		shows_significance(&w, row, false)
+	}
+
+	// 2. Adding 2 more candidate runs (3 vs 5) reaches an exact 95% HL interval -> Regression.
+	extra_ids := [2]string{"u-c3", "u-c4"}
+	for idx in 0 ..< 2 {
+		given_recorded_run(
+			&w,
+			commit = "und_c",
+			lang = "odin",
+			run_id = extra_ids[idx],
+			bench = Bench_Observation {
+				name = "core::small",
+				median_ns = 142.0 + f64(idx) * 0.5,
+				samples = 6,
+				spread_ns = 0.1,
+			},
+		)
+	}
+	upon_comparing_commits(
+		&w,
+		"und_b",
+		"und_c",
+		lang = "odin",
+		threshold_pct = 5.0,
+		use_run_medians = true,
+	)
+	then_comparison_summary(&w, improvements = 0, regressions = 1, unchanged = 0)
+	then_comparison_undecided_and_one_sided(&w, undecided_rows = 0, one_sided_runs_rows = 0)
+	if row, ok := viewing_comparison_row(&w, "core::small"); ok {
+		shows_undecided(&w, row, false)
+		shows_shift_ci(&w, row, expect_used_ci = true, expect_by_run = true)
+		shows_verdict(&w, row, .Regression)
+		shows_significance(&w, row, true)
+	}
+
+	// 3. 1 run vs multiple runs emits the asymmetric multi-run warning in commit & 1v1 comparisons.
+	given_recorded_run(
+		&w,
+		commit = "asym_base",
+		lang = "odin",
+		run_id = "asym-o-1",
+		bench = Bench_Observation{name = "core::work", median_ns = 100.0, samples = 8},
+	)
+	cand_ids := [4]string{"asym-c0", "asym-c1", "asym-c2", "asym-c3"}
+	zig_ids := [4]string{"asym-z0", "asym-z1", "asym-z2", "asym-z3"}
+	for idx in 0 ..< 4 {
+		given_recorded_run(
+			&w,
+			commit = "asym_cand",
+			lang = "odin",
+			run_id = cand_ids[idx],
+			bench = Bench_Observation {
+				name = "core::work",
+				median_ns = 135.0 + f64(idx),
+				samples = 8,
+			},
+		)
+		given_recorded_run(
+			&w,
+			commit = "asym_base",
+			lang = "zig",
+			run_id = zig_ids[idx],
+			bench = Bench_Observation {
+				name = "core::work",
+				median_ns = 160.0 + f64(idx),
+				samples = 8,
+			},
+		)
+	}
+	upon_comparing_commits(&w, "asym_base", "asym_cand", lang = "odin", threshold_pct = 5.0)
+	then_comparison_undecided_and_one_sided(&w, undecided_rows = 0, one_sided_runs_rows = 1)
+	then_comparison_warns_containing(&w, "multiple runs on only one side")
+
+	upon_comparing_1v1(&w, "odin", "zig", commit = "asym_base", threshold_pct = 3.0)
+	then_1v1_undecided_and_one_sided(&w, undecided_rows = 0, one_sided_runs_rows = 1)
+	then_1v1_warns_containing(&w, "multiple runs on only one side")
+}

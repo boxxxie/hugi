@@ -3,7 +3,7 @@ package hugi_cli
 import "core:fmt"
 import "core:os"
 
-VERSION :: "hugi 0.1.4"
+VERSION :: "hugi 0.2.0"
 
 @(private)
 _print_help :: proc() {
@@ -42,7 +42,7 @@ RUN OPTIONS:
   --test                 Smoke-run each benchmark/pipeline once (skips store & baseline check)
   --baseline-commit <c>  Compare run immediately against baseline commit <c>
   --by-run               Compare per-run medians across multi-run commits (fallback to pooled if < 2 runs)
-  --fail-on-regression   Exit non-zero if statistical regressions are detected
+  --fail-on-regression   Exit 1 on statistical regressions, or 3 if comparisons are undecided
   --threshold <pct>      Regression threshold percentage (default: 5.0)
   --extra-build-flags s  Extra flags passed to 'odin build' (default: hugi.json 'extra_build_flags')
   --overlay              Ingest into an in-memory CoW Core_Overlay branch (no disk write)

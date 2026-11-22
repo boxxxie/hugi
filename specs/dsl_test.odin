@@ -114,6 +114,7 @@ Comparison_Row_View :: struct {
 	shift_high_pct:   f64,
 	used_shift_ci:    bool,
 	used_run_medians: bool,
+	too_few_samples:  bool,
 	is_significant:   bool,
 	verdict:          Verdict,
 }
@@ -122,6 +123,7 @@ Cross_Lang_Row_View :: struct {
 	full_name:          string,
 	faster_lang:        string,
 	p_value:            f64,
+	too_few_samples:    bool,
 	is_significant:     bool,
 	footprint_mismatch: bool,
 }
@@ -753,6 +755,26 @@ given_obench_v6_report_fixture :: proc(
 		instructions,
 	)
 	testing.expect(w.t, ok, "write obench v6 report fixture", loc = loc)
+}
+
+given_obench_combined_report_fixture :: proc(
+	w: ^World,
+	label, suite_name, group_name, bench_name: string,
+	samples_ns: [4]f64,
+	loc := #caller_location,
+) {
+	path, p_ok := _world_resolve_label_path(w, label, ".json", loc)
+	if !p_ok {
+		return
+	}
+	ok := _driver_write_obench_combined_json_fixture(
+		path,
+		suite_name,
+		group_name,
+		bench_name,
+		samples_ns,
+	)
+	testing.expect(w.t, ok, "write obench combined report fixture", loc = loc)
 }
 
 given_readme_file :: proc(w: ^World, label, content: string, loc := #caller_location) {
@@ -1529,6 +1551,7 @@ viewing_comparison_row :: proc(
 					shift_high_pct = r.shift_high_pct,
 					used_shift_ci = r.used_shift_ci,
 					used_run_medians = r.used_run_medians,
+					too_few_samples = r.too_few_samples,
 					is_significant = r.is_significant,
 					verdict = r.verdict,
 				},
@@ -1595,6 +1618,15 @@ shows_shift_ci :: proc(
 	testing.expect_value(w.t, v.used_run_medians, expect_by_run, loc = loc)
 }
 
+shows_undecided :: proc(
+	w: ^World,
+	v: Comparison_Row_View,
+	expected: bool,
+	loc := #caller_location,
+) {
+	testing.expect_value(w.t, v.too_few_samples, expected, loc = loc)
+}
+
 viewing_1v1_row :: proc(
 	w: ^World,
 	name: string,
@@ -1613,6 +1645,7 @@ viewing_1v1_row :: proc(
 					full_name = strings.clone(r.full_name, arena_alloc),
 					faster_lang = strings.clone(r.faster_lang, arena_alloc),
 					p_value = r.p_value,
+					too_few_samples = r.too_few_samples,
 					is_significant = r.is_significant,
 					footprint_mismatch = r.footprint_mismatch,
 				},
@@ -1650,6 +1683,15 @@ shows_1v1_significance :: proc(
 			loc = loc,
 		)
 	}
+}
+
+shows_1v1_undecided :: proc(
+	w: ^World,
+	v: Cross_Lang_Row_View,
+	expected: bool,
+	loc := #caller_location,
+) {
+	testing.expect_value(w.t, v.too_few_samples, expected, loc = loc)
 }
 
 shows_footprint_mismatch :: proc(
@@ -1976,6 +2018,23 @@ then_comparison_shape_counts :: proc(
 	testing.expect_value(w.t, w.last_comparison.multimodal_rows, multimodal_rows, loc = loc)
 }
 
+then_comparison_undecided_and_one_sided :: proc(
+	w: ^World,
+	undecided_rows, one_sided_runs_rows: int,
+	loc := #caller_location,
+) {
+	if !testing.expect(w.t, w.has_comparison, "no comparison report in World", loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, w.last_comparison.undecided_rows, undecided_rows, loc = loc)
+	testing.expect_value(
+		w.t,
+		w.last_comparison.one_sided_runs_rows,
+		one_sided_runs_rows,
+		loc = loc,
+	)
+}
+
 then_comparison_geomean_between :: proc(
 	w: ^World,
 	min_pct, max_pct: f64,
@@ -2046,6 +2105,18 @@ then_1v1_summary :: proc(
 	testing.expect_value(w.t, w.last_1v1.b_wins, b_wins, loc = loc)
 	testing.expect_value(w.t, w.last_1v1.ties, ties, loc = loc)
 	testing.expect_value(w.t, w.last_1v1.footprint_mismatches, footprint_mismatches, loc = loc)
+}
+
+then_1v1_undecided_and_one_sided :: proc(
+	w: ^World,
+	undecided_rows, one_sided_runs_rows: int,
+	loc := #caller_location,
+) {
+	if !testing.expect(w.t, w.has_1v1, "no 1v1 report in World", loc = loc) {
+		return
+	}
+	testing.expect_value(w.t, w.last_1v1.undecided_rows, undecided_rows, loc = loc)
+	testing.expect_value(w.t, w.last_1v1.one_sided_runs_rows, one_sided_runs_rows, loc = loc)
 }
 
 then_1v1_only_in :: proc(w: ^World, only_a, only_b: []string, loc := #caller_location) {

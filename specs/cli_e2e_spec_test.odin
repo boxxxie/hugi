@@ -15,7 +15,7 @@ spec_cli_version_help_ingest_history_and_inspect_workflow :: proc(t: ^testing.T)
 	upon_running_cli(&w, "version")
 	if out, ok := viewing_cli_output(&w); ok {
 		shows_exit_code(&w, out, 0)
-		shows_stdout_contains(&w, out, "hugi 0.1.4")
+		shows_stdout_contains(&w, out, "hugi 0.2.0")
 	}
 
 	upon_running_cli(&w, "help")
@@ -1212,5 +1212,162 @@ spec_cli_inspect_large_suite_emits_sample_shape_warning_banner :: proc(t: ^testi
 		shows_stdout_contains(&w, out, "[drifts +")
 		shows_stdout_contains(&w, out, "core::bimodal_op")
 		shows_stdout_contains(&w, out, "[2 modes]")
+	}
+}
+
+@(test)
+spec_cli_compare_undecided_exits_3_and_combined_obench_json_preserves_sub_ns :: proc(
+	t: ^testing.T,
+) {
+	w: World
+	world_init(&w, t)
+	world_set_timeout(&w, 15)
+	defer world_destroy(&w)
+
+	given_cli_workspace(&w)
+
+	// 1. 3-run vs 3-run --by-run stays undecided -> exit 3 under --fail-on-regression, exit 0 without.
+	und_b_ids := [3]string{"cli-ub0", "cli-ub1", "cli-ub2"}
+	und_b_args := [3]string{"@cli-ub0", "@cli-ub1", "@cli-ub2"}
+	und_c_ids := [3]string{"cli-uc0", "cli-uc1", "cli-uc2"}
+	und_c_args := [3]string{"@cli-uc0", "@cli-uc1", "@cli-uc2"}
+	for idx in 0 ..< 3 {
+		given_packet_file(
+			&w,
+			und_b_ids[idx],
+			commit = "und_b",
+			lang = "odin",
+			run_id = und_b_ids[idx],
+			benches = []Bench_Observation {
+				{name = "small_runs", median_ns = 100.0 + f64(idx), samples = 6, spread_ns = 0.1},
+			},
+		)
+		given_packet_file(
+			&w,
+			und_c_ids[idx],
+			commit = "und_c",
+			lang = "odin",
+			run_id = und_c_ids[idx],
+			benches = []Bench_Observation {
+				{name = "small_runs", median_ns = 140.0 + f64(idx), samples = 6, spread_ns = 0.1},
+			},
+		)
+		upon_running_cli(&w, "ingest", "--db", "@db", und_b_args[idx], und_c_args[idx])
+		if out, ok := viewing_cli_output(&w); ok {
+			shows_exit_code(&w, out, 0)
+		}
+	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@db",
+		"--commits",
+		"und_b..und_c",
+		"--by-run",
+		"--fail-on-regression",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 3)
+		shows_stdout_contains(&w, out, "undecided: 1")
+		shows_stdout_contains(&w, out, "too few for 95%")
+		shows_stdout_contains(&w, out, "too few samples or runs per side")
+	}
+
+	upon_running_cli(&w, "compare", "--db", "@db", "--commits", "und_b..und_c", "--by-run")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@db",
+		"--commits",
+		"und_b..und_c",
+		"--by-run",
+		"--format",
+		"json",
+		"--out",
+		"-",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, `"undecided_rows": 1`)
+		shows_stdout_contains(&w, out, `"too_few_samples": true`)
+	}
+
+	// 2. When a regression and an undecided benchmark appear together, exit 1 wins over exit 3.
+	mix_b_ids := [4]string{"mix-b0", "mix-b1", "mix-b2", "mix-b3"}
+	mix_b_args := [4]string{"@mix-b0", "@mix-b1", "@mix-b2", "@mix-b3"}
+	mix_c_ids := [4]string{"mix-c0", "mix-c1", "mix-c2", "mix-c3"}
+	mix_c_args := [4]string{"@mix-c0", "@mix-c1", "@mix-c2", "@mix-c3"}
+	for idx in 0 ..< 4 {
+		b_benches :=
+			[]Bench_Observation{{name = "big_runs", median_ns = 100.0 + f64(idx), samples = 6, spread_ns = 0.1}, {name = "small_runs", median_ns = 100.0 + f64(idx), samples = 6, spread_ns = 0.1}} if idx < 3 else []Bench_Observation{{name = "big_runs", median_ns = 100.0 + f64(idx), samples = 6, spread_ns = 0.1}}
+		c_benches :=
+			[]Bench_Observation{{name = "big_runs", median_ns = 140.0 + f64(idx), samples = 6, spread_ns = 0.1}, {name = "small_runs", median_ns = 140.0 + f64(idx), samples = 6, spread_ns = 0.1}} if idx < 3 else []Bench_Observation{{name = "big_runs", median_ns = 140.0 + f64(idx), samples = 6, spread_ns = 0.1}}
+		given_packet_file(
+			&w,
+			mix_b_ids[idx],
+			commit = "mix_b",
+			lang = "odin",
+			run_id = mix_b_ids[idx],
+			benches = b_benches,
+		)
+		given_packet_file(
+			&w,
+			mix_c_ids[idx],
+			commit = "mix_c",
+			lang = "odin",
+			run_id = mix_c_ids[idx],
+			benches = c_benches,
+		)
+		upon_running_cli(&w, "ingest", "--db", "@mix-db", mix_b_args[idx], mix_c_args[idx])
+		if out, ok := viewing_cli_output(&w); ok {
+			shows_exit_code(&w, out, 0)
+		}
+	}
+
+	upon_running_cli(
+		&w,
+		"compare",
+		"--db",
+		"@mix-db",
+		"--commits",
+		"mix_b..mix_c",
+		"--by-run",
+		"--fail-on-regression",
+	)
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 1)
+		shows_stdout_contains(&w, out, "regressed: 1")
+		shows_stdout_contains(&w, out, "undecided: 1")
+	}
+
+	// 3. Combined obench v0.5.0 JSON report without samples_batch_ns preserves sub-ns precision.
+	given_obench_combined_report_fixture(
+		&w,
+		"comb-rep",
+		suite_name = "comb_cli",
+		group_name = "simd",
+		bench_name = "hash",
+		samples_ns = [4]f64{12.345678, 12.345900, 12.346010, 12.346123},
+	)
+	upon_running_cli(&w, "ingest", "--db", "@comb-db", "@comb-rep", "--commit", "comb01")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+	}
+	upon_running_cli(&w, "export", "--db", "@comb-db", "--format", "json", "--out", "-")
+	if out, ok := viewing_cli_output(&w); ok {
+		shows_exit_code(&w, out, 0)
+		shows_stdout_contains(&w, out, `"p50_ns": 12.345955`)
+		shows_stdout_contains(
+			&w,
+			out,
+			`"samples_ns": [12.345678, 12.345900, 12.346010, 12.346123]`,
+		)
 	}
 }

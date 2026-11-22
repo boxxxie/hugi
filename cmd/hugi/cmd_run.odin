@@ -523,8 +523,18 @@ _ingest_and_compare_run_packet :: proc(opts: _Run_Opts, pkt: hugi.Run_Packet) ->
 				context.temp_allocator,
 			),
 		)
-		if opts.fail_on_reg && rep.regressions > 0 {
-			return 1
+		if opts.fail_on_reg {
+			if rep.regressions > 0 {
+				return hugi.EXIT_FAILURE
+			}
+			if rep.undecided_rows > 0 {
+				fmt.eprintfln(
+					"hugi run: %d benchmark(s) undecided (too few samples/runs for 95%% CI); exiting with status %d",
+					rep.undecided_rows,
+					hugi.EXIT_BASELINE,
+				)
+				return hugi.EXIT_BASELINE
+			}
 		}
 	}
 	return 0
@@ -609,9 +619,12 @@ _cmd_run :: proc(args: []string) -> int {
 		}
 	} else if !opts.no_db {
 		if code := _ingest_and_compare_run_packet(opts, pkt); code != 0 {
+			if !run_ok {
+				return hugi.EXIT_FAILURE
+			}
 			return code
 		}
 	}
 
-	return run_ok ? 0 : 1
+	return run_ok ? hugi.EXIT_SUCCESS : hugi.EXIT_FAILURE
 }

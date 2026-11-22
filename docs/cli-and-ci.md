@@ -77,7 +77,7 @@ hugi run ./benchmarks \
 | `--commit <sha>` | Git HEAD | Override commit identifier (stored verbatim; pass 12-char SHAs like `${GITHUB_SHA:0:12}` to pool with auto-detected Git commits). |
 | `--baseline-commit <c>` | None | Immediately run statistical comparison against commit `<c>` (prefix-matched against stored SHAs, including 40-char hex SHAs against stored 12-char SHAs; expand symbolic refs like `HEAD` or `main` with `git rev-parse --short=12`). |
 | `--threshold <pct>` | `5.0` | Minimum relative median delta percentage required to flag a regression/improvement. |
-| `--fail-on-regression` | `false` | Exit with code `1` if any statistically significant regression is detected. |
+| `--fail-on-regression` | `false` | Exit `1` if any statistically significant regression is detected, or `3` (`EXIT_BASELINE`) if comparisons are only undecided (`too_few_samples`). |
 | `--extra-build-flags <s>` | `""` | Extra flags appended to `odin build` with quote-aware splitting (e.g., `'-extra-linker-flags:"-L/usr/local/lib -Wl,-rpath,/usr/local/lib"'`). |
 | `--quiet` | `false` | Suppress benchmark runner terminal report (comparison table still prints if `--baseline-commit` is set). |
 
@@ -145,7 +145,7 @@ hugi inspect --run run-1770000120 --lang zig
 
 ### `hugi compare`
 
-Compares two commits or two run IDs within a single language (defaults to `--lang odin`) using pooled sample distributions. Supports `--format <md|json|csv>` (auto-inferred from `--out` extension if omitted, defaulting to `md`) and `--out <path|->`. Note that `--last` compares the last two entries from `store_list_commits`, which orders commits by their *first* appearance in `.hugidb`—re-running an older commit pools into its existing slot without moving it to the end (use `--runs <r1>..<r2>` for run-to-run comparison on an existing commit).
+Compares two commits or two run IDs within a single language (defaults to `--lang odin`) using exact 95% Hodges-Lehmann shift confidence intervals (when both sides have enough samples/runs: `4+ vs 4+`, `3 vs 5+`, or `2 vs 8+`) or Welch's `t`-test when raw samples are absent. Comparisons with raw samples/runs too small for an exact 95% interval (`2 vs <=7` or `3 vs 3..4`) remain undecided (`too_few_samples`), warn, and exit `3` (`EXIT_BASELINE`) under `--fail-on-regression` when no regressions occur; multi-run asymmetry (one side with multiple runs and the other with one) also warns. Supports `--format <md|json|csv>` (auto-inferred from `--out` extension if omitted, defaulting to `md`) and `--out <path|->`. Note that `--last` compares the last two entries from `store_list_commits`, which orders commits by their *first* appearance in `.hugidb`—re-running an older commit pools into its existing slot without moving it to the end (use `--runs <r1>..<r2>` for run-to-run comparison on an existing commit).
 
 ```sh
 # Compare the last two commits for a language (falls back to last two runs if only 1 commit exists)
@@ -166,7 +166,7 @@ hugi compare --runs run-1770000100..run-1770000500 --filter "scan"
 
 ### `hugi compare-1v1`
 
-Runs a cross-language head-to-head comparison on exact-matching `full_name` benchmarks, reporting winners, speedups, Mann-Whitney U `p`-values, unmatched benchmarks (`Only in <lang>`), and domain memory/disk footprint mismatches (`[MISMATCH]`). Accepts `--db`, `--commit`, `--threshold`, `--langs`, `--format`, and `--out` (rejects `--lang` and `--filter` / `-f`).
+Runs a cross-language head-to-head comparison on exact-matching `full_name` benchmarks, reporting winners, speedups, Hodges-Lehmann shift CI / Mann-Whitney U `p`-values, unmatched benchmarks (`Only in <lang>`), and domain memory/disk footprint mismatches (`[MISMATCH]`). Accepts `--db`, `--commit`, `--threshold`, `--langs`, `--format`, and `--out` (rejects `--lang` and `--filter` / `-f`). When raw sample counts cannot yield an exact 95% Hodges-Lehmann interval (`2 vs <=7`, `3 vs 3..4`), rows are marked undecided (`too_few_samples`, non-significant) and asymmetric multi-run sides emit a warning.
 
 ```sh
 hugi compare-1v1 --db benchmarks/history.hugidb --langs odin,zig --commit a1b2c3d4

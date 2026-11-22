@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
+Adopts [`obench v0.5.0`](https://github.com/zeybek/obench/releases/tag/v0.5.0) comparison, calibration, combined-report import, and `STABILITY.md` surface isolation semantics.
+
+### Breaking Changes
+
+- **Undecided Too-Few-Samples Handling (`store/`, `cmd/hugi/`):**
+  - `_compare_significance` in `store/pool_and_compare.odin` now relies on exact 95% Hodges-Lehmann shift confidence intervals (`4+ vs 4+`, `3 vs 5+`, `2 vs 8+`) whenever raw samples or per-run medians are present, leaving smaller sample/run pairs (`2 vs <=7`, `3 vs 3..4`) undecided (`too_few_samples = true`, `is_significant = false`, `Verdict.Unchanged`) instead of falling back to Welch/Mann-Whitney decisions. Summary-only records without raw sample arrays still fall back to Welch's `t`-test.
+  - Under `--fail-on-regression`, `hugi compare` and `hugi run --baseline-commit` now exit with status `3` (`hugi.EXIT_BASELINE`) when comparisons are only undecided (`undecided_rows > 0`) and exit `1` (`hugi.EXIT_FAILURE`) when any regression or run failure occurs.
+
+### Added
+
+- **Comparison & Report Surface (`store/`):**
+  - Added `too_few_samples` to `Comparison_Row` and `Cross_Lang_Row`, and `undecided_rows` and `one_sided_runs_rows` to `Comparison_Report` and `Cross_Lang_Report`, surfaced across Markdown tables (`(too few for 95%)`, `, undecided: N`), JSON, and CSV (`too_few_samples` trailing column).
+  - Emits diagnostic warnings when rows are undecided (`too_few_samples`) or when only one side of a comparison has multiple runs (`one_sided_runs_rows`).
+- **Runner Exit Codes & Formatting (`hugi/`):**
+  - Re-exported `EXIT_SUCCESS`, `EXIT_FAILURE`, `EXIT_USAGE`, `EXIT_BASELINE`, and `MAX_METRIC_UNIT_LEN`, and added `hugi.suite_exit_code(&suite)` and `hugi.format_bytes(b, allocator)`.
+
+### Changed
+
+- **Pipeline Post-Warmup Clock Calibration (`hugi/hugi.odin`, `hugi/phase.odin`):**
+  - When `warmup > 0` and the caller has not manually overridden `s.obench_suite.clock`, `_execute_pipeline` recalibrates clock overhead immediately after warmup passes before timed passes begin.
+- **Combined `obench` JSON Importer Precision (`hugi/importers.odin`):**
+  - Added `_infer_samples_ns_scale` in `read_obench_json_packets` so combined `obench v0.5.0` reports that omit `samples_batch_ns` (mixed per-process batch sizes) preserve sub-nanosecond precision from `samples_ns` without lossy rounding.
+- **`obench` `STABILITY.md` Surface Isolation (`hugi/obench_compat.odin`, `store/obench_compat.odin`, `cmd/hugi/obench_compat.odin`):**
+  - Consolidated all `deps/obench` symbols outside `deps/obench/STABILITY.md`'s stable package surface behind package-private `obench_compat.odin` wrappers (eliminating direct `obench` imports across `hugi/phase.odin`, `hugi/packet.odin`, `hugi/importers.odin`, `store/*.odin`, and `cmd/hugi/*.odin`).
+- **CLI & Docs (`cmd/hugi/main.odin`, `README.md`, `docs/cli-and-ci.md`, `usage-rules.md`):**
+  - Bumped CLI version and README badge to `0.2.0` and documented undecided comparison gating and one-sided multi-run warnings.
+
+### Tests
+
+- Updated existing small-sample/CSV/version tests and added unit (`tests/compare_test.odin`, `tests/packet_test.odin`) and 4-layer ATDD specs (`specs/comparison_spec_test.odin`, `specs/cli_e2e_spec_test.odin`) covering exact HL thresholds (`2v7`, `3v4`, `2v8`, `3v5`), summary-only Welch fallback, one-sided multi-run warnings, CLI `--fail-on-regression` exit code `3` vs `1` precedence, `suite_exit_code`, pipeline clock override respect, and combined `obench` JSON sub-ns import preservation under `ODIN_TEST_FAIL_ON_BAD_MEMORY=true`.
+
 ## [0.1.4] - 2026-11-22
 
 ### Changed
